@@ -165,6 +165,28 @@ PIPELINES = {
             "recall vs our YOLO-seg reference: 65-86% depending on resolution."
         ),
     ),
+    # SAM 3.1 student variant — text-prompt capable, ~4x smaller than Option A
+    # (full SAM3 text encoder). Projected for a 1-concept text query; scales
+    # linearly with concepts: +20.6 ms per additional concept on 5090, or
+    # +292 ms on NPU Mid (BW-scaled).
+    "efficientsam3p1_es_ev_s_bf16": VisionPipeline(
+        key="efficientsam3p1_es_ev_s_bf16",
+        label="EfficientSAM3.1 ES-EV-S BF16 (text-prompt, SAM 3.1 student)",
+        description=(
+            "SAM 3.1 distilled student: EfficientViT-S (31M) vision + MobileCLIP-S0 "
+            "(43M) text encoder, 106M total — 4x smaller than the Option-A ES-EV-S "
+            "variant. Preserves SAM 3's text-concept prompting natively. Cost shown "
+            "is for a 1-concept text query (set_image + 1 text prompt)."
+        ),
+        # n=1 concept: set_image + 1 × per_prompt (from 5090 measurement, BW-scaled x14.17)
+        edge_ms_720p=428.3, edge_ms_1080p=443.1, edge_ms_4k=522.7,
+        vram_mb=1800,
+        note=(
+            "1-concept text query: ~2.3 FPS @ 720p NPU Mid. Scales linearly — "
+            "n=5 concepts drops to 0.6 FPS; n=20 exhaustive drops to 0.2 FPS. "
+            "Still text-prompt-native (unlike our two-stage stack)."
+        ),
+    ),
     # Community SAM 3 Lite — dropped April 2026, still ~6x faster than SAM 3
     # but nowhere near the shipping TRT stack.
     "efficientsam3_es_ev_s_bf16": VisionPipeline(
