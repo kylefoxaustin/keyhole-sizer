@@ -81,8 +81,11 @@ def _render_pipeline_strip(stages: list[tuple[str, bool]]):
         "background:#6366F1; color:#FFFFFF; border:1.5px solid #6366F1; "
         "font-weight:600;"
     )
+    # "Fixed infrastructure" boxes — always-on pipeline stages that don't vary with
+    # the user's pipeline selection. Bright text on a mid-slate so they read as
+    # "present, supporting" not "disabled/placeholder."
     box_dim = (
-        "background:#1A223B; color:#93A1B5; border:1.5px solid #334155;"
+        "background:#334155; color:#EAEDF4; border:1.5px solid #475569;"
     )
     arrow = (
         '<div style="display:flex; align-items:center; color:#6366F1; '
@@ -294,6 +297,11 @@ st.markdown(
 # Visual pipeline flow — reflects current pipeline + LLM selection
 _render_pipeline_strip(
     _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
+)
+st.caption(
+    "🟪 Purple = stages that change with your pipeline / LLM choice. "
+    "⬛ Slate = always-on infrastructure (ingest, storage). "
+    "Every stage is running — the colors just flag where your controls take effect."
 )
 
 # Visual break so the metric cards below read as "outputs of the whole
