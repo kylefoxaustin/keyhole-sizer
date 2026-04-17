@@ -175,8 +175,8 @@ with tab_overview:
 
     with left:
         st.subheader("Pipeline timing (current config)")
+        fig = go.Figure()
         if "yolo_ms" in vision and "clip_ms" in vision:
-            fig = go.Figure()
             fig.add_trace(go.Bar(
                 x=["YOLO-seg (batched)", "CLIP component"],
                 y=[vision["yolo_ms"], vision["clip_ms"]],
@@ -184,16 +184,22 @@ with tab_overview:
                 text=[f"{vision['yolo_ms']:.1f} ms", f"{vision['clip_ms']:.1f} ms"],
                 textposition="auto",
             ))
-            fig.update_layout(
-                yaxis_title="Edge ms per batch cycle",
-                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4"),
-                height=300, margin=dict(l=40, r=20, t=20, b=40),
-            )
-            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Pipeline timing breakdown unavailable for this pipeline choice.")
-
+            # Fallback — single-unit pipelines (SAM 3, ES-Small alone) still get a bar
+            fig.add_trace(go.Bar(
+                x=[f"{pipeline.label} (total)"],
+                y=[vision["per_stream_ms"]],
+                marker=dict(color=["#F59E0B"]),
+                text=[f"{vision['per_stream_ms']:.1f} ms"],
+                textposition="auto",
+            ))
+        fig.update_layout(
+            yaxis_title="Edge ms per batch cycle",
+            plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+            font=dict(color="#EAEDF4"),
+            height=300, margin=dict(l=40, r=20, t=20, b=40),
+        )
+        st.plotly_chart(fig, use_container_width=True)
         st.caption(pipeline.note)
 
     with right:

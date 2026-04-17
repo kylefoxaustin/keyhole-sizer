@@ -136,11 +136,11 @@ PIPELINES = {
     # Mid-era: EfficientSAM-Small + CLIP
     "essmall_fp8": VisionPipeline(
         key="essmall_fp8",
-        label="EfficientSAM-Small FP8 (torchao)",
-        description="26M-param ViT mask model + CLIP; activation FP8 halves BW.",
+        label="EfficientSAM-Small FP8 (mask model only)",
+        description="26M-param ViT mask model, 94 of 95 Linears quantized to FP8 via torchao. Measured solo — no detector, no CLIP.",
         edge_ms_720p=202.7, edge_ms_1080p=205.6, edge_ms_4k=222.2,
         vram_mb=1100,
-        note="Edge ~5 FPS. Second-generation; beaten by Hybrid V2.",
+        note="Mask-only measurement from the FP8 activation-quant bake-off (pre-Hybrid-V2 era). Beaten end-to-end by TRT pipelines.",
     ),
     # Hybrid V2 era (YOLO-seg + CLIP)
     "hybrid_v2_bf16": VisionPipeline(
