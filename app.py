@@ -293,16 +293,26 @@ if llm_saturated:
 # ───────── Top metric row ─────────
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(
-    label=f"Vision FPS / stream ({n_streams}-stream {resolution})",
+    label="Per-camera FPS",
     value=f"{vision_fps_effective:.1f}",
     delta=(f"{vision_fps_effective - vision['fps_per_stream']:+.1f}  under LLM"
-            if llm_enabled else f"{vision['total_fps']:.1f} total"),
-    delta_color="inverse" if llm_enabled else "normal",
+            if llm_enabled else f"{n_streams} streams @ {resolution}"),
+    delta_color="inverse" if llm_enabled else "off",
+    help=(
+        "Frame rate **each individual camera stream delivers** — what the "
+        "end user sees. Targets: **30 FPS** real-time, **15 FPS** "
+        "surveillance-grade."
+    ),
 )
 c2.metric(
-    label="Total system FPS",
+    label="Aggregate FPS",
     value=f"{vision_fps_effective * n_streams:.0f}",
-    delta=f"{n_streams} streams",
+    delta=f"{n_streams} streams total",
+    delta_color="off",
+    help=(
+        "Sum of frames/sec **across all cameras** — the NPU's total "
+        "throughput capacity. `per-camera FPS × n_streams`."
+    ),
 )
 c3.metric(
     label="Memory fit",
