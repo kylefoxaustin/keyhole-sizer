@@ -122,6 +122,29 @@ with st.sidebar:
                  "categories — pick the one your deployment will actually see.",
         )
         st.caption(WORKLOAD_CATEGORIES[llm_workload]["description"])
+
+        with st.expander("ℹ️ About these workload patterns"):
+            st.markdown(
+                "All five patterns were measured by the **Skippy** project "
+                "(personal-ai-framework) against their Kyle-merged QLoRA "
+                "Q4_K_M deployment on an RTX 5090, 2026-04-17. Decode tok/s "
+                "spans **3.6 → 222 across real traffic** — a ~60× range that "
+                "single-number vendor benchmarks don't capture."
+            )
+            for key, wc in WORKLOAD_CATEGORIES.items():
+                st.markdown(
+                    f"**{wc['label']}** &nbsp;·&nbsp; *n={wc['n']}*  \n"
+                    f"{wc['description']}  \n"
+                    f"5090 reference: **{wc['decode_5090_tok_s_p50']:.1f} tok/s decode (p50)**, "
+                    f"TTFT **{wc['ttft_5090_sec_p50']*1000:.0f} ms** (p50)  \n"
+                    f"🔸 *{wc['note']}*"
+                )
+            st.markdown(
+                "---\n"
+                "**How the sizer scales these:** plain-chat is the reference (≈ vendor 1K-prompt "
+                "benchmark condition). Each category's multiplier (measured on 5090) is applied "
+                "to the target NPU's plain-chat projection. Both decode tok/s and TTFT are scaled."
+            )
         queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1)
         answer_kind = st.radio("Typical answer length",
                                 ("short", "rag"),
@@ -367,10 +390,20 @@ with tab_overview:
 
         # ───── Real-workload distribution row ─────
         st.markdown("#### Real-workload distribution — what the single vendor number hides")
+        st.caption("Hover each bar for the category's description, sample size, and measurement caveat.")
         dist = workload_distribution_on_hw(hw, quant)
         labels = [d["label"] + f"  (n={d['n']})" for d in dist]
         values = [d["decode_tok_s"] for d in dist]
         colors = ["#6366F1" if d["key"] == llm_workload else "#374151" for d in dist]
+
+        # Per-bar custom data for the hover popup
+        customdata = [[
+            d["description"],
+            d["note"],
+            d["n"],
+            d["ttft_sec"] * 1000,
+            d["short_answer_sec"],
+        ] for d in dist]
 
         fig_dist = go.Figure()
         fig_dist.add_trace(go.Bar(
@@ -381,6 +414,20 @@ with tab_overview:
             textposition="outside",
             textfont=dict(size=14, color="#EAEDF4"),
             cliponaxis=False,
+            customdata=customdata,
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "<br>"
+                "Decode: <b>%{x:.2f} tok/s</b><br>"
+                "TTFT 1K prompt: %{customdata[3]:.0f} ms<br>"
+                "Short 200-tok answer: %{customdata[4]:.1f} s<br>"
+                "<br>"
+                "<i>%{customdata[0]}</i><br>"
+                "Sample size: n = %{customdata[2]}<br>"
+                "<br>"
+                "⚠ %{customdata[1]}"
+                "<extra></extra>"
+            ),
         ))
         fig_dist.update_layout(
             xaxis_title=f"Decode tok/s on {hw.name} @ {quant}",
@@ -390,6 +437,12 @@ with tab_overview:
                         title_font=dict(size=13, color="#EAEDF4")),
             yaxis=dict(tickfont=dict(size=13, color="#EAEDF4"),
                         automargin=True),
+            hoverlabel=dict(
+                bgcolor="#1A223B",
+                bordercolor="#6366F1",
+                font=dict(size=13, color="#EAEDF4", family="system-ui"),
+                align="left",
+            ),
             height=300, margin=dict(l=20, r=40, t=10, b=40),
             showlegend=False,
         )
