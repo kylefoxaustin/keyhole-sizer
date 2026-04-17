@@ -142,6 +142,29 @@ PIPELINES = {
         vram_mb=1100,
         note="Mask-only measurement from the FP8 activation-quant bake-off (pre-Hybrid-V2 era). Beaten end-to-end by TRT pipelines.",
     ),
+    # One-model open-vocab simplification — Ultralytics YOLOE-26 collapses
+    # our two-stage YOLO-seg + CLIP pipeline into a single model with a
+    # 4585-class built-in vocab. Measured at plain PyTorch FP16 on 5090
+    # (no TRT, no FP8 — representing the pre-optimization ceiling for a
+    # single-model alternative). BW-scaled to NPU Mid (x14.17).
+    "yoloe26_s_pf_fp16": VisionPipeline(
+        key="yoloe26_s_pf_fp16",
+        label="YOLOE-26S prompt-free FP16 (one-model open-vocab)",
+        description=(
+            "Ultralytics YOLOE-26S-PF (Jan 2026, AGPL-3.0): 16M params, "
+            "4585-class built-in vocab, box + mask + label per frame in ONE model. "
+            "Replaces our two-stage YOLO-seg + CLIP pipeline. Measured PyTorch FP16 "
+            "on 5090 (no TRT path explored yet)."
+        ),
+        edge_ms_720p=75.5, edge_ms_1080p=83.3, edge_ms_4k=90.1,
+        vram_mb=360,
+        note=(
+            "13 FPS @ 720p NPU Mid — half real-time with ONE model instead of two. "
+            "Still 3x slower than our TRT FP8 two-stage stack (36 FPS), but untouched "
+            "by TRT/FP8 optimization. If TRT'd, could match or exceed shipping. Box "
+            "recall vs our YOLO-seg reference: 65-86% depending on resolution."
+        ),
+    ),
     # Community SAM 3 Lite — dropped April 2026, still ~6x faster than SAM 3
     # but nowhere near the shipping TRT stack.
     "efficientsam3_es_ev_s_bf16": VisionPipeline(
