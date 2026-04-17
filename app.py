@@ -190,6 +190,7 @@ tab_overview, tab_streams, tab_duty, tab_detail = st.tabs(
 )
 
 with tab_overview:
+    st.markdown("### Vision")
     left, right = st.columns([1, 1])
 
     with left:
@@ -248,6 +249,84 @@ with tab_overview:
             height=300, margin=dict(l=40, r=60, t=20, b=40),
         )
         st.plotly_chart(fig2, use_container_width=True)
+
+    # ───── LLM timing row (only when LLM is enabled) ─────
+    if llm_enabled:
+        st.markdown("---")
+        st.markdown(f"### LLM — Qwen3-30B-A3B MoE @ {quant}")
+        llm_left, llm_right = st.columns([1, 1])
+
+        with llm_left:
+            st.subheader("LLM timing (ms) — prefill + decode stacked")
+            # Compute per-answer-mode prefill + decode for the current HW+quant
+            short_prefill_ms = llm["ttft_1k_sec"] * 1000 * 0.2   # 200 token prompt approx
+            # Actually we should use a consistent prefill model. Kyle's LLM bake-off
+            # measured ttft_1k_sec explicitly for 1K prompts. For short-answer we
+            # assume a ~1K prompt (typical chat), for RAG we use 8K.
+            short_prefill_ms = llm["ttft_1k_sec"] * 1000           # 1K prompt
+            short_decode_ms = (200 / llm["decode_tok_s"]) * 1000 if llm["decode_tok_s"] > 0 else 0
+            rag_prefill_ms = llm["rag_prefill_sec"] * 1000
+            rag_decode_ms = llm["rag_decode_sec"] * 1000
+
+            fig_llm = go.Figure()
+            fig_llm.add_trace(go.Bar(
+                name="Prefill", x=["Short (1K prompt, 200 tok)", "RAG (8K+2K)"],
+                y=[short_prefill_ms, rag_prefill_ms],
+                marker=dict(color="#F59E0B"),
+                text=[f"{short_prefill_ms:.0f} ms", f"{rag_prefill_ms:.0f} ms"],
+                textposition="inside",
+            ))
+            fig_llm.add_trace(go.Bar(
+                name="Decode", x=["Short (1K prompt, 200 tok)", "RAG (8K+2K)"],
+                y=[short_decode_ms, rag_decode_ms],
+                marker=dict(color="#6366F1"),
+                text=[f"{short_decode_ms:.0f} ms", f"{rag_decode_ms:.0f} ms"],
+                textposition="inside",
+            ))
+            fig_llm.update_layout(
+                barmode="stack",
+                yaxis_title="Per-answer latency (ms)",
+                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+                font=dict(color="#EAEDF4"),
+                legend=dict(orientation="h", y=-0.2),
+                height=320, margin=dict(l=40, r=20, t=20, b=40),
+            )
+            st.plotly_chart(fig_llm, use_container_width=True)
+            st.caption(
+                f"Current answer mode: **{answer_kind}**  •  "
+                f"TTFT 1K = **{llm['ttft_1k_sec']*1000:.0f} ms**  •  "
+                f"decode = **{llm['decode_tok_s']:.1f} tok/s**"
+            )
+
+        with llm_right:
+            st.subheader("LLM decode tok/s vs NPU tier")
+            tier_llm = []
+            for name, t_hw in TIERS.items():
+                l = project_llm(t_hw, quant)
+                tier_llm.append(dict(tier=name, tok_s=l["decode_tok_s"]))
+            if hw.name not in TIERS:
+                tier_llm.append(dict(tier=hw.name, tok_s=llm["decode_tok_s"]))
+            df_llm = pd.DataFrame(tier_llm)
+
+            fig_llm_tier = go.Figure()
+            fig_llm_tier.add_trace(go.Bar(
+                x=df_llm["tier"], y=df_llm["tok_s"],
+                marker=dict(color=["#EF4444", "#22C55E", "#6366F1", "#F59E0B"][:len(df_llm)]),
+                text=[f"{t:.1f} tok/s" for t in df_llm["tok_s"]],
+                textposition="auto",
+            ))
+            fig_llm_tier.update_layout(
+                yaxis_title="Decode tok/s",
+                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+                font=dict(color="#EAEDF4"),
+                height=320, margin=dict(l=40, r=20, t=20, b=40),
+            )
+            st.plotly_chart(fig_llm_tier, use_container_width=True)
+            st.caption(
+                "Decode is bandwidth-bound on active params × bytes/param. "
+                "MoE wins: only 3B of the 30B total are loaded per token. "
+                "Q4_K_M / Q5_K_M / Q8_0 scale inversely with bytes/param."
+            )
 
 with tab_streams:
     st.subheader(f"Per-stream FPS vs concurrent stream count — {pipeline.label}")
