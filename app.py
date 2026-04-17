@@ -240,6 +240,10 @@ if llm_enabled:
 else:
     llm_summary = " · LLM **off**"
 
+# ── Current-config header (what the user selected) ──
+st.markdown(
+    f"##### 🔧 Configuration"
+)
 st.markdown(
     f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
     f"**{n_streams}** stream{'s' if n_streams != 1 else ''} "
@@ -251,6 +255,15 @@ st.markdown(
 _render_pipeline_strip(
     _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
 )
+
+# Visual break so the metric cards below read as "outputs of the whole
+# pipeline", not as "one metric per block above". The horizontal rule +
+# section label explicitly re-anchor the reader.
+st.markdown(
+    "<hr style='border:none; border-top:1px solid #334155; margin:20px 0 4px;'>",
+    unsafe_allow_html=True,
+)
+st.markdown("##### 📊 Projected results — the whole pipeline combined")
 
 vision_fps_effective = vision["fps_per_stream"]
 duty_cycle = 0.0
