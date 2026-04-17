@@ -62,6 +62,39 @@ To set up your own deployment:
    when absent (e.g. local dev via `streamlit run app.py`), the gate is
    bypassed so you don't have to type it during development.
 
+## Platform-budget CSV export
+
+The sizer can emit **additive platform-budget CSV rows** for feeding into an
+SoC-level spreadsheet (total NPU duty cycle, DDR GB/s consumed, MB resident,
+power). Three ways to get the data:
+
+1. **UI button** — every rendered config has a **💾 Download platform budget
+   CSV (current config)** button that emits a single vision row + (if
+   enabled) a single LLM row for the currently-selected config.
+2. **CLI** — `scripts/export_platform_budget.py` emits a row for any
+   combination of pipeline × HW × resolution × streams × optional LLM.
+   Run `python scripts/export_platform_budget.py --list` for valid keys.
+3. **Full matrix** — `scripts/export_platform_matrix.py` iterates every
+   preset HW tier × pipeline × resolution × stream count (1/2/4/8/16) +
+   every LLM quant × workload, writing `data/platform_budget_matrix.csv`
+   (~585 rows). Custom HW is skipped (use the UI download for custom).
+
+**Schema** (per row = one workload slot):
+- `ss_*` columns (duty cycle, DDR GB/s, TOPS, MB resident, watts,
+  throughput) are **additive** across rows at the platform level.
+- `peak_*` columns (per-frame ms, peak GB/s, peak TOPS) are NOT additive —
+  they're per-workload ceilings.
+- `hw_*` columns are duplicated on every row so each row is self-contained.
+- `sizer_commit_sha` + `export_timestamp_iso` let you trace a row back to
+  the sizer revision that emitted it.
+
+**Caveats baked into the CSV header comments** (read before using for procurement):
+- Power is TDP × duty-cycle approximation, NOT measured per-workload.
+- NPU Low/Mid/High numbers are bandwidth-scaled from RTX 5090 measurements,
+  NOT measured on actual NPU silicon.
+
+**Consume in pandas:** `pd.read_csv(path, comment='#')`.
+
 ## What you can tune
 
 **Hardware** (sidebar):

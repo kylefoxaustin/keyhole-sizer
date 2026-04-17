@@ -405,6 +405,35 @@ else:
 
 st.markdown("---")
 
+# ───────── Platform-budget CSV download (current config) ─────────
+from sizer.platform_budget import (
+    vision_workload_row, llm_workload_row, rows_to_csv_str,
+)
+
+_budget_rows: list[dict] = [
+    vision_workload_row(pipeline, hw, resolution, n_streams=n_streams)
+]
+if llm_enabled:
+    _budget_rows.append(llm_workload_row(
+        hw, quant, workload=llm_workload,
+        queries_per_minute=queries_per_min,
+        answer_kind=answer_kind,
+    ))
+
+_budget_csv = rows_to_csv_str(_budget_rows)
+_hw_slug = hw.name.lower().replace(" ", "_")
+st.download_button(
+    label="💾 Download platform budget CSV (current config)",
+    data=_budget_csv,
+    file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
+    mime="text/csv",
+    help=(
+        "CSV row per workload (vision + LLM if enabled). ss_* columns are "
+        "additive across rows at the platform level; peak_* columns are not. "
+        "Read the `#` header comments for caveats."
+    ),
+)
+
 # ───────── Tabs: charts + detail tables ─────────
 tab_overview, tab_streams, tab_duty, tab_detail = st.tabs(
     ["📊 Overview", "🎥 Stream scaling", "⚖ Duty-cycle", "🔎 Detail"]
