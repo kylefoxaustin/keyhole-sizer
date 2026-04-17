@@ -61,9 +61,14 @@ with st.sidebar:
         bw_eff = st.slider("Bandwidth efficiency", 0.50, 0.95, 0.80, 0.01,
                             help="Fraction of theoretical BW realized on real workloads. "
                                  "0.80 is typical for modern NPUs.")
-        tops_bf16 = st.slider("Peak BF16 TOPS", 50, 500, 200, 10)
-        tops_fp8 = st.slider("Peak FP8 TOPS", 50, 1000, int(tops_bf16 * 2), 10,
-                              help="Set to 0 if silicon doesn't support FP8 natively.")
+        # Both sliders share the same 50-1000 range so equal numeric values
+        # sit at equal horizontal positions. FP8 on Blackwell-class silicon
+        # is typically 2× BF16, but some NPUs are 1:1 or even missing FP8 —
+        # decouple the sliders so the user can model either.
+        tops_bf16 = st.slider("Peak BF16 TOPS", 50, 1000, 200, 10)
+        tops_fp8 = st.slider("Peak FP8 TOPS", 0, 1000, min(1000, int(tops_bf16 * 2)), 10,
+                              help="Set to 0 if silicon doesn't support FP8 natively. "
+                                   "Blackwell-class is typically 2× BF16.")
         compute_eff = st.slider("Compute efficiency", 0.40, 0.85, 0.65, 0.01)
         mem_cap = st.slider("DRAM capacity (GB)", 2, 64, 8, 1)
         tdp = st.slider("TDP (W)", 2, 150, 25, 1)
@@ -268,28 +273,43 @@ with tab_overview:
             rag_prefill_ms = llm["rag_prefill_sec"] * 1000
             rag_decode_ms = llm["rag_decode_sec"] * 1000
 
+            # Format ms values with k/s units so tiny bars' labels stay readable
+            def _fmt_ms(ms: float) -> str:
+                if ms >= 10_000:
+                    return f"{ms/1000:.1f} s"
+                if ms >= 1000:
+                    return f"{ms/1000:.2f} s"
+                return f"{ms:.0f} ms"
+
             fig_llm = go.Figure()
             fig_llm.add_trace(go.Bar(
                 name="Prefill", x=["Short (1K prompt, 200 tok)", "RAG (8K+2K)"],
                 y=[short_prefill_ms, rag_prefill_ms],
                 marker=dict(color="#F59E0B"),
-                text=[f"{short_prefill_ms:.0f} ms", f"{rag_prefill_ms:.0f} ms"],
-                textposition="inside",
+                text=[_fmt_ms(short_prefill_ms), _fmt_ms(rag_prefill_ms)],
+                textposition="outside",
+                textfont=dict(size=14, color="#EAEDF4"),
+                cliponaxis=False,
             ))
             fig_llm.add_trace(go.Bar(
                 name="Decode", x=["Short (1K prompt, 200 tok)", "RAG (8K+2K)"],
                 y=[short_decode_ms, rag_decode_ms],
                 marker=dict(color="#6366F1"),
-                text=[f"{short_decode_ms:.0f} ms", f"{rag_decode_ms:.0f} ms"],
+                text=[_fmt_ms(short_decode_ms), _fmt_ms(rag_decode_ms)],
                 textposition="inside",
+                insidetextanchor="middle",
+                textfont=dict(size=16, color="#FFFFFF"),
             ))
             fig_llm.update_layout(
                 barmode="stack",
                 yaxis_title="Per-answer latency (ms)",
                 plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4"),
-                legend=dict(orientation="h", y=-0.2),
-                height=320, margin=dict(l=40, r=20, t=20, b=40),
+                font=dict(color="#EAEDF4", size=13),
+                legend=dict(orientation="h", y=-0.18, font=dict(size=13)),
+                xaxis=dict(tickfont=dict(size=13, color="#EAEDF4")),
+                yaxis=dict(tickfont=dict(size=12, color="#EAEDF4"),
+                            title_font=dict(size=13, color="#EAEDF4")),
+                height=360, margin=dict(l=60, r=30, t=40, b=60),
             )
             st.plotly_chart(fig_llm, use_container_width=True)
             st.caption(
