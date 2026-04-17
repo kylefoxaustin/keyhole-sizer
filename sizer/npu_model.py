@@ -314,15 +314,19 @@ def project_vision(
         res_adj = {"720p": 1.0, "1080p": 1.07, "4K": 1.21}[resolution]
         yolo_batch_ms_hw *= res_adj
 
-        # CLIP portion — cost is N × single_clip_ms / N (each stream pays its own
-        # CLIP invocation per frame or per Nth frame). For 1-Hz CLIP pipelines,
-        # the CLIP amortization is already baked in; scale by bandwidth.
+        # CLIP portion. Each stream fires CLIP on some schedule (every frame,
+        # or every 30th frame for 1-Hz). Per batch of N frames (one per stream),
+        # the NPU must amortize all per-stream CLIP invocations sequentially.
         clip_component_ms = 0.0
         if pipeline.key == "trt_fp8_1hz_clip":
-            # 0.5 ms amortized per stream per frame × n_streams CLIP bursts at 1 Hz
-            # They round-robin so the per-batch cost is ~N×0.5 ms, which spread over
-            # N-frame batches = 0.5 ms/frame. Effectively constant.
-            clip_component_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID / 30.0, hw, reference)
+            # 1 Hz = each stream calls CLIP once per 30 frames. Per batch of N
+            # frames, expected CLIP calls = N/30, so per-batch CLIP cost at the
+            # NPU = (N/30) × 15.1 ms. Per-FRAME amortized cost is 0.5 ms,
+            # independent of N — but per-BATCH cost scales with N, which is
+            # what we add to batch_ms here.
+            clip_component_ms = scale_edge_ms(
+                CLIP_FP8_EDGE_MS_NPU_MID * n_streams / 30.0, hw, reference
+            )
         elif pipeline.key == "trt_fp8_every_frame":
             # CLIP runs on every stream every frame — stays linear in N
             clip_component_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID * n_streams, hw, reference)

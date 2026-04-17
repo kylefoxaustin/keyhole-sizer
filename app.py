@@ -362,6 +362,16 @@ with tab_overview:
         )
         st.plotly_chart(fig, use_container_width=True)
         st.caption(pipeline.note)
+        if pipeline.key in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
+                             "hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
+                             "yolo_only_fp8"}:
+            st.caption(
+                "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
+                "fixed **640²** input and CLIP at **224²**. Source resolution "
+                "only affects FFmpeg decode + resize — a small fraction of the "
+                "inference budget. Measured in the Keyhole bake-off: 4K is "
+                "only **~21% slower** than 720p, not 9× slower."
+            )
 
     with right:
         st.subheader("Per-stream FPS vs NPU tier")
