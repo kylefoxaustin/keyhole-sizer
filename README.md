@@ -43,6 +43,25 @@ streamlit run app.py
 Browser opens to `http://localhost:8501`. No GPU needed — this app is
 pure projection math on top of already-measured numbers.
 
+## Deployment (Streamlit Community Cloud)
+
+The app is deployed at **share.streamlit.io** with a shared-password gate.
+Auto-redeploys on every push to `main`.
+
+To set up your own deployment:
+
+1. Go to [share.streamlit.io](https://share.streamlit.io), sign in with GitHub,
+   grant access to this repo.
+2. **New app** → pick `kylefoxaustin/keyhole-sizer`, branch `main`,
+   main file `app.py`.
+3. Click **Advanced settings → Secrets** and add:
+   ```toml
+   PASSWORD = "your-shared-password-here"
+   ```
+4. Deploy. The password gate is active whenever the `PASSWORD` secret is set;
+   when absent (e.g. local dev via `streamlit run app.py`), the gate is
+   bypassed so you don't have to type it during development.
+
 ## What you can tune
 
 **Hardware** (sidebar):

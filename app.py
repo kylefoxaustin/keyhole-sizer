@@ -25,6 +25,42 @@ st.set_page_config(
     layout="wide",
 )
 
+
+# ───────────────────────── Shared-password gate ─────────────────────────
+# Password read from Streamlit Cloud secrets (secrets.toml has PASSWORD="...").
+# If no secret is configured (e.g. local dev), the gate is bypassed.
+
+def _password_gate() -> bool:
+    try:
+        expected = st.secrets["PASSWORD"]
+    except (KeyError, FileNotFoundError):
+        return True  # no secret configured → open access (local dev)
+
+    if st.session_state.get("_authed"):
+        return True
+
+    # Minimal login screen
+    st.markdown("### 🎯 keyhole-sizer")
+    st.markdown(
+        "This sandbox is shared-password protected. Enter the access password "
+        "to continue. If you don't have one, ping Kyle."
+    )
+    with st.form("_auth", clear_on_submit=False):
+        pw = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Enter")
+    if submitted:
+        if pw == expected:
+            st.session_state["_authed"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    return False
+
+
+if not _password_gate():
+    st.stop()
+
+
 # ───────────────────────── Header ─────────────────────────
 
 st.title("🎯 keyhole-sizer")
