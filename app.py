@@ -298,11 +298,25 @@ st.markdown(
 _render_pipeline_strip(
     _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
 )
-st.caption(
-    "🟪 Purple = stages that change with your pipeline / LLM choice. "
-    "⬛ Slate = always-on infrastructure (ingest, storage). "
-    "Every stage is running — the colors just flag where your controls take effect."
+_legend_html = (
+    '<div style="display:flex; flex-wrap:wrap; align-items:center; '
+    'gap:20px; margin:4px 0 2px;">'
+    '<div style="display:flex; align-items:center; gap:7px;">'
+    '<span style="display:inline-block; width:16px; height:16px; '
+    'background:#334155; border:1.5px solid #475569; border-radius:3px;"></span>'
+    '<span style="font-size:13px; color:#C8D0E1;">'
+    '<b>Always on</b> &nbsp;— ingest, storage</span></div>'
+    '<div style="display:flex; align-items:center; gap:7px;">'
+    '<span style="display:inline-block; width:16px; height:16px; '
+    'background:#6366F1; border:1.5px solid #6366F1; border-radius:3px;"></span>'
+    '<span style="font-size:13px; color:#C8D0E1;">'
+    '<b>Pipeline stage changes</b> &nbsp;— varies with your choice</span></div>'
+    '</div>'
+    '<div style="font-size:12px; color:#93A1B5; margin-top:4px;">'
+    'Every stage is running — the colors just flag where your controls take effect.'
+    '</div>'
 )
+st.markdown(_legend_html, unsafe_allow_html=True)
 
 # Visual break so the metric cards below read as "outputs of the whole
 # pipeline", not as "one metric per block above". The horizontal rule +
