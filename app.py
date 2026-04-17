@@ -13,8 +13,10 @@ import streamlit as st
 
 from sizer.npu_model import (
     Hardware, TIERS, MEMORY_TYPES, PIPELINES, NPU_MID,
+    WORKLOAD_CATEGORIES,
     describe_hw, project_vision, project_llm,
     theoretical_bandwidth, vision_fps_under_llm_load,
+    workload_distribution_on_hw,
 )
 
 st.set_page_config(
@@ -110,6 +112,16 @@ with st.sidebar:
     if llm_enabled:
         quant = st.selectbox("Qwen3 quantization",
                               ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0)
+        llm_workload = st.selectbox(
+            "LLM workload pattern",
+            options=list(WORKLOAD_CATEGORIES.keys()),
+            format_func=lambda k: WORKLOAD_CATEGORIES[k]["label"],
+            index=0,
+            help="Real-world workload categories measured on Skippy production "
+                 "(n=1-5 per category). Decode tok/s spans 3.6-222 across "
+                 "categories — pick the one your deployment will actually see.",
+        )
+        st.caption(WORKLOAD_CATEGORIES[llm_workload]["description"])
         queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1)
         answer_kind = st.radio("Typical answer length",
                                 ("short", "rag"),
@@ -120,6 +132,7 @@ with st.sidebar:
                                 horizontal=True)
     else:
         quant = "Q4_K_M"
+        llm_workload = "plain_chat"
         queries_per_min = 0.0
         answer_kind = "short"
 
@@ -127,7 +140,7 @@ with st.sidebar:
 
 # Compute projections
 vision = project_vision(pipeline, hw, resolution, n_streams=n_streams)
-llm = project_llm(hw, quant) if llm_enabled else None
+llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
 
 vision_fps_effective = vision["fps_per_stream"]
 duty_cycle = 0.0
@@ -319,10 +332,10 @@ with tab_overview:
             )
 
         with llm_right:
-            st.subheader("LLM decode tok/s vs NPU tier")
+            st.subheader(f"Decode tok/s vs NPU tier — {WORKLOAD_CATEGORIES[llm_workload]['label']}")
             tier_llm = []
             for name, t_hw in TIERS.items():
-                l = project_llm(t_hw, quant)
+                l = project_llm(t_hw, quant, workload=llm_workload)
                 tier_llm.append(dict(tier=name, tok_s=l["decode_tok_s"]))
             if hw.name not in TIERS:
                 tier_llm.append(dict(tier=hw.name, tok_s=llm["decode_tok_s"]))
@@ -333,20 +346,63 @@ with tab_overview:
                 x=df_llm["tier"], y=df_llm["tok_s"],
                 marker=dict(color=["#EF4444", "#22C55E", "#6366F1", "#F59E0B"][:len(df_llm)]),
                 text=[f"{t:.1f} tok/s" for t in df_llm["tok_s"]],
-                textposition="auto",
+                textposition="outside",
+                textfont=dict(size=14, color="#EAEDF4"),
+                cliponaxis=False,
             ))
             fig_llm_tier.update_layout(
                 yaxis_title="Decode tok/s",
                 plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4"),
-                height=320, margin=dict(l=40, r=20, t=20, b=40),
+                font=dict(color="#EAEDF4", size=13),
+                xaxis=dict(tickfont=dict(size=13, color="#EAEDF4")),
+                yaxis=dict(tickfont=dict(size=12, color="#EAEDF4"),
+                            title_font=dict(size=13, color="#EAEDF4")),
+                height=360, margin=dict(l=60, r=30, t=40, b=60),
             )
             st.plotly_chart(fig_llm_tier, use_container_width=True)
             st.caption(
-                "Decode is bandwidth-bound on active params × bytes/param. "
-                "MoE wins: only 3B of the 30B total are loaded per token. "
-                "Q4_K_M / Q5_K_M / Q8_0 scale inversely with bytes/param."
+                f"At {quant}, for this workload category. MoE wins on BW: "
+                "only 3B of 30B total are loaded per token."
             )
+
+        # ───── Real-workload distribution row ─────
+        st.markdown("#### Real-workload distribution — what the single vendor number hides")
+        dist = workload_distribution_on_hw(hw, quant)
+        labels = [d["label"] + f"  (n={d['n']})" for d in dist]
+        values = [d["decode_tok_s"] for d in dist]
+        colors = ["#6366F1" if d["key"] == llm_workload else "#374151" for d in dist]
+
+        fig_dist = go.Figure()
+        fig_dist.add_trace(go.Bar(
+            y=labels, x=values,
+            orientation="h",
+            marker=dict(color=colors),
+            text=[f"{v:.1f} tok/s" for v in values],
+            textposition="outside",
+            textfont=dict(size=14, color="#EAEDF4"),
+            cliponaxis=False,
+        ))
+        fig_dist.update_layout(
+            xaxis_title=f"Decode tok/s on {hw.name} @ {quant}",
+            plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+            font=dict(color="#EAEDF4", size=13),
+            xaxis=dict(tickfont=dict(size=12, color="#EAEDF4"),
+                        title_font=dict(size=13, color="#EAEDF4")),
+            yaxis=dict(tickfont=dict(size=13, color="#EAEDF4"),
+                        automargin=True),
+            height=300, margin=dict(l=20, r=40, t=10, b=40),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_dist, use_container_width=True)
+
+        mx = max(values); mn = min(v for v in values if v > 0)
+        st.caption(
+            f"Current selection highlighted. Spread across real traffic: "
+            f"**{mx:.0f}× worst-case** between plain-chat peak ({mx:.0f} tok/s) "
+            f"and cold-start tail ({mn:.1f} tok/s) — ~60× measured on 5090 by "
+            f"the Skippy project (n=1-5 per category). Edge capacity planning "
+            f"should budget for the RAG / tool-use tail, not the plain-chat peak."
+        )
 
 with tab_streams:
     st.subheader(f"Per-stream FPS vs concurrent stream count — {pipeline.label}")

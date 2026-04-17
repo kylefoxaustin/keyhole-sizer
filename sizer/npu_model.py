@@ -372,13 +372,89 @@ ACTIVE_PARAMS = 3_000_000_000
 GGUF_SIZE_GB = {"Q4_K_M": 18.6, "Q5_K_M": 21.7, "Q8_0": 32.5}
 
 
-def project_llm(hw: Hardware, quant: str = "Q4_K_M") -> dict:
+# ───────────────────────── Real-workload distribution ─────────────────────────
+# Measured by the [docs]/Skippy session on 2026-04-17 against their
+# Kyle-merged QLoRA Q4_K_M deployment on Kyle's RTX 5090. Each category
+# reflects a different traffic pattern observed in real production use. The
+# spread (3.6 → 222 tok/s = ~60x) is far wider than any single vendor
+# benchmark would suggest — the sizer lets the reader pick a category so
+# edge capacity planning can target the worst-real-path (RAG / cold start),
+# not the plain-chat peak.
+WORKLOAD_CATEGORIES = {
+    "plain_chat": {
+        "label": "Plain chat (warm)",
+        "description": "Short prompt, short response — best case.",
+        "ttft_5090_sec_p50": 0.04, "ttft_5090_sec_p95": 0.07,
+        "decode_5090_tok_s_p50": 147.0, "decode_5090_tok_s_p95": 222.0,
+        "n": 3,
+        "note": "Closest match to vendor NPU Q4 1K-prompt benchmarks.",
+    },
+    "long_form_reasoning": {
+        "label": "Long-form generation",
+        "description": "Analytical answer, no tool calls, no heavy retrieval.",
+        "ttft_5090_sec_p50": 0.06, "ttft_5090_sec_p95": 0.14,
+        "decode_5090_tok_s_p50": 215.0, "decode_5090_tok_s_p95": 219.0,
+        "n": 5,
+        "note": "NOT chain-of-thought (Instruct base, not Thinking-mode).",
+    },
+    "tool_use": {
+        "label": "Tool-use (agentic)",
+        "description": "Agent path with multiple internal tool invocations.",
+        "ttft_5090_sec_p50": 0.2, "ttft_5090_sec_p95": 0.2,
+        "decode_5090_tok_s_p50": 69.7, "decode_5090_tok_s_p95": 69.7,
+        "n": 1,
+        "note": "Single sample from calendar-aggregation UI test (5 tool calls internal). End-to-end incl. orchestration.",
+    },
+    "rag_long_context": {
+        "label": "RAG / long context (~5K prompt)",
+        "description": "Big context; KV re-attention collapses decode.",
+        "ttft_5090_sec_p50": 5.22, "ttft_5090_sec_p95": 5.23,
+        "decode_5090_tok_s_p50": 10.7, "decode_5090_tok_s_p95": 34.0,
+        "n": 5,
+        "note": "Prefill stress proxy (no real retrieval — context stuffed). Decode collapses when KV grows — this is the tail to budget for.",
+    },
+    "cold_start": {
+        "label": "Cold start (first call)",
+        "description": "One-time startup tax — weight load + cache warmup.",
+        "ttft_5090_sec_p50": 0.70, "ttft_5090_sec_p95": 0.70,
+        "decode_5090_tok_s_p50": 5.6, "decode_5090_tok_s_p95": 5.6,
+        "n": 1,
+        "note": "n=1, ±30% variance. One-off event, not steady-state.",
+    },
+}
+
+# Reference workload for scaling — plain-chat on 5090 is closest to the
+# "1K prompt, short response" condition under which vendor NPU Q4 benchmarks
+# were measured. Multipliers from this reference transfer to any NPU.
+_REF_WORKLOAD = "plain_chat"
+
+
+def workload_multiplier(category: str) -> dict:
+    """Ratio of a workload category's measured 5090 numbers vs the reference
+    (plain_chat). Used to scale any NPU's plain-chat-derived projection to
+    that workload category's real-world behavior.
+    """
+    ref = WORKLOAD_CATEGORIES[_REF_WORKLOAD]
+    wc = WORKLOAD_CATEGORIES[category]
+    return {
+        "decode_p50_mult": wc["decode_5090_tok_s_p50"] / ref["decode_5090_tok_s_p50"],
+        "decode_p95_mult": wc["decode_5090_tok_s_p95"] / ref["decode_5090_tok_s_p95"],
+        "ttft_p50_mult":   wc["ttft_5090_sec_p50"]   / ref["ttft_5090_sec_p50"],
+    }
+
+
+def project_llm(hw: Hardware, quant: str = "Q4_K_M",
+                 workload: str = "plain_chat") -> dict:
     """Project LLM decode tok/s + TTFT for Qwen3-30B-A3B on `hw`.
 
     If hw has `measured_llm_q4_decode_tok_s`, use it directly (vendor actual);
     scale to other quants by (Q4 bytes/param) / (quant bytes/param). If not,
     fall back to: ceiling = effective_BW / (active_params × bytes_per_param)
     × reference efficiency drawn from NPU Mid's empirical efficiency (0.60).
+
+    `workload` ∈ WORKLOAD_CATEGORIES. The vendor Q4 benchmark is a
+    plain-chat-like condition; other categories apply the 5090-measured
+    multiplier to both decode and TTFT.
     """
     bpp = BYTES_PER_PARAM[quant]
     active_bytes = ACTIVE_PARAMS * bpp
@@ -387,21 +463,27 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M") -> dict:
     if hw.measured_llm_q4_decode_tok_s is not None:
         # Use vendor-measured Q4_K_M and scale to other quants by byte ratio
         q4_bpp = BYTES_PER_PARAM["Q4_K_M"]
-        decode_tok_s = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
-        ttft_1k_sec = hw.measured_llm_ttft_1k_sec
+        base_decode = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
+        base_ttft = hw.measured_llm_ttft_1k_sec
     else:
         # Fall back to NPU-Mid-class efficiency (~60% of BW ceiling)
         efficiency = 0.60
-        decode_tok_s = decode_ceiling * efficiency
-        # TTFT: scale NPU Mid reference (0.351 s) by compute ratio
+        base_decode = decode_ceiling * efficiency
         compute_ratio = hw.effective_tops_bf16 / NPU_MID.effective_tops_bf16
-        ttft_1k_sec = NPU_MID.measured_llm_ttft_1k_sec / max(compute_ratio, 0.01)
+        base_ttft = NPU_MID.measured_llm_ttft_1k_sec / max(compute_ratio, 0.01)
+
+    # Apply the selected workload's multiplier (vs plain-chat reference)
+    mult = workload_multiplier(workload)
+    decode_tok_s = base_decode * mult["decode_p50_mult"]
+    ttft_1k_sec = base_ttft * mult["ttft_p50_mult"]
 
     gguf_size = GGUF_SIZE_GB[quant]
-    fits = gguf_size + 2 < hw.mem_capacity_gb   # +2 GB KV/compute buffers
+    fits = gguf_size + 2 < hw.mem_capacity_gb
 
-    # RAG worst case: 8K prompt + 2K response
-    rag_prefill_sec = 8192 / (1000 / (ttft_1k_sec * 1000))   # tok_s = 1000 / (ttft × 1000) … simplify
+    # RAG worst case: 8K prompt + 2K response. The workload-category TTFT
+    # multiplier already captures the prefill-at-long-context penalty, so
+    # using it here gives a realistic ballpark even if the user selected a
+    # category other than rag_long_context.
     rag_prefill_sec = 8192 * ttft_1k_sec / 1000
     rag_decode_sec = 2048 / decode_tok_s if decode_tok_s > 0 else float("inf")
     rag_total_sec = rag_prefill_sec + rag_decode_sec
@@ -411,16 +493,41 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M") -> dict:
     return {
         "hw": hw.name,
         "quant": quant,
+        "workload": workload,
+        "workload_label": WORKLOAD_CATEGORIES[workload]["label"],
         "gguf_size_gb": gguf_size,
         "fits_in_memory": fits,
         "decode_ceiling_tok_s": decode_ceiling,
         "decode_tok_s": decode_tok_s,
+        "base_decode_plain_chat_tok_s": base_decode,   # for reference / charts
         "ttft_1k_sec": ttft_1k_sec,
+        "base_ttft_plain_chat_sec": base_ttft,
         "short_answer_sec": short_answer_sec,
         "rag_prefill_sec": rag_prefill_sec,
         "rag_decode_sec": rag_decode_sec,
         "rag_total_sec": rag_total_sec,
     }
+
+
+def workload_distribution_on_hw(hw: Hardware, quant: str = "Q4_K_M") -> list[dict]:
+    """For each WORKLOAD_CATEGORY, compute the projected decode tok/s and
+    TTFT on `hw` at the given quant. Used to render the spread chart."""
+    out = []
+    for key, wc in WORKLOAD_CATEGORIES.items():
+        p = project_llm(hw, quant, workload=key)
+        out.append({
+            "key": key,
+            "label": wc["label"],
+            "description": wc["description"],
+            "note": wc["note"],
+            "n": wc["n"],
+            "decode_tok_s": p["decode_tok_s"],
+            "ttft_sec": p["ttft_1k_sec"],
+            "short_answer_sec": p["short_answer_sec"],
+        })
+    # Sort fastest → slowest decode so the chart reads top-to-bottom
+    out.sort(key=lambda d: d["decode_tok_s"], reverse=True)
+    return out
 
 
 # ───────────────────────── Duty-cycle trade-off ─────────────────────────
