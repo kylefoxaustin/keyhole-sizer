@@ -154,15 +154,35 @@ PIPELINES = {
             "Ultralytics YOLOE-26S-PF (Jan 2026, AGPL-3.0): 16M params, "
             "4585-class built-in vocab, box + mask + label per frame in ONE model. "
             "Replaces our two-stage YOLO-seg + CLIP pipeline. Measured PyTorch FP16 "
-            "on 5090 (no TRT path explored yet)."
+            "on 5090."
         ),
         edge_ms_720p=75.5, edge_ms_1080p=83.3, edge_ms_4k=90.1,
         vram_mb=360,
         note=(
             "13 FPS @ 720p NPU Mid — half real-time with ONE model instead of two. "
-            "Still 3x slower than our TRT FP8 two-stage stack (36 FPS), but untouched "
-            "by TRT/FP8 optimization. If TRT'd, could match or exceed shipping. Box "
-            "recall vs our YOLO-seg reference: 65-86% depending on resolution."
+            "Still 3x slower than our TRT FP8 two-stage stack (36 FPS). TRT-FP8 on "
+            "YOLOE-26 only buys ~17% speedup (see 'yoloe26_s_pf_trt_fp8' entry) — "
+            "gap is STRUCTURAL, not optimization-addressable. Box recall 65-86%."
+        ),
+    ),
+    # TRT FP8 port of YOLOE-26S-PF — we hypothesized this would close the 3x gap
+    # to our two-stage shipping stack, but the negative result is informative:
+    # YOLOE-26 was already well-optimized in PyTorch, so TRT gives ~17% not 3x.
+    "yoloe26_s_pf_trt_fp8": VisionPipeline(
+        key="yoloe26_s_pf_trt_fp8",
+        label="YOLOE-26S prompt-free TRT FP8 (optimized ceiling)",
+        description=(
+            "TensorRT FP16+BF16+FP8 engine built from the same ONNX, auto-precision. "
+            "Represents the 'fully optimized ceiling' for the one-model approach. "
+            "5090 p50: 4.92 / 5.00 / 5.47 ms at 720p / 1080p / 4K (17% better than PyTorch)."
+        ),
+        edge_ms_720p=69.7, edge_ms_1080p=70.9, edge_ms_4k=77.5,
+        vram_mb=99,
+        note=(
+            "14 FPS @ 720p NPU Mid — fully optimized one-model ceiling. VRAM cut 73% "
+            "(360 -> 99 MB) vs PyTorch, which is the real TRT win. The remaining 2.4x "
+            "gap to shipping (36 FPS) is structural: we run CLIP only 1/30 frames, "
+            "while YOLOE-26 runs its full open-vocab path every frame."
         ),
     ),
     # SAM 3.1 student variant — text-prompt capable, ~4x smaller than Option A
