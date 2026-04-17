@@ -390,9 +390,17 @@ if llm_enabled:
     )
 else:
     c4.metric(
-        label="Bandwidth ratio vs NPU Mid",
+        label="DDR bandwidth ratio vs NPU Mid",
         value=f"{vision['bandwidth_ratio_vs_ref']:.2f}×",
         delta="reference = NPU Mid",
+        delta_color="off",
+        help=(
+            "Ratio of the current hardware's **effective DRAM (LPDDR/GDDR) "
+            "bandwidth** to NPU Mid's. Vision pipelines at these model sizes "
+            "are bandwidth-bound, so edge FPS scales roughly linearly with "
+            "this ratio. Compute is NOT compared here — this is purely the "
+            "off-chip memory-bus ratio (bus width × data rate × efficiency)."
+        ),
     )
 
 st.markdown("---")
