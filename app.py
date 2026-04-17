@@ -125,9 +125,28 @@ vision = project_vision(pipeline, hw, resolution, n_streams=n_streams)
 llm = project_llm(hw, quant) if llm_enabled else None
 
 vision_fps_effective = vision["fps_per_stream"]
+duty_cycle = 0.0
+llm_saturated = False
 if llm_enabled:
+    qps = queries_per_min / 60
+    answer_sec = llm["short_answer_sec"] if answer_kind == "short" else llm["rag_total_sec"]
+    duty_cycle = qps * answer_sec
+    llm_saturated = duty_cycle >= 1.0
     vision_fps_effective = vision_fps_under_llm_load(
         vision["fps_per_stream"], llm, queries_per_min, answer_kind
+    )
+
+# Saturation banner — the LLM request rate alone exceeds what one NPU can deliver.
+if llm_saturated:
+    max_qpm = (60 / answer_sec) if answer_sec > 0 else 0
+    st.error(
+        f"⚠ **NPU oversubscribed by the LLM.** {queries_per_min:.1f} {answer_kind} "
+        f"queries/min × {answer_sec:.1f} s/answer = {duty_cycle*100:.0f}% duty cycle. "
+        f"Vision is starved to 0 FPS and the LLM queue backs up. "
+        f"On {hw.name} at {quant}, the maximum sustainable "
+        f"{'short-answer' if answer_kind == 'short' else 'RAG'} rate is ~**{max_qpm:.1f} "
+        f"queries/min** (100% NPU duty). Reduce query rate, use a lighter "
+        f"answer mode (short vs RAG), upgrade NPU tier, or dedicate a second NPU to the LLM."
     )
 
 # ───────── Top metric row ─────────
