@@ -19,14 +19,24 @@ with a 2 Hz LLM query rate?"**, this is the tool.
 git clone https://github.com/kylefoxaustin/keyhole-sizer.git
 cd keyhole-sizer
 
-# 2. Python venv
+# 2. Option A — reuse an existing venv (if you already have the Keyhole
+#    project's venv, it has streamlit+plotly already):
+source ~/.virtualenvs/keyhole/bin/activate
+
+# 2. Option B — fresh venv with plain stdlib venv:
 python3 -m venv .venv
 source .venv/bin/activate
-
-# 3. Install
 pip install -r requirements.txt
 
-# 4. Launch
+# 2. Option C — virtualenvwrapper:
+mkvirtualenv keyhole-sizer --python=/usr/bin/python3.10
+pip install -r requirements.txt
+#    Note: on some systems virtualenvwrapper + virtualenv 20.x fails to
+#    create the bin/ dir. If `workon keyhole-sizer` gives "no activate
+#    script", remove the half-built env and use Option B instead:
+#       rm -rf ~/.virtualenvs/keyhole-sizer && python3 -m venv .venv
+
+# 3. Launch
 streamlit run app.py
 ```
 
