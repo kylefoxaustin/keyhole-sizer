@@ -35,6 +35,69 @@ st.markdown(
     "`github.com/kylefoxaustin/keyhole`, see `REPRODUCE.md`)."
 )
 
+
+# ───────────────────────── Helper: pipeline strip renderer ─────────────────────────
+
+def _render_pipeline_strip(stages: list[tuple[str, bool]]):
+    """Horizontal pipeline flow mirroring the Keyhole deck's exec summary.
+    Highlighted boxes are indigo; dim boxes are neutral. Arrows between."""
+    box_highlight = (
+        "background:#6366F1; color:#FFFFFF; border:1.5px solid #6366F1; "
+        "font-weight:600;"
+    )
+    box_dim = (
+        "background:#1A223B; color:#93A1B5; border:1.5px solid #334155;"
+    )
+    arrow = (
+        '<div style="display:flex; align-items:center; color:#6366F1; '
+        'font-size:24px; padding:0 4px;">→</div>'
+    )
+    parts = []
+    for i, (label, hl) in enumerate(stages):
+        style = box_highlight if hl else box_dim
+        parts.append(
+            f'<div style="{style} border-radius:10px; padding:10px 14px; '
+            f'min-width:115px; flex:1; text-align:center; font-size:12.5px; '
+            f'line-height:1.35; white-space:pre-line;">{label}</div>'
+        )
+        if i < len(stages) - 1:
+            parts.append(arrow)
+    html = (
+        '<div style="display:flex; flex-wrap:nowrap; align-items:stretch; '
+        f'gap:2px; margin:12px 0 8px;">{"".join(parts)}</div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
+                         llm_workload: str, quant: str) -> list[tuple[str, bool]]:
+    """Build the 5-stage flow based on the user's current selections.
+    Highlight = 'this box is driven by the user's pipeline / LLM choice'."""
+    mapping = {
+        "sam3_bf16":             ("YOLO 11x", False,       "SAM 3 BF16", True),
+        "essmall_fp8":           ("YOLO 11x", False,       "EfficientSAM-Small FP8", True),
+        "hybrid_v2_bf16":        ("YOLO-seg BF16", True,   "CLIP BF16", True),
+        "hybrid_v2_torchao_fp8": ("YOLO-seg BF16", True,   "CLIP FP8 (torchao)", True),
+        "trt_fp8_every_frame":   ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
+        "trt_fp8_1hz_clip":      ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
+        "yolo_only_fp8":         ("YOLO-seg FP8 (TRT)", True, "(no CLIP)", False),
+    }
+    det_label, det_hl, enr_label, enr_hl = mapping.get(
+        pipeline_key, ("?", False, "?", False)
+    )
+    stages: list[tuple[str, bool]] = [
+        ("FFmpeg\ningest", False),
+        (det_label, det_hl),
+        (enr_label, enr_hl),
+        ("SQLite\n+ FTS5", False),
+    ]
+    if llm_enabled:
+        wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
+        stages.append((f"Qwen3-30B-A3B {quant}\n{wl_label}", True))
+    else:
+        stages.append(("NLQ / LLM\n(off)", False))
+    return stages
+
 # ───────────────────────── Sidebar: hardware + workload ─────────────────────────
 
 with st.sidebar:
@@ -125,11 +188,11 @@ with st.sidebar:
 
         with st.expander("ℹ️ About these workload patterns"):
             st.markdown(
-                "All five patterns were measured by the **Skippy** project "
-                "(personal-ai-framework) against their Kyle-merged QLoRA "
-                "Q4_K_M deployment on an RTX 5090, 2026-04-17. Decode tok/s "
-                "spans **3.6 → 222 across real traffic** — a ~60× range that "
-                "single-number vendor benchmarks don't capture."
+                "All five patterns were measured in production against "
+                "**Qwen3-30B-A3B-Instruct-2507** (Q4_K_M GGUF, llama.cpp) on "
+                "an **RTX 5090**. Decode tok/s spans **3.6 → 222 across real "
+                "traffic** — a ~60× range that single-number vendor benchmarks "
+                "don't capture."
             )
             for key, wc in WORKLOAD_CATEGORIES.items():
                 st.markdown(
@@ -141,9 +204,10 @@ with st.sidebar:
                 )
             st.markdown(
                 "---\n"
-                "**How the sizer scales these:** plain-chat is the reference (≈ vendor 1K-prompt "
-                "benchmark condition). Each category's multiplier (measured on 5090) is applied "
-                "to the target NPU's plain-chat projection. Both decode tok/s and TTFT are scaled."
+                "**How the sizer scales these:** *plain chat* is the reference (≈ the 1K-prompt "
+                "condition under which vendor NPU Q4 benchmarks are published). Each category's "
+                "multiplier (measured on 5090) is applied to the target NPU's plain-chat "
+                "projection. Both decode tok/s and TTFT are scaled."
             )
         queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1)
         answer_kind = st.radio("Typical answer length",
@@ -164,6 +228,29 @@ with st.sidebar:
 # Compute projections
 vision = project_vision(pipeline, hw, resolution, n_streams=n_streams)
 llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
+
+# ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
+# Dynamic "Simulating" line reflecting the current selection
+if llm_enabled:
+    wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
+    llm_summary = (
+        f" · LLM **on** — Qwen3-30B-A3B **{quant}**, **{wl_label}** @ "
+        f"**{queries_per_min:.1f} q/min** (**{answer_kind}** answers)"
+    )
+else:
+    llm_summary = " · LLM **off**"
+
+st.markdown(
+    f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
+    f"**{n_streams}** stream{'s' if n_streams != 1 else ''} "
+    f"@ **{resolution}** &nbsp;·&nbsp; "
+    f"**{hw.name}**{llm_summary}"
+)
+
+# Visual pipeline flow — reflects current pipeline + LLM selection
+_render_pipeline_strip(
+    _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
+)
 
 vision_fps_effective = vision["fps_per_stream"]
 duty_cycle = 0.0
@@ -450,10 +537,10 @@ with tab_overview:
 
         mx = max(values); mn = min(v for v in values if v > 0)
         st.caption(
-            f"Current selection highlighted. Spread across real traffic: "
-            f"**{mx:.0f}× worst-case** between plain-chat peak ({mx:.0f} tok/s) "
-            f"and cold-start tail ({mn:.1f} tok/s) — ~60× measured on 5090 by "
-            f"the Skippy project (n=1-5 per category). Edge capacity planning "
+            f"Current selection highlighted. Spread: **{mx/mn:.0f}× worst-case** "
+            f"between plain-chat peak ({mx:.0f} tok/s) and cold-start tail "
+            f"({mn:.1f} tok/s) on this HW + quant. Reference measurements on "
+            f"5090 showed ~60× spread (n=1-5 per category). Edge capacity planning "
             f"should budget for the RAG / tool-use tail, not the plain-chat peak."
         )
 

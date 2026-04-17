@@ -373,13 +373,12 @@ GGUF_SIZE_GB = {"Q4_K_M": 18.6, "Q5_K_M": 21.7, "Q8_0": 32.5}
 
 
 # ───────────────────────── Real-workload distribution ─────────────────────────
-# Measured by the [docs]/Skippy session on 2026-04-17 against their
-# Kyle-merged QLoRA Q4_K_M deployment on Kyle's RTX 5090. Each category
-# reflects a different traffic pattern observed in real production use. The
-# spread (3.6 → 222 tok/s = ~60x) is far wider than any single vendor
-# benchmark would suggest — the sizer lets the reader pick a category so
-# edge capacity planning can target the worst-real-path (RAG / cold start),
-# not the plain-chat peak.
+# Measured in production against Qwen3-30B-A3B-Instruct-2507 (Q4_K_M GGUF,
+# llama.cpp) on an RTX 5090. Each category reflects a different traffic
+# pattern observed in real deployment use. The spread (3.6 → 222 tok/s = ~60×)
+# is far wider than any single vendor benchmark would suggest — the sizer
+# lets the reader pick a category so edge capacity planning can target the
+# worst-real-path (RAG / cold start), not the plain-chat peak.
 WORKLOAD_CATEGORIES = {
     "plain_chat": {
         "label": "Plain chat (warm)",
@@ -399,11 +398,11 @@ WORKLOAD_CATEGORIES = {
     },
     "tool_use": {
         "label": "Tool-use (agentic)",
-        "description": "Agent path with multiple internal tool invocations.",
+        "description": "Agent path — LLM orchestrates multiple internal tool invocations (e.g. data lookups, external APIs, vision tools).",
         "ttft_5090_sec_p50": 0.2, "ttft_5090_sec_p95": 0.2,
         "decode_5090_tok_s_p50": 69.7, "decode_5090_tok_s_p95": 69.7,
         "n": 1,
-        "note": "Single sample from calendar-aggregation UI test (5 tool calls internal). End-to-end incl. orchestration.",
+        "note": "Single sample from a 5-tool-call aggregation test. End-to-end wall-clock including orchestration dead time between tool calls.",
     },
     "rag_long_context": {
         "label": "RAG / long context (~5K prompt)",
