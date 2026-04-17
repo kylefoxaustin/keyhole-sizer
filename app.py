@@ -579,7 +579,7 @@ with tab_overview:
             )
 
         # ───── Real-workload distribution row ─────
-        st.markdown("#### Real-workload distribution — what the single vendor number hides")
+        st.markdown("#### LLM performance across real-workload mixes")
         st.caption("Hover each bar for the category's description, sample size, and measurement caveat.")
         dist = workload_distribution_on_hw(hw, quant)
         labels = [d["label"] + f"  (n={d['n']})" for d in dist]
