@@ -257,10 +257,17 @@ def project_vision(
     base_ms_at_mid = getattr(pipeline, ms_field)
     per_stream_ms = scale_edge_ms(base_ms_at_mid, hw, reference)
 
+    # YOLO + CLIP split (known for the Hybrid V2 / TRT pipelines). At any
+    # N_streams we include this breakdown when we can decompose.
+    known_composed = {
+        "trt_fp8_1hz_clip", "trt_fp8_every_frame",
+        "hybrid_v2_bf16", "hybrid_v2_torchao_fp8", "yolo_only_fp8",
+    }
+
     # Single stream case
     if n_streams <= 1:
         fps_per_stream = 1000 / per_stream_ms if per_stream_ms > 0 else 0
-        return {
+        result = {
             "pipeline": pipeline.key,
             "hw": hw.name,
             "resolution": resolution,
@@ -272,6 +279,26 @@ def project_vision(
             "fits_in_memory": pipeline.vram_mb < hw.mem_capacity_gb * 1024,
             "bandwidth_ratio_vs_ref": bandwidth_ratio(hw, reference),
         }
+        if pipeline.key in known_composed:
+            # YOLO single-stream edge ms at this HW (batch=1 curve)
+            yolo_ms_mid = yolo_batch_edge_ms_npu_mid(1)
+            yolo_ms_hw = scale_edge_ms(yolo_ms_mid, hw, reference)
+            res_adj = {"720p": 1.0, "1080p": 1.07, "4K": 1.21}[resolution]
+            yolo_ms_hw *= res_adj
+            # CLIP contribution — see n_streams>1 branch for same breakdown
+            if pipeline.key == "trt_fp8_1hz_clip":
+                clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID / 30.0, hw, reference)
+            elif pipeline.key == "trt_fp8_every_frame":
+                clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID, hw, reference)
+            elif pipeline.key == "hybrid_v2_bf16":
+                clip_ms = scale_edge_ms(29.8, hw, reference)
+            elif pipeline.key == "hybrid_v2_torchao_fp8":
+                clip_ms = scale_edge_ms(15.1, hw, reference)
+            else:  # yolo_only_fp8
+                clip_ms = 0.0
+            result["yolo_ms"] = yolo_ms_hw
+            result["clip_ms"] = clip_ms
+        return result
 
     # Multi-stream: need YOLO+CLIP ms split. For pipeline keys we know to be
     # composed of YOLO + CLIP, scale each piece independently. Fall back to
