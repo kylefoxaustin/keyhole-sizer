@@ -76,6 +76,7 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
     mapping = {
         "sam3_bf16":             ("YOLO 11x", False,       "SAM 3 BF16", True),
         "essmall_fp8":           ("YOLO 11x", False,       "EfficientSAM-Small FP8", True),
+        "efficientsam3_es_ev_s_bf16": ("YOLO 11x", False,  "EfficientSAM3 ES-EV-S\nBF16", True),
         "hybrid_v2_bf16":        ("YOLO-seg BF16", True,   "CLIP BF16", True),
         "hybrid_v2_torchao_fp8": ("YOLO-seg BF16", True,   "CLIP FP8 (torchao)", True),
         "trt_fp8_every_frame":   ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),

@@ -142,6 +142,25 @@ PIPELINES = {
         vram_mb=1100,
         note="Mask-only measurement from the FP8 activation-quant bake-off (pre-Hybrid-V2 era). Beaten end-to-end by TRT pipelines.",
     ),
+    # Community SAM 3 Lite — dropped April 2026, still ~6x faster than SAM 3
+    # but nowhere near the shipping TRT stack.
+    "efficientsam3_es_ev_s_bf16": VisionPipeline(
+        key="efficientsam3_es_ev_s_bf16",
+        label="EfficientSAM3 ES-EV-S BF16 (community SAM 3 Lite)",
+        description=(
+            "EfficientSAM3 ES-EV-S: 26M-param EfficientViT-B0 vision backbone + "
+            "distilled SAM3 text encoder & decoder (424M total, Apache-2.0). "
+            "5090 measurement scaled to NPU Mid via bandwidth ratio (14.17x). "
+            "SAM3-compatible open-vocab prompting preserved."
+        ),
+        edge_ms_720p=385.4, edge_ms_1080p=629.0, edge_ms_4k=1953.6,
+        vram_mb=1500,
+        note=(
+            "6.5x faster than SAM 3 baseline (0.4 -> 2.6 FPS @ 720p NPU Mid). "
+            "Still ~13x slower than our shipping TRT FP8 stack — unoptimized BF16, "
+            "no TRT path, no FP8. Pre-optimization ceiling for a community lite SAM 3."
+        ),
+    ),
     # Hybrid V2 era (YOLO-seg + CLIP)
     "hybrid_v2_bf16": VisionPipeline(
         key="hybrid_v2_bf16",
