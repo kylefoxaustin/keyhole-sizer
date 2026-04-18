@@ -303,26 +303,20 @@ vision = project_vision(pipeline, hw, resolution, n_streams=n_streams)
 llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
 
 # ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
-# Dynamic "Simulating" line reflecting the current selection
+# Dynamic "Simulating" line reflecting the current selection.
+# HTML form (uses <b> so it renders bold inside an HTML-styled div below).
 if llm_enabled:
     wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
     llm_summary = (
-        f" · LLM **on** — Qwen3-30B-A3B **{quant}**, **{wl_label}** @ "
-        f"**{queries_per_min:.1f} q/min** (**{answer_kind}** answers)"
+        f" &middot; LLM <b>on</b> &mdash; Qwen3-30B-A3B <b>{quant}</b>, "
+        f"<b>{wl_label}</b> @ <b>{queries_per_min:.1f} q/min</b> "
+        f"(<b>{answer_kind}</b> answers)"
     )
 else:
-    llm_summary = " · LLM **off**"
+    llm_summary = " &middot; LLM <b>off</b>"
 
 # ── Configuration header (row 1) ──
 st.markdown("##### 🔧 Configuration")
-
-# ── 'Simulating:' line (row 2) — human summary of the current selection ──
-st.markdown(
-    f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
-    f"**{n_streams}** stream{'s' if n_streams != 1 else ''} "
-    f"@ **{resolution}** &nbsp;·&nbsp; "
-    f"**{hw.name}**{llm_summary}"
-)
 
 # Build the current-config rows (for the download button)
 _cur_rows: list[dict] = [
@@ -337,13 +331,23 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-# ── Download block (row 3) — left-aligned so the 'This config' button's
-# left edge lines up with the 'S' in 'Simulating:' above. The label
-# centers over the button pair (within the left half). Theme-adaptive
-# color: inherits Streamlit's light/dark text color so it's readable
-# regardless of user theme. ──
+# ── Simulating line + Download block (rows 2–3) — both live inside a
+# left-half column so their widths match: the 'Simulating:' line's right
+# edge aligns with the 'All configs' button's right edge, and the 'This
+# config' button's left edge aligns with the 'S' in 'Simulating:'. Theme-
+# adaptive colors (no hardcoded color: → inherits Streamlit's light/dark
+# text color, readable regardless of user theme). ──
 _left_half, _right_half = st.columns([2.5, 2])
 with _left_half:
+    st.markdown(
+        "<div style='font-size:17px; line-height:1.55; margin:2px 0 14px 0;'>"
+        f"<b>Simulating:</b> {pipeline.label} &nbsp;&middot;&nbsp; "
+        f"<b>{n_streams}</b> stream{'s' if n_streams != 1 else ''} "
+        f"@ <b>{resolution}</b> &nbsp;&middot;&nbsp; "
+        f"<b>{hw.name}</b>{llm_summary}"
+        "</div>",
+        unsafe_allow_html=True,
+    )
     st.markdown(
         "<div style='text-align:center; font-size:20px; font-weight:800; "
         "letter-spacing:0.3px; margin:8px 0 8px 0;'>"
