@@ -96,7 +96,8 @@ if not _password_gate():
 
 st.title("🎯 keyhole-sizer")
 st.markdown(
-    "Interactive sandbox for the Keyhole bake-off findings — tune NPU spec, pipeline, concurrency, and LLM load to see live FPS / tok/s / duty-cycle projections.  \n"
+    "Interactive sandbox for the Keyhole bake-off findings.  \n"
+    "Tune NPU spec, pipeline, concurrency, and LLM load to see live FPS / tok/s / duty-cycle projections.  \n"
     "All numbers trace back to measured bake-offs (`github.com/kylefoxaustin/keyhole`, see `REPRODUCE.md`)."
 )
 
@@ -318,8 +319,9 @@ with _cfg_col:
     st.markdown("##### 🔧 Configuration")
 with _btn_col:
     st.markdown(
-        "<div style='text-align:right; font-size:12px; color:#93A1B5; "
-        "margin:0 0 2px 0;'>Download model run data</div>",
+        "<div style='text-align:center; font-size:15px; font-weight:600; "
+        "color:#EAEDF4; letter-spacing:0.2px; margin:0 0 6px 0;'>"
+        "📥 Download model run data</div>",
         unsafe_allow_html=True,
     )
 
