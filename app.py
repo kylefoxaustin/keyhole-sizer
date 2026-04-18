@@ -13,11 +13,42 @@ import streamlit as st
 
 from sizer.npu_model import (
     Hardware, TIERS, MEMORY_TYPES, PIPELINES, NPU_MID,
-    WORKLOAD_CATEGORIES,
+    WORKLOAD_CATEGORIES, BYTES_PER_PARAM,
     describe_hw, project_vision, project_llm,
     theoretical_bandwidth, vision_fps_under_llm_load,
     workload_distribution_on_hw,
 )
+from sizer.platform_budget import (
+    vision_workload_row, llm_workload_row, rows_to_csv_str,
+)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _full_matrix_csv() -> str:
+    """Generate the full preset-HW × pipeline × resolution × stream-count matrix,
+    plus every LLM (quant × workload × answer_kind) combo. Cached for an hour.
+    Same output as `scripts/export_platform_matrix.py`."""
+    rows: list[dict] = []
+    for hw in TIERS.values():
+        for pipeline in PIPELINES.values():
+            for res in ("720p", "1080p", "4K"):
+                for n in (1, 2, 4, 8, 16):
+                    try:
+                        rows.append(vision_workload_row(pipeline, hw, res, n_streams=n))
+                    except Exception:
+                        pass
+    for hw in TIERS.values():
+        for quant in BYTES_PER_PARAM:
+            for workload in WORKLOAD_CATEGORIES:
+                for answer_kind in ("short", "rag"):
+                    try:
+                        rows.append(llm_workload_row(
+                            hw, quant, workload=workload,
+                            queries_per_minute=2.0, answer_kind=answer_kind,
+                        ))
+                    except Exception:
+                        pass
+    return rows_to_csv_str(rows)
 
 st.set_page_config(
     page_title="keyhole-sizer",
@@ -283,10 +314,52 @@ if llm_enabled:
 else:
     llm_summary = " · LLM **off**"
 
-# ── Current-config header (what the user selected) ──
-st.markdown(
-    f"##### 🔧 Configuration"
-)
+# ── Current-config header + export buttons ──
+_cfg_col, _btn_cur_col, _btn_mat_col = st.columns([3.2, 1.4, 1.4])
+with _cfg_col:
+    st.markdown("##### 🔧 Configuration")
+
+# Build the current-config rows (for the download button)
+_cur_rows: list[dict] = [
+    vision_workload_row(pipeline, hw, resolution, n_streams=n_streams)
+]
+if llm_enabled:
+    _cur_rows.append(llm_workload_row(
+        hw, quant, workload=llm_workload,
+        queries_per_minute=queries_per_min,
+        answer_kind=answer_kind,
+    ))
+_cur_csv = rows_to_csv_str(_cur_rows)
+_hw_slug = hw.name.lower().replace(" ", "_")
+
+with _btn_cur_col:
+    st.download_button(
+        label="💾 This config",
+        data=_cur_csv,
+        file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
+        mime="text/csv",
+        help=(
+            "Platform-budget CSV row for the *current* config (vision + LLM if "
+            "enabled). ss_* columns are additive at the platform level; peak_* "
+            "are per-workload ceilings. Read the header `#` comments for caveats."
+        ),
+        use_container_width=True,
+    )
+
+with _btn_mat_col:
+    st.download_button(
+        label="📦 Full matrix",
+        data=_full_matrix_csv(),
+        file_name="keyhole_sizer_platform_budget_matrix.csv",
+        mime="text/csv",
+        help=(
+            "Every preset HW tier × pipeline × resolution × stream count + every "
+            "LLM (quant × workload × answer_kind) combination (~585 rows). "
+            "Custom HW is skipped — use 'This config' for custom. Cached hourly."
+        ),
+        use_container_width=True,
+    )
+
 st.markdown(
     f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
     f"**{n_streams}** stream{'s' if n_streams != 1 else ''} "
@@ -404,35 +477,6 @@ else:
     )
 
 st.markdown("---")
-
-# ───────── Platform-budget CSV download (current config) ─────────
-from sizer.platform_budget import (
-    vision_workload_row, llm_workload_row, rows_to_csv_str,
-)
-
-_budget_rows: list[dict] = [
-    vision_workload_row(pipeline, hw, resolution, n_streams=n_streams)
-]
-if llm_enabled:
-    _budget_rows.append(llm_workload_row(
-        hw, quant, workload=llm_workload,
-        queries_per_minute=queries_per_min,
-        answer_kind=answer_kind,
-    ))
-
-_budget_csv = rows_to_csv_str(_budget_rows)
-_hw_slug = hw.name.lower().replace(" ", "_")
-st.download_button(
-    label="💾 Download platform budget CSV (current config)",
-    data=_budget_csv,
-    file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
-    mime="text/csv",
-    help=(
-        "CSV row per workload (vision + LLM if enabled). ss_* columns are "
-        "additive across rows at the platform level; peak_* columns are not. "
-        "Read the `#` header comments for caveats."
-    ),
-)
 
 # ───────── Tabs: charts + detail tables ─────────
 tab_overview, tab_streams, tab_duty, tab_detail = st.tabs(
