@@ -96,10 +96,8 @@ if not _password_gate():
 
 st.title("🎯 keyhole-sizer")
 st.markdown(
-    "Interactive sandbox for the Keyhole bake-off findings. Tweak the NPU spec, "
-    "pipeline, concurrency, and LLM load — see live FPS / tok/s / duty-cycle "
-    "projections. All numbers trace back to measured bake-offs ("
-    "`github.com/kylefoxaustin/keyhole`, see `REPRODUCE.md`)."
+    "Interactive sandbox for the Keyhole bake-off findings — tune NPU spec, pipeline, concurrency, and LLM load to see live FPS / tok/s / duty-cycle projections.  \n"
+    "All numbers trace back to measured bake-offs (`github.com/kylefoxaustin/keyhole`, see `REPRODUCE.md`)."
 )
 
 
@@ -315,9 +313,15 @@ else:
     llm_summary = " · LLM **off**"
 
 # ── Current-config header + export buttons ──
-_cfg_col, _btn_cur_col, _btn_mat_col = st.columns([3.2, 1.4, 1.4])
+_cfg_col, _btn_col = st.columns([3.2, 2.8])
 with _cfg_col:
     st.markdown("##### 🔧 Configuration")
+with _btn_col:
+    st.markdown(
+        "<div style='text-align:right; font-size:12px; color:#93A1B5; "
+        "margin:0 0 2px 0;'>Download model run data</div>",
+        unsafe_allow_html=True,
+    )
 
 # Build the current-config rows (for the download button)
 _cur_rows: list[dict] = [
@@ -332,33 +336,34 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-with _btn_cur_col:
-    st.download_button(
-        label="💾 This config",
-        data=_cur_csv,
-        file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
-        mime="text/csv",
-        help=(
-            "Platform-budget CSV row for the *current* config (vision + LLM if "
-            "enabled). ss_* columns are additive at the platform level; peak_* "
-            "are per-workload ceilings. Read the header `#` comments for caveats."
-        ),
-        use_container_width=True,
-    )
-
-with _btn_mat_col:
-    st.download_button(
-        label="📦 Full matrix",
-        data=_full_matrix_csv(),
-        file_name="keyhole_sizer_platform_budget_matrix.csv",
-        mime="text/csv",
-        help=(
-            "Every preset HW tier × pipeline × resolution × stream count + every "
-            "LLM (quant × workload × answer_kind) combination (~585 rows). "
-            "Custom HW is skipped — use 'This config' for custom. Cached hourly."
-        ),
-        use_container_width=True,
-    )
+with _btn_col:
+    _btn_cur_col, _btn_mat_col = st.columns(2)
+    with _btn_cur_col:
+        st.download_button(
+            label="💾 This config",
+            data=_cur_csv,
+            file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
+            mime="text/csv",
+            help=(
+                "Platform-budget CSV row for the *current* config (vision + LLM if "
+                "enabled). ss_* columns are additive at the platform level; peak_* "
+                "are per-workload ceilings. Read the header `#` comments for caveats."
+            ),
+            use_container_width=True,
+        )
+    with _btn_mat_col:
+        st.download_button(
+            label="📦 All configs",
+            data=_full_matrix_csv(),
+            file_name="keyhole_sizer_platform_budget_matrix.csv",
+            mime="text/csv",
+            help=(
+                "Every preset HW tier × pipeline × resolution × stream count + every "
+                "LLM (quant × workload × answer_kind) combination (~585 rows). "
+                "Custom HW is skipped — use 'This config' for custom. Cached hourly."
+            ),
+            use_container_width=True,
+        )
 
 st.markdown(
     f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
