@@ -316,6 +316,14 @@ else:
 # ── Configuration header (row 1) ──
 st.markdown("##### 🔧 Configuration")
 
+# ── 'Simulating:' line (row 2) — human summary of the current selection ──
+st.markdown(
+    f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
+    f"**{n_streams}** stream{'s' if n_streams != 1 else ''} "
+    f"@ **{resolution}** &nbsp;·&nbsp; "
+    f"**{hw.name}**{llm_summary}"
+)
+
 # Build the current-config rows (for the download button)
 _cur_rows: list[dict] = [
     vision_workload_row(pipeline, hw, resolution, n_streams=n_streams)
@@ -329,14 +337,15 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-# ── Download block (row 2) — centered so its horizontal midpoint aligns
-# with the midpoint of the "Simulating:" text that follows below. ──
+# ── Download block (row 3) — centered so its horizontal midpoint aligns
+# with the page midpoint. Label has no hardcoded color so it inherits
+# Streamlit's theme-appropriate text color (readable on both light and
+# dark backgrounds). ──
 _sp_l, _center, _sp_r = st.columns([1, 2.5, 1])
 with _center:
     st.markdown(
-        "<div style='text-align:center; font-size:19px; font-weight:800; "
-        "color:#FFFFFF; letter-spacing:0.3px; margin:0 0 8px 0; "
-        "text-shadow:0 1px 2px rgba(0,0,0,0.4);'>"
+        "<div style='text-align:center; font-size:20px; font-weight:800; "
+        "letter-spacing:0.3px; margin:8px 0 8px 0;'>"
         "📥 Download model run data</div>",
         unsafe_allow_html=True,
     )
@@ -367,13 +376,6 @@ with _center:
             ),
             use_container_width=True,
         )
-
-st.markdown(
-    f"**Simulating:** {pipeline.label} &nbsp;·&nbsp; "
-    f"**{n_streams}** stream{'s' if n_streams != 1 else ''} "
-    f"@ **{resolution}** &nbsp;·&nbsp; "
-    f"**{hw.name}**{llm_summary}"
-)
 
 # Visual pipeline flow — reflects current pipeline + LLM selection
 _render_pipeline_strip(
