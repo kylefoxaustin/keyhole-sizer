@@ -337,12 +337,13 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-# ── Download block (row 3) — centered so its horizontal midpoint aligns
-# with the page midpoint. Label has no hardcoded color so it inherits
-# Streamlit's theme-appropriate text color (readable on both light and
-# dark backgrounds). ──
-_sp_l, _center, _sp_r = st.columns([1, 2.5, 1])
-with _center:
+# ── Download block (row 3) — left-aligned so the 'This config' button's
+# left edge lines up with the 'S' in 'Simulating:' above. The label
+# centers over the button pair (within the left half). Theme-adaptive
+# color: inherits Streamlit's light/dark text color so it's readable
+# regardless of user theme. ──
+_left_half, _right_half = st.columns([2.5, 2])
+with _left_half:
     st.markdown(
         "<div style='text-align:center; font-size:20px; font-weight:800; "
         "letter-spacing:0.3px; margin:8px 0 8px 0;'>"
