@@ -313,17 +313,8 @@ if llm_enabled:
 else:
     llm_summary = " · LLM **off**"
 
-# ── Current-config header + export buttons ──
-_cfg_col, _btn_col = st.columns([3.2, 2.8])
-with _cfg_col:
-    st.markdown("##### 🔧 Configuration")
-with _btn_col:
-    st.markdown(
-        "<div style='text-align:center; font-size:15px; font-weight:600; "
-        "color:#EAEDF4; letter-spacing:0.2px; margin:0 0 6px 0;'>"
-        "📥 Download model run data</div>",
-        unsafe_allow_html=True,
-    )
+# ── Configuration header (row 1) ──
+st.markdown("##### 🔧 Configuration")
 
 # Build the current-config rows (for the download button)
 _cur_rows: list[dict] = [
@@ -338,7 +329,17 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-with _btn_col:
+# ── Download block (row 2) — centered so its horizontal midpoint aligns
+# with the midpoint of the "Simulating:" text that follows below. ──
+_sp_l, _center, _sp_r = st.columns([1, 2.5, 1])
+with _center:
+    st.markdown(
+        "<div style='text-align:center; font-size:19px; font-weight:800; "
+        "color:#FFFFFF; letter-spacing:0.3px; margin:0 0 8px 0; "
+        "text-shadow:0 1px 2px rgba(0,0,0,0.4);'>"
+        "📥 Download model run data</div>",
+        unsafe_allow_html=True,
+    )
     _btn_cur_col, _btn_mat_col = st.columns(2)
     with _btn_cur_col:
         st.download_button(
