@@ -27,6 +27,11 @@ from .npu_model import (
     BYTES_PER_PARAM, ACTIVE_PARAMS, GGUF_SIZE_GB,
     WORKLOAD_CATEGORIES,
 )
+from .measured import (
+    measured_dram_per_frame,
+    measured_components,
+    bundle_metadata,
+)
 
 
 # ───────────────────────── Schema ─────────────────────────
@@ -49,7 +54,9 @@ CSV_COLUMNS = [
     "hw_tdp_watts",
     # Steady-state (1-second averages, ADDITIVE across rows)
     "ss_duty_cycle_frac",    # 0..1, fraction of NPU wall-clock this workload consumes
-    "ss_ddr_gbs_avg",        # avg GB/s this workload pulls from DRAM
+    "ss_ddr_gbs_avg",        # avg GB/s this workload pulls from DRAM (APPROXIMATED — saturation × duty)
+    "ss_ddr_gbs_avg_measured", # avg GB/s from actual ncu DRAM bytes × fps (None if no ncu data)
+    "ss_dram_per_forward_mb",  # per-frame DRAM footprint from ncu (None if no ncu data)
     "ss_tops_avg",            # avg effective TOPS consumed
     "ss_dram_resident_mb",    # MB resident — add across rows for total memory fit check
     "ss_power_avg_watts",     # TDP × duty approximation (NOT measured)
@@ -59,6 +66,10 @@ CSV_COLUMNS = [
     "peak_per_frame_ms",      # per-frame latency (vision) or per-token (LLM)
     "peak_ddr_gbs",           # instantaneous GB/s during a single forward
     "peak_tops",              # instantaneous TOPS during a single forward
+    # NCU provenance — for measured rows, lets the spreadsheet cite the sweep
+    "ncu_source_workloads",   # comma-sep list of NVTX labels feeding this row
+    "ncu_n_forwards",         # bake-off frame counts that produced the measurement
+    "ncu_bundle_timestamp",   # when the sweep was exported
     # Provenance — lets the spreadsheet trace a row back to the sizer revision
     "sizer_commit_sha",
     "export_timestamp_iso",
@@ -78,6 +89,12 @@ HEADER_COMMENTS = [
     "#    (two workloads don't peak at the same instant in steady state).",
     "#  - Assumes workloads are bandwidth-bound (true for edge NPU at these model sizes);",
     "#    ss_ddr_gbs_avg = effective_DDR_BW \u00d7 duty_cycle under this assumption.",
+    "#",
+    "#  - ss_ddr_gbs_avg_measured (and ss_dram_per_forward_mb) come from MEASURED",
+    "#    Nsight Compute counters via sizer/sizer_bundle.json (see sizer.measured).",
+    "#    Blank for pipelines without a vendored ncu measurement.",
+    "#    Prefer the _measured column over the saturation approximation when present.",
+    "#",
     "#  - To consume in pandas:  pd.read_csv(path, comment='#')",
     "#",
 ]
@@ -139,10 +156,32 @@ def vision_workload_row(
     effective_fps_per_stream = v["fps_per_stream"] * duty_cycle_frac
     effective_total_fps = effective_fps_per_stream * n_streams
 
-    # Under BW-bound assumption, consumed DDR BW ≈ effective BW × duty cycle.
+    # Approximated under BW-bound assumption: consumed DDR BW ≈ effective BW × duty cycle.
     ss_ddr_gbs_avg = hw.effective_bandwidth_gbs * duty_cycle_frac
     ss_tops_avg = (hw.peak_tops_fp8 * hw.compute_efficiency) * duty_cycle_frac
     ss_power_avg = hw.tdp_watts * duty_cycle_frac
+
+    # Measured DRAM (from ncu) — preferred over the saturation approximation
+    # for any pipeline mapped in measured.PIPELINE_TO_NCU. Falls back to None
+    # otherwise; CSV rows show blank in the _measured columns.
+    measured_dram_bytes_per_frame = measured_dram_per_frame(pipeline.key)
+    if measured_dram_bytes_per_frame is not None:
+        ss_ddr_gbs_avg_measured = (
+            measured_dram_bytes_per_frame * effective_total_fps / 1e9
+        )
+        ss_dram_per_forward_mb = measured_dram_bytes_per_frame / 1e6
+        comps = measured_components(pipeline.key) or []
+        ncu_source_workloads = ", ".join(
+            f"{c['ncu_workload_id']}×{c['fires_per_frame']:.4f}" for c in comps
+        )
+        ncu_n_forwards = ", ".join(str(c["n_forwards_in_bakeoff"]) for c in comps)
+    else:
+        ss_ddr_gbs_avg_measured = None
+        ss_dram_per_forward_mb = None
+        ncu_source_workloads = ""
+        ncu_n_forwards = ""
+
+    bundle_meta = bundle_metadata()
 
     config = (
         f"{pipeline.label} \u00b7 {n_streams} stream(s) @ {resolution} \u00b7 {hw.name}"
@@ -156,6 +195,14 @@ def vision_workload_row(
         **_hw_columns(hw),
         "ss_duty_cycle_frac": round(duty_cycle_frac, 3),
         "ss_ddr_gbs_avg":     round(ss_ddr_gbs_avg, 2),
+        "ss_ddr_gbs_avg_measured": (
+            round(ss_ddr_gbs_avg_measured, 2)
+            if ss_ddr_gbs_avg_measured is not None else ""
+        ),
+        "ss_dram_per_forward_mb": (
+            round(ss_dram_per_forward_mb, 2)
+            if ss_dram_per_forward_mb is not None else ""
+        ),
         "ss_tops_avg":        round(ss_tops_avg, 1),
         "ss_dram_resident_mb": round(v["vram_mb"], 0),
         "ss_power_avg_watts": round(ss_power_avg, 1),
@@ -164,6 +211,10 @@ def vision_workload_row(
         "peak_per_frame_ms":  round(v["per_stream_ms"], 2),
         "peak_ddr_gbs":       round(hw.effective_bandwidth_gbs, 2),
         "peak_tops":          round(hw.peak_tops_fp8 * hw.compute_efficiency, 1),
+        "ncu_source_workloads":  ncu_source_workloads,
+        "ncu_n_forwards":        ncu_n_forwards,
+        "ncu_bundle_timestamp":  bundle_meta["ncu_bundle_timestamp"]
+                                 if ncu_source_workloads else "",
         "sizer_commit_sha":   _current_commit_sha(),
         "export_timestamp_iso": _iso_now(),
     }
@@ -208,6 +259,8 @@ def llm_workload_row(
         **_hw_columns(hw),
         "ss_duty_cycle_frac": round(duty, 3),
         "ss_ddr_gbs_avg":     round(ss_ddr_gbs_avg, 2),
+        "ss_ddr_gbs_avg_measured": "",      # LLM not in current ncu sweep (B-prime skip)
+        "ss_dram_per_forward_mb": "",
         "ss_tops_avg":        round(ss_tops_avg, 1),
         "ss_dram_resident_mb": round(llm["gguf_size_gb"] * 1024, 0),
         "ss_power_avg_watts": round(ss_power_avg, 1),
@@ -216,6 +269,9 @@ def llm_workload_row(
         "peak_per_frame_ms":  round(1000.0 / max(llm["decode_tok_s"], 1e-9), 2),
         "peak_ddr_gbs":       round(hw.effective_bandwidth_gbs, 2),
         "peak_tops":          round(hw.peak_tops_fp8 * hw.compute_efficiency, 1),
+        "ncu_source_workloads":  "",
+        "ncu_n_forwards":        "",
+        "ncu_bundle_timestamp":  "",
         "sizer_commit_sha":   _current_commit_sha(),
         "export_timestamp_iso": _iso_now(),
     }

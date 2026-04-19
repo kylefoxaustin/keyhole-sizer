@@ -1,0 +1,479 @@
+{
+  "bundle_version": "1",
+  "description": "Keyhole ncu measurements, per-workload, normalized per-forward. Consumed by keyhole-sizer/sizer/platform_budget.py as MEASURED replacement for the approximated ss_ddr_gbs_avg / ss_tops_avg columns. Each entry covers one NVTX range from a bake-off run.",
+  "export_timestamp_iso": "2026-04-19T02:31:35+00:00",
+  "ncu_binary": "Nsight Compute 2026.1.1",
+  "measurement_host": "NVIDIA RTX 5090 (Blackwell sm_120), Ubuntu 24.04",
+  "npu_tier_used_for_projection": {
+    "name": "NPU Mid",
+    "bus": "128-bit LPDDR5X @ 8.4 GT/s",
+    "theoretical_gbs": 134.4,
+    "effective_gbs": 100.8,
+    "efficiency_assumed": 0.75
+  },
+  "n_workloads": 13,
+  "workloads": [
+    {
+      "workload_id": "efficientsam3_es_ev_s",
+      "source_bakeoff": "efficientsam3",
+      "source_json": "data/output/ncu/efficientsam3.json",
+      "n_forwards": 36,
+      "n_kernels_total": 24161,
+      "aggregate": {
+        "dram_bytes_total": 321617735680.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 6914194688.0,
+        "sass_thread_inst_total": 5706147162858.0,
+        "smsp_inst_total": 186069477270.0,
+        "gpu_ns_total_ncu_inflated": 621581376.0
+      },
+      "per_forward": {
+        "dram_bytes": 8933825991.1,
+        "dram_mb": 8933.83,
+        "tc_ops_blackwell": 192060963.6,
+        "sass_thread_inst": 158504087857.2,
+        "smsp_inst": 5168596590.8
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 88.63,
+        "bw_bound_fps_max": 11.3,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "mobilesam",
+      "source_bakeoff": "sam_variants",
+      "source_json": "data/output/ncu/sam_variants.json",
+      "n_forwards": 14,
+      "n_kernels_total": 36676,
+      "aggregate": {
+        "dram_bytes_total": 113367181312.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 199507968.0,
+        "sass_thread_inst_total": 2161502748558.0,
+        "smsp_inst_total": 70412794384.0,
+        "gpu_ns_total_ncu_inflated": 334083296.0
+      },
+      "per_forward": {
+        "dram_bytes": 8097655808.0,
+        "dram_mb": 8097.66,
+        "tc_ops_blackwell": 14250569.1,
+        "sass_thread_inst": 154393053468.4,
+        "smsp_inst": 5029485313.1
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 80.33,
+        "bw_bound_fps_max": 12.4,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "efficientsam_tiny",
+      "source_bakeoff": "sam_variants",
+      "source_json": "data/output/ncu/sam_variants.json",
+      "n_forwards": 14,
+      "n_kernels_total": 6576,
+      "aggregate": {
+        "dram_bytes_total": 264621284608.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 109707264.0,
+        "sass_thread_inst_total": 3882407251925.0,
+        "smsp_inst_total": 122328396771.0,
+        "gpu_ns_total_ncu_inflated": 318448160.0
+      },
+      "per_forward": {
+        "dram_bytes": 18901520329.1,
+        "dram_mb": 18901.52,
+        "tc_ops_blackwell": 7836233.1,
+        "sass_thread_inst": 277314803708.9,
+        "smsp_inst": 8737742626.5
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 187.52,
+        "bw_bound_fps_max": 5.3,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "efficientsam_small",
+      "source_bakeoff": "sam_variants",
+      "source_json": "data/output/ncu/sam_variants.json",
+      "n_forwards": 14,
+      "n_kernels_total": 6576,
+      "aggregate": {
+        "dram_bytes_total": 481031247616.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 112459776.0,
+        "sass_thread_inst_total": 7252360332958.0,
+        "smsp_inst_total": 228219611935.0,
+        "gpu_ns_total_ncu_inflated": 528529696.0
+      },
+      "per_forward": {
+        "dram_bytes": 34359374829.7,
+        "dram_mb": 34359.37,
+        "tc_ops_blackwell": 8032841.1,
+        "sass_thread_inst": 518025738068.4,
+        "smsp_inst": 16301400852.5
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 340.87,
+        "bw_bound_fps_max": 2.9,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yolo_seg",
+      "source_bakeoff": "sam_variants",
+      "source_json": "data/output/ncu/sam_variants.json",
+      "n_forwards": 14,
+      "n_kernels_total": 6781,
+      "aggregate": {
+        "dram_bytes_total": 8673561088.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 144576768.0,
+        "sass_thread_inst_total": 110922090428.0,
+        "smsp_inst_total": 3540533381.0,
+        "gpu_ns_total_ncu_inflated": 40495488.0
+      },
+      "per_forward": {
+        "dram_bytes": 619540077.7,
+        "dram_mb": 619.54,
+        "tc_ops_blackwell": 10326912.0,
+        "sass_thread_inst": 7923006459.1,
+        "smsp_inst": 252895241.5
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 6.15,
+        "bw_bound_fps_max": 162.7,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "clip_trt",
+      "source_bakeoff": "trt_clip",
+      "source_json": "data/output/ncu/trt_clip.json",
+      "n_forwards": 84,
+      "n_kernels_total": 9996,
+      "aggregate": {
+        "dram_bytes_total": 36410678272.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 2405867520.0,
+        "sass_thread_inst_total": 486338609172.0,
+        "smsp_inst_total": 15240158128.0,
+        "gpu_ns_total_ncu_inflated": 111985408.0
+      },
+      "per_forward": {
+        "dram_bytes": 433460455.6,
+        "dram_mb": 433.46,
+        "tc_ops_blackwell": 28641280.0,
+        "sass_thread_inst": 5789745347.3,
+        "smsp_inst": 181430453.9
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 4.3,
+        "bw_bound_fps_max": 232.5,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yolo_seg_fp16_trt",
+      "source_bakeoff": "trt_yolo",
+      "source_json": "data/output/ncu/trt_yolo.json",
+      "n_forwards": 42,
+      "n_kernels_total": 8232,
+      "aggregate": {
+        "dram_bytes_total": 9183329024.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 365226624.0,
+        "sass_thread_inst_total": 131270271552.0,
+        "smsp_inst_total": 4145651496.0,
+        "gpu_ns_total_ncu_inflated": 40837632.0
+      },
+      "per_forward": {
+        "dram_bytes": 218650691.0,
+        "dram_mb": 218.65,
+        "tc_ops_blackwell": 8695872.0,
+        "sass_thread_inst": 3125482656.0,
+        "smsp_inst": 98705988.0
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 2.17,
+        "bw_bound_fps_max": 461.0,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yolo_seg_fp8_trt",
+      "source_bakeoff": "trt_yolo",
+      "source_json": "data/output/ncu/trt_yolo.json",
+      "n_forwards": 42,
+      "n_kernels_total": 8274,
+      "aggregate": {
+        "dram_bytes_total": 9095456512.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 364875840.0,
+        "sass_thread_inst_total": 137551739136.0,
+        "smsp_inst_total": 4362079092.0,
+        "gpu_ns_total_ncu_inflated": 41457472.0
+      },
+      "per_forward": {
+        "dram_bytes": 216558488.4,
+        "dram_mb": 216.56,
+        "tc_ops_blackwell": 8687520.0,
+        "sass_thread_inst": 3275041408.0,
+        "smsp_inst": 103859026.0
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 2.15,
+        "bw_bound_fps_max": 465.5,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yoloe26_pytorch_fp16",
+      "source_bakeoff": "trt_yoloe26",
+      "source_json": "data/output/ncu/trt_yoloe26.json",
+      "n_forwards": 39,
+      "n_kernels_total": 22515,
+      "aggregate": {
+        "dram_bytes_total": 32788737024.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 446428160.0,
+        "sass_thread_inst_total": 434287708319.0,
+        "smsp_inst_total": 13810094541.0,
+        "gpu_ns_total_ncu_inflated": 126275968.0
+      },
+      "per_forward": {
+        "dram_bytes": 840736846.8,
+        "dram_mb": 840.74,
+        "tc_ops_blackwell": 11446875.9,
+        "sass_thread_inst": 11135582264.6,
+        "smsp_inst": 354104988.2
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 8.34,
+        "bw_bound_fps_max": 119.9,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yoloe26_trt_fp16",
+      "source_bakeoff": "trt_yoloe26",
+      "source_json": "data/output/ncu/trt_yoloe26.json",
+      "n_forwards": 39,
+      "n_kernels_total": 12174,
+      "aggregate": {
+        "dram_bytes_total": 19513348608.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 447887360.0,
+        "sass_thread_inst_total": 239336627679.0,
+        "smsp_inst_total": 7554665685.0,
+        "gpu_ns_total_ncu_inflated": 165289312.0
+      },
+      "per_forward": {
+        "dram_bytes": 500342272.0,
+        "dram_mb": 500.34,
+        "tc_ops_blackwell": 11484291.3,
+        "sass_thread_inst": 6136836607.2,
+        "smsp_inst": 193709376.5
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 4.96,
+        "bw_bound_fps_max": 201.5,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yoloe26_trt_fp8",
+      "source_bakeoff": "trt_yoloe26",
+      "source_json": "data/output/ncu/trt_yoloe26.json",
+      "n_forwards": 39,
+      "n_kernels_total": 12214,
+      "aggregate": {
+        "dram_bytes_total": 19415073280.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 446048000.0,
+        "sass_thread_inst_total": 244133443257.0,
+        "smsp_inst_total": 7721934462.0,
+        "gpu_ns_total_ncu_inflated": 164558752.0
+      },
+      "per_forward": {
+        "dram_bytes": 497822391.8,
+        "dram_mb": 497.82,
+        "tc_ops_blackwell": 11437128.2,
+        "sass_thread_inst": 6259831878.4,
+        "smsp_inst": 197998319.5
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 4.94,
+        "bw_bound_fps_max": 202.5,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yoloe26_text_prompt_s",
+      "source_bakeoff": "yoloe26",
+      "source_json": "data/output/ncu/yoloe26.json",
+      "n_forwards": 36,
+      "n_kernels_total": 20870,
+      "aggregate": {
+        "dram_bytes_total": 26726441728.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 420046080.0,
+        "sass_thread_inst_total": 338489559718.0,
+        "smsp_inst_total": 10794915072.0,
+        "gpu_ns_total_ncu_inflated": 121070912.0
+      },
+      "per_forward": {
+        "dram_bytes": 742401159.1,
+        "dram_mb": 742.4,
+        "tc_ops_blackwell": 11667946.7,
+        "sass_thread_inst": 9402487769.9,
+        "smsp_inst": 299858752.0
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 7.37,
+        "bw_bound_fps_max": 135.8,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    },
+    {
+      "workload_id": "yoloe26_prompt_free_s",
+      "source_bakeoff": "yoloe26",
+      "source_json": "data/output/ncu/yoloe26.json",
+      "n_forwards": 36,
+      "n_kernels_total": 20829,
+      "aggregate": {
+        "dram_bytes_total": 30205937152.0,
+        "dram_bytes_read_total": 0.0,
+        "dram_bytes_write_total": 0.0,
+        "tc_ops_total": 413455616.0,
+        "sass_thread_inst_total": 402565128443.0,
+        "smsp_inst_total": 12801100484.0,
+        "gpu_ns_total_ncu_inflated": 125742272.0
+      },
+      "per_forward": {
+        "dram_bytes": 839053809.8,
+        "dram_mb": 839.05,
+        "tc_ops_blackwell": 11484878.2,
+        "sass_thread_inst": 11182364679.0,
+        "smsp_inst": 355586124.6
+      },
+      "edge_projection_npu_mid": {
+        "bw_bound_ms_min": 8.32,
+        "bw_bound_fps_max": 120.1,
+        "npu_effective_gbs": 100.8,
+        "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
+      },
+      "notes": [
+        "Divisor n_forwards derived from bake-off constants (see script).",
+        "dram_bytes is workload property \u2014 transfers to any NPU.",
+        "tc_ops is Blackwell HMMA count \u2014 use as relative only.",
+        "gpu_ns is ncu-inflated (serialized launches); use non-profiled bake-off JSON for real wall-clock."
+      ]
+    }
+  ],
+  "missing_from_ncu": [],
+  "known_gaps": [
+    "sam3_bf16_reference: dropped by ncu --app-replay-match name (SAM 3's kernel set varied across passes).",
+    "efficientsam3p1: target SIGKILL'd on app-replay pass 2; retry with kernel-replay if needed.",
+    "llm: skipped for this sweep (Qwen3-30B-A3B under kernel-replay would add ~4 hrs; see PROFILE_NCU.md \u00a7 B-prime rationale).",
+    "yolo_seg_int8_trt: ncu couldn't profile Blackwell INT8 TRT kernels cleanly; absent from JSON (not zeros)."
+  ]
+}
