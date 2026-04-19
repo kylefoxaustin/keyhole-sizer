@@ -100,6 +100,7 @@ st.markdown(
     "Tune NPU spec, pipeline, concurrency, and LLM load to see live FPS / tok/s / duty-cycle projections.  \n"
     "All numbers trace back to measured bake-offs (`github.com/kylefoxaustin/keyhole`, see `REPRODUCE.md`)."
 )
+st.caption("⚠️ Assumes vision/LLM time-slice on the NPU — concurrent BW contention not modeled.")
 
 
 # ───────────────────────── Helper: pipeline strip renderer ─────────────────────────
