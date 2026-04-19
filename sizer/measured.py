@@ -52,9 +52,17 @@ PIPELINE_TO_NCU: dict[str, list[tuple[str, float]]] = {
     # Hybrid V2 era — older, approximated via current YOLO + CLIP measurements
     "hybrid_v2_torchao_fp8": [("yolo_seg", 1.0), ("clip_trt", 1.0)],
     "hybrid_v2_bf16":        [("yolo_seg", 1.0), ("clip_trt", 1.0)],
-    # No measurement available:
-    #   - sam3_bf16 → sam3_bf16_reference dropped by ncu match constraints
-    #   - efficientsam3p1_es_ev_s_bf16 → SIGKILL'd during pass 2
+    # SAM 3 BF16 reference — surgical kernel-replay capture (sam3_refs target).
+    # The sizer's sam3_bf16 pipeline is detector-free (SAM 3 does its own
+    # concept-matching), so the mapping is just the one NVTX range.
+    "sam3_bf16":             [("sam3_bf16_reference", 1.0)],
+    # EfficientSAM3.1 kernel-replay capture — two NVTX ranges per frame
+    # (ViT encoder via __set_image, then decoder via __text_prompt).
+    # Sum both for per-frame DRAM bytes.
+    "efficientsam3p1_es_ev_s_bf16": [
+        ("efficientsam3p1_es_ev_s__set_image",   1.0),
+        ("efficientsam3p1_es_ev_s__text_prompt", 1.0),
+    ],
 }
 
 

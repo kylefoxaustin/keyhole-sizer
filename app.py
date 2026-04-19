@@ -21,6 +21,9 @@ from sizer.npu_model import (
 from sizer.platform_budget import (
     vision_workload_row, llm_workload_row, rows_to_csv_str,
 )
+from sizer.measured import (
+    measured_dram_per_frame, measured_components, bundle_metadata,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -570,6 +573,93 @@ with tab_overview:
         )
         st.plotly_chart(fig2, use_container_width=True)
 
+    # ───── DRAM bandwidth: saturation approximation vs ncu measurement ─────
+    st.markdown("---")
+    st.markdown("#### DRAM bandwidth — saturation model vs ncu measurement")
+
+    measured_bytes_per_frame = measured_dram_per_frame(pipeline.key)
+    effective_total_fps = vision["fps_per_stream"] * n_streams
+    approx_gbs = hw.effective_bandwidth_gbs   # CSV saturation approx at duty=1
+
+    bw_chart_col, bw_text_col = st.columns([1.3, 1])
+    with bw_chart_col:
+        if measured_bytes_per_frame is None:
+            st.info(
+                f"No ncu measurement mapped for **{pipeline.label}** yet. "
+                "The platform-budget CSV's `ss_ddr_gbs_avg_measured` column "
+                "is blank for this pipeline; only the saturation "
+                "approximation is available."
+            )
+        else:
+            measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
+            fig_bw = go.Figure()
+            fig_bw.add_trace(go.Bar(
+                x=["Saturation model<br>(CSV ss_ddr_gbs_avg)",
+                   "Measured (ncu)<br>ss_ddr_gbs_avg_measured"],
+                y=[approx_gbs, measured_gbs],
+                marker=dict(color=["#EF4444", "#22C55E"]),
+                text=[f"{approx_gbs:.1f} GB/s", f"{measured_gbs:.2f} GB/s"],
+                textposition="outside",
+                textfont=dict(size=14, color="#EAEDF4"),
+                cliponaxis=False,
+            ))
+            fig_bw.add_hline(
+                y=hw.effective_bandwidth_gbs,
+                line_dash="dot", line_color="#93A1B5",
+                annotation_text=f"{hw.name} ceiling ({hw.effective_bandwidth_gbs:.1f} GB/s)",
+                annotation_position="top right",
+            )
+            fig_bw.update_layout(
+                yaxis_title="DRAM GB/s consumed by vision pipeline",
+                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+                font=dict(color="#EAEDF4", size=13),
+                height=340, margin=dict(l=50, r=40, t=30, b=60),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_bw, use_container_width=True)
+
+    with bw_text_col:
+        if measured_bytes_per_frame is None:
+            st.caption(
+                "**Currently mapped pipelines:** trt_fp8_1hz_clip, "
+                "trt_fp8_every_frame, yolo_only_fp8, hybrid_v2_*, "
+                "yoloe26_*, efficientsam3_es_ev_s_bf16, essmall_fp8. "
+                "**Pending:** sam3_bf16, efficientsam3p1_es_ev_s_bf16 "
+                "(kernel-replay ncu sweeps queued)."
+            )
+        else:
+            measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
+            util_pct = (measured_gbs / approx_gbs * 100) if approx_gbs > 0 else 0
+            headroom_gbs = max(0.0, approx_gbs - measured_gbs)
+            st.markdown(
+                f"**Per-frame DRAM:** {measured_bytes_per_frame / 1e6:.1f} MB  \n"
+                f"**Pipeline FPS (all streams):** {effective_total_fps:.1f}  \n"
+                f"**Measured usage:** {measured_gbs:.2f} GB/s "
+                f"({util_pct:.1f}% of {hw.name} ceiling)  \n"
+                f"**Spare bandwidth:** {headroom_gbs:.1f} GB/s"
+            )
+            comps = measured_components(pipeline.key) or []
+            if len(comps) > 1:
+                parts = " + ".join(
+                    f"`{c['ncu_workload_id']}` × {c['fires_per_frame']:.3g} "
+                    f"({c['dram_bytes_per_fire']/1e6:.1f} MB/fire)"
+                    for c in comps
+                )
+                st.caption(f"Composition: {parts}")
+            st.caption(
+                "The **saturation model** pessimistically assumes the workload "
+                "pins the bus at the NPU's effective bandwidth. The **measured** "
+                "value comes from ncu-counted DRAM bytes per forward × pipeline "
+                "FPS. The gap is real headroom for concurrent work — parallel "
+                "LLM, extra streams, other workloads."
+            )
+            meta = bundle_metadata()
+            st.caption(
+                f"ncu bundle: `{meta['ncu_bundle_timestamp']}` · "
+                f"{meta['ncu_n_workloads']} workloads · host "
+                f"*{meta['ncu_measurement_host']}*"
+            )
+
     # ───── LLM timing row (only when LLM is enabled) ─────
     if llm_enabled:
         st.markdown("---")
@@ -853,6 +943,44 @@ with tab_detail:
                       if not isinstance(v, (dict, list))})
         else:
             st.info("LLM not active — toggle in sidebar.")
+
+    st.markdown("---")
+    st.subheader("NCU measurement provenance")
+    comps = measured_components(pipeline.key)
+    if comps is None:
+        st.info(
+            f"No ncu measurement mapped for `{pipeline.key}`. "
+            "The saturation approximation is the only figure available "
+            "for this pipeline."
+        )
+    else:
+        df_comps = pd.DataFrame([
+            {
+                "NVTX workload_id":     c["ncu_workload_id"],
+                "Fires per frame":      c["fires_per_frame"],
+                "DRAM bytes / fire":    c["dram_bytes_per_fire"],
+                "DRAM MB / fire":       round(c["dram_bytes_per_fire"] / 1e6, 2),
+                "n_forwards (bakeoff)": c["n_forwards_in_bakeoff"],
+            } for c in comps
+        ])
+        st.dataframe(df_comps, use_container_width=True, hide_index=True)
+        total_bytes = sum(
+            c["dram_bytes_per_fire"] * c["fires_per_frame"] for c in comps
+        )
+        st.caption(
+            f"Sum (per pipeline frame): **{total_bytes / 1e6:.1f} MB**. "
+            "This is the hardware-neutral DRAM figure that transfers across "
+            "NPU tiers — scale by pipeline FPS and compare against the NPU's "
+            "effective bandwidth ceiling to get consumed GB/s."
+        )
+        meta = bundle_metadata()
+        st.caption(
+            f"Bundle exported **{meta['ncu_bundle_timestamp']}** on "
+            f"*{meta['ncu_measurement_host']}*. "
+            f"Total workloads in bundle: **{meta['ncu_n_workloads']}**. "
+            f"Regenerate via `python scripts/export_ncu_for_sizer.py` in the "
+            "`keyhole` repo after re-running `scripts/profile_all_ncu.sh`."
+        )
 
     st.markdown("---")
     st.subheader("Hardware config")
