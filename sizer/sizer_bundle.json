@@ -1,15 +1,15 @@
 {
   "bundle_version": "1",
   "description": "Keyhole ncu measurements, per-workload, normalized per-forward. Consumed by keyhole-sizer/sizer/platform_budget.py as MEASURED replacement for the approximated ss_ddr_gbs_avg / ss_tops_avg columns. Each entry covers one NVTX range from a bake-off run.",
-  "export_timestamp_iso": "2026-04-21T07:31:39+00:00",
+  "export_timestamp_iso": "2026-04-21T17:51:03+00:00",
   "ncu_binary": "Nsight Compute 2026.1.1",
   "measurement_host": "NVIDIA RTX 5090 (Blackwell sm_120), Ubuntu 24.04",
   "npu_tier_used_for_projection": {
     "name": "NPU Mid",
     "bus": "128-bit LPDDR5X @ 8.4 GT/s",
     "theoretical_gbs": 134.4,
-    "effective_gbs": 100.8,
-    "efficiency_assumed": 0.75
+    "effective_gbs": 94.08,
+    "efficiency_assumed": 0.7
   },
   "n_workloads": 16,
   "workloads": [
@@ -36,9 +36,9 @@
         "smsp_inst": 5168596590.8
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 88.63,
-        "bw_bound_fps_max": 11.3,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 94.96,
+        "bw_bound_fps_max": 10.5,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -71,9 +71,9 @@
         "smsp_inst": 2387107231.6
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 38.55,
-        "bw_bound_fps_max": 25.9,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 41.3,
+        "bw_bound_fps_max": 24.2,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -106,9 +106,9 @@
         "smsp_inst": 2338269464.8
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 35.47,
-        "bw_bound_fps_max": 28.2,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 38.0,
+        "bw_bound_fps_max": 26.3,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -141,9 +141,9 @@
         "smsp_inst": 56493246981.1
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 1180.31,
+        "bw_bound_ms_min": 1264.62,
         "bw_bound_fps_max": 0.8,
-        "npu_effective_gbs": 100.8,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -176,9 +176,9 @@
         "smsp_inst": 5029485313.1
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 80.33,
-        "bw_bound_fps_max": 12.4,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 86.07,
+        "bw_bound_fps_max": 11.6,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -211,9 +211,9 @@
         "smsp_inst": 8737742626.5
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 187.52,
-        "bw_bound_fps_max": 5.3,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 200.91,
+        "bw_bound_fps_max": 5.0,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -246,9 +246,9 @@
         "smsp_inst": 16301400852.5
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 340.87,
-        "bw_bound_fps_max": 2.9,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 365.21,
+        "bw_bound_fps_max": 2.7,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -281,9 +281,9 @@
         "smsp_inst": 252895241.5
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 6.15,
-        "bw_bound_fps_max": 162.7,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 6.59,
+        "bw_bound_fps_max": 151.9,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -316,9 +316,9 @@
         "smsp_inst": 181430453.9
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 4.3,
-        "bw_bound_fps_max": 232.5,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 4.61,
+        "bw_bound_fps_max": 217.0,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -351,9 +351,9 @@
         "smsp_inst": 98705988.0
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 2.17,
-        "bw_bound_fps_max": 461.0,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 2.32,
+        "bw_bound_fps_max": 430.3,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -386,9 +386,9 @@
         "smsp_inst": 103859026.0
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 2.15,
-        "bw_bound_fps_max": 465.5,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 2.3,
+        "bw_bound_fps_max": 434.4,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -421,9 +421,9 @@
         "smsp_inst": 354104988.2
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 8.34,
-        "bw_bound_fps_max": 119.9,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 8.94,
+        "bw_bound_fps_max": 111.9,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -456,9 +456,9 @@
         "smsp_inst": 193709376.5
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 4.96,
-        "bw_bound_fps_max": 201.5,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 5.32,
+        "bw_bound_fps_max": 188.0,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -491,9 +491,9 @@
         "smsp_inst": 197998319.5
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 4.94,
-        "bw_bound_fps_max": 202.5,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 5.29,
+        "bw_bound_fps_max": 189.0,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -526,9 +526,9 @@
         "smsp_inst": 299858752.0
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 7.37,
-        "bw_bound_fps_max": 135.8,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 7.89,
+        "bw_bound_fps_max": 126.7,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [
@@ -561,9 +561,9 @@
         "smsp_inst": 355586124.6
       },
       "edge_projection_npu_mid": {
-        "bw_bound_ms_min": 8.32,
-        "bw_bound_fps_max": 120.1,
-        "npu_effective_gbs": 100.8,
+        "bw_bound_ms_min": 8.92,
+        "bw_bound_fps_max": 112.1,
+        "npu_effective_gbs": 94.08,
         "interpretation": "Floor on edge latency from DRAM bandwidth alone. Real edge fps = min(bw_bound_fps_max, compute_bound_fps). Compute bound is NOT computed here \u2014 derive from per_forward.tc_ops_blackwell with a Blackwell-to-NPU TOPS conversion factor, or check non-profiled bake-off measured ms \u00d7 edge-scaling."
       },
       "notes": [

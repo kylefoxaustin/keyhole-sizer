@@ -181,10 +181,13 @@ with st.sidebar:
     st.header("Edge NPU")
     tier = st.selectbox(
         "Tier preset",
-        options=("NPU Low", "NPU Mid", "NPU High", "Custom"),
-        index=1,
-        help="Low = 64-bit LPDDR4 baseline, Mid = 128-bit LPDDR5X (Keyhole shipping target), "
-             "High = vendor high-bin, Custom = roll your own.",
+        options=("NPU Low-LP4", "NPU Low-LP5X", "NPU Mid", "NPU High", "Custom"),
+        index=2,
+        help="Low-LP4 = 64-bit LPDDR4 @ 4.0 GT/s (32 GB/s theoretical), "
+             "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 2.1× LP4), "
+             "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target), "
+             "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin), "
+             "Custom = roll your own. All presets assume 70% bandwidth efficiency.",
     )
 
     if tier == "Custom":
@@ -200,9 +203,9 @@ with st.sidebar:
                                value=8.4, step=0.1)
         theoretical_bw = theoretical_bandwidth(bus_width, data_rate)
         st.caption(f"→ theoretical BW: **{theoretical_bw:.1f} GB/s**")
-        bw_eff = st.slider("Bandwidth efficiency", 0.50, 0.95, 0.80, 0.01,
+        bw_eff = st.slider("Bandwidth efficiency", 0.50, 0.95, 0.70, 0.01,
                             help="Fraction of theoretical BW realized on real workloads. "
-                                 "0.80 is typical for modern NPUs.")
+                                 "Presets use 0.70 (matches the tier cards above).")
         # Both sliders share the same 50-1000 range so equal numeric values
         # sit at equal horizontal positions. FP8 on Blackwell-class silicon
         # is typically 2× BF16, but some NPUs are 1:1 or even missing FP8 —

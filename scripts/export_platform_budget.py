@@ -34,9 +34,12 @@ from sizer.platform_budget import (
 )
 
 HW_SLUGS = {
-    "npu_low":  "NPU Low",
-    "npu_mid":  "NPU Mid",
-    "npu_high": "NPU High",
+    "npu_low_lp4":  "NPU Low-LP4",
+    "npu_low_lp5x": "NPU Low-LP5X",
+    "npu_mid":      "NPU Mid",
+    "npu_high":     "NPU High",
+    # Backwards-compat: `npu_low` keeps resolving to the LP4 baseline.
+    "npu_low":      "NPU Low-LP4",
 }
 
 

@@ -90,17 +90,19 @@ power). Three ways to get the data:
 
 **Caveats baked into the CSV header comments** (read before using for procurement):
 - Power is TDP × duty-cycle approximation, NOT measured per-workload.
-- NPU Low/Mid/High numbers are bandwidth-scaled from RTX 5090 measurements,
-  NOT measured on actual NPU silicon.
+- NPU Low-LP4 / Low-LP5X / Mid / High numbers are bandwidth-scaled from
+  RTX 5090 measurements, NOT measured on actual NPU silicon.
 
 **Consume in pandas:** `pd.read_csv(path, comment='#')`.
 
 ## What you can tune
 
 **Hardware** (sidebar):
-- **Tier preset:** `NPU Low` (64-bit LPDDR4) / `NPU Mid` (128-bit
-  LPDDR5X — Keyhole shipping target) / `NPU High` (high-bin LPDDR5X) /
-  `Custom` (roll your own)
+- **Tier preset:** `NPU Low-LP4` (64-bit LPDDR4 @ 4.0 GT/s, 32 GB/s) /
+  `NPU Low-LP5X` (same 64-bit bus, LPDDR5X @ 8.4 GT/s, 67.2 GB/s) /
+  `NPU Mid` (128-bit LPDDR5X @ 8.4 GT/s — Keyhole shipping target) /
+  `NPU High` (128-bit LPDDR5X @ 11.2 GT/s, high-bin) / `Custom` (roll
+  your own). All presets assume 70% bandwidth efficiency.
 - **Custom mode:** bus width, memory type, data rate, bandwidth
   efficiency, peak BF16 TOPS, peak FP8 TOPS, compute efficiency, DRAM
   capacity, TDP

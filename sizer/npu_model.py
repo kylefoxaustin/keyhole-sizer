@@ -28,7 +28,7 @@ class Hardware:
     mem_data_rate_gtps: float
 
     compute_efficiency: float = 0.65    # fraction of peak we see on real models
-    bandwidth_efficiency: float = 0.80   # fraction of peak BW realized
+    bandwidth_efficiency: float = 0.70   # fraction of peak BW realized
 
     tdp_watts: float = 0.0
 
@@ -56,17 +56,32 @@ RTX_5090 = Hardware(
     tdp_watts=575.0,
 )
 
-# Three edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
-# (Qwen3-30B-A3B Q4_K_M, 1K prompt, short response).
-NPU_LOW = Hardware(
-    name="NPU Low",
+# Edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
+# (Qwen3-30B-A3B Q4_K_M, 1K prompt, short response). All four tiers use a
+# uniform bandwidth_efficiency=0.70 so cross-tier comparisons only reflect
+# hardware differences, not utilization assumptions.
+NPU_LOW_LP4 = Hardware(
+    name="NPU Low-LP4",
     peak_tops_bf16=50.0, peak_tops_int8=100.0, peak_tops_fp8=100.0,
     mem_bandwidth_gbs=32.0, mem_capacity_gb=16.0,
     mem_bus_width_bits=64, mem_type="LPDDR4", mem_data_rate_gtps=4.0,
-    compute_efficiency=0.60, bandwidth_efficiency=0.75,
+    compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
+)
+
+# LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
+# bandwidth (67.2 vs 32.0 GB/s) with no change to the compute silicon or
+# memory capacity. No vendor LLM benchmark for this variant — sizer projects
+# decode tok/s from bandwidth ratio against the LP4 measurement.
+NPU_LOW_LP5X = Hardware(
+    name="NPU Low-LP5X",
+    peak_tops_bf16=50.0, peak_tops_int8=100.0, peak_tops_fp8=100.0,
+    mem_bandwidth_gbs=67.2, mem_capacity_gb=16.0,
+    mem_bus_width_bits=64, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
+    compute_efficiency=0.60, bandwidth_efficiency=0.70,
+    tdp_watts=10.0,
 )
 
 NPU_MID = Hardware(
@@ -74,7 +89,7 @@ NPU_MID = Hardware(
     peak_tops_bf16=200.0, peak_tops_int8=400.0, peak_tops_fp8=400.0,
     mem_bandwidth_gbs=134.4, mem_capacity_gb=24.0,
     mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
-    compute_efficiency=0.65, bandwidth_efficiency=0.80,
+    compute_efficiency=0.65, bandwidth_efficiency=0.70,
     tdp_watts=25.0,
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.351,
@@ -85,13 +100,16 @@ NPU_HIGH = Hardware(
     peak_tops_bf16=275.0, peak_tops_int8=550.0, peak_tops_fp8=550.0,
     mem_bandwidth_gbs=179.2, mem_capacity_gb=32.0,
     mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=11.2,
-    compute_efficiency=0.70, bandwidth_efficiency=0.80,
+    compute_efficiency=0.70, bandwidth_efficiency=0.70,
     tdp_watts=40.0,
     measured_llm_q4_decode_tok_s=50.46,
     measured_llm_ttft_1k_sec=0.1755,
 )
 
-TIERS = {t.name: t for t in (NPU_LOW, NPU_MID, NPU_HIGH)}
+# Backwards-compat alias — some older scripts / CSV rows still reference NPU_LOW.
+NPU_LOW = NPU_LOW_LP4
+
+TIERS = {t.name: t for t in (NPU_LOW_LP4, NPU_LOW_LP5X, NPU_MID, NPU_HIGH)}
 
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
