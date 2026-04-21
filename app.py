@@ -247,6 +247,19 @@ with st.sidebar:
                            help="Each stream processes its own video source. YOLO batching "
                                 "kicks in automatically (batch = N_streams).")
 
+    compiler_quality = st.slider(
+        "Edge compiler quality vs TensorRT", 0.50, 1.00, 1.00, 0.05,
+        help="5090 measurements came out of NVIDIA TensorRT — a best-in-class compiler. "
+             "Vendor edge-NPU compilers (SNPE, NeuroPilot, OpenVINO-NPU, etc.) typically "
+             "extract a fraction of the same theoretical peak. **1.00 = parity** (projections "
+             "unchanged, optimistic). **0.75 = realistic** (edge compiler 25% slower per kernel). "
+             "**0.50 = pessimistic** (half as good — first-gen NPU SDK). Applied as a post-multiplier "
+             "on every projected vision latency path.",
+    )
+    if compiler_quality < 1.00:
+        st.caption(f"⚠️ Applying {(1 - compiler_quality) * 100:.0f}% compiler-quality haircut "
+                    f"to projected vision FPS (LLM tok/s unaffected — those are vendor-measured).")
+
     st.markdown("---")
     st.header("LLM co-exist")
     llm_enabled = st.toggle("Share the NPU with a generative LLM",
@@ -306,7 +319,8 @@ with st.sidebar:
 # ───────────────────────── Main area ─────────────────────────
 
 # Compute projections
-vision = project_vision(pipeline, hw, resolution, n_streams=n_streams)
+vision = project_vision(pipeline, hw, resolution, n_streams=n_streams,
+                         compiler_quality_vs_trt=compiler_quality)
 llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
 
 # ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
@@ -552,7 +566,8 @@ with tab_overview:
         st.subheader("Per-stream FPS vs NPU tier")
         tier_rows = []
         for name, t_hw in TIERS.items():
-            v = project_vision(pipeline, t_hw, resolution, n_streams=n_streams)
+            v = project_vision(pipeline, t_hw, resolution, n_streams=n_streams,
+                               compiler_quality_vs_trt=compiler_quality)
             tier_rows.append(dict(tier=name, fps=v["fps_per_stream"]))
         # Add current if custom
         if hw.name not in TIERS:
@@ -833,7 +848,8 @@ with tab_streams:
     st.subheader(f"Per-stream FPS vs concurrent stream count — {pipeline.label}")
     rows = []
     for N in [1, 2, 4, 8, 16]:
-        v = project_vision(pipeline, hw, resolution, n_streams=N)
+        v = project_vision(pipeline, hw, resolution, n_streams=N,
+                            compiler_quality_vs_trt=compiler_quality)
         rows.append({
             "N streams": N,
             "Per-stream FPS": round(v["fps_per_stream"], 1),

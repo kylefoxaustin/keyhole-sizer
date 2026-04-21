@@ -332,10 +332,24 @@ def bandwidth_ratio(hw: Hardware, reference: Hardware = NPU_MID) -> float:
     return hw.effective_bandwidth_gbs / reference.effective_bandwidth_gbs
 
 
-def scale_edge_ms(reference_ms: float, hw: Hardware, reference: Hardware = NPU_MID) -> float:
-    """Scale a reference edge latency (measured at `reference`) to `hw`."""
+def scale_edge_ms(reference_ms: float, hw: Hardware, reference: Hardware = NPU_MID,
+                   compiler_quality_vs_trt: float = 1.0) -> float:
+    """Scale a reference edge latency (measured at `reference`) to `hw`.
+
+    `compiler_quality_vs_trt` in (0, 1] discounts the projection to model the
+    fact that 5090 measurements came out of NVIDIA TensorRT — a best-in-class
+    compiler — while vendor edge-NPU compilers (SNPE, NeuroPilot, OpenVINO-NPU,
+    etc.) typically extract 50-75% of the same peak. 1.0 = compiler parity
+    (unchanged), 0.75 = edge compiler 25% slower per kernel, etc.
+
+    Applied to edge ms as a post-multiplier (ms grows as quality shrinks):
+        hw_ms = reference_ms / bandwidth_ratio / compiler_quality_vs_trt
+    """
     r = bandwidth_ratio(hw, reference)
-    return reference_ms / r if r > 0 else float("inf")
+    if r <= 0:
+        return float("inf")
+    q = max(1e-3, compiler_quality_vs_trt)  # guard against div-by-zero
+    return reference_ms / r / q
 
 
 # ───────────────────────── Vision projection ─────────────────────────
@@ -347,6 +361,7 @@ def project_vision(
     n_streams: int = 1,
     yolo_batched: bool = True,
     reference: Hardware = NPU_MID,
+    compiler_quality_vs_trt: float = 1.0,
 ) -> dict:
     """Project per-stream and total vision FPS on `hw`.
 
@@ -354,10 +369,17 @@ def project_vision(
     using the NPU-Mid-measured curve scaled by bandwidth ratio. The CLIP
     portion is already amortized at 1 Hz inside the pipeline's edge_ms
     when the pipeline key indicates 1-Hz CLIP.
+
+    `compiler_quality_vs_trt` models the fact that the 5090 reference
+    measurements used NVIDIA TensorRT, while vendor edge-NPU compilers
+    typically extract a fraction of the same theoretical peak. 1.0 =
+    compiler parity (unchanged projections); 0.75 = edge compiler 25%
+    slower per kernel (realistic); 0.50 = half as good (pessimistic).
+    Applied uniformly to every latency path within the projection.
     """
     ms_field = {"720p": "edge_ms_720p", "1080p": "edge_ms_1080p", "4K": "edge_ms_4k"}[resolution]
     base_ms_at_mid = getattr(pipeline, ms_field)
-    per_stream_ms = scale_edge_ms(base_ms_at_mid, hw, reference)
+    per_stream_ms = scale_edge_ms(base_ms_at_mid, hw, reference, compiler_quality_vs_trt)
 
     # YOLO + CLIP split (known for the Hybrid V2 / TRT pipelines). At any
     # N_streams we include this breakdown when we can decompose.
@@ -384,18 +406,18 @@ def project_vision(
         if pipeline.key in known_composed:
             # YOLO single-stream edge ms at this HW (batch=1 curve)
             yolo_ms_mid = yolo_batch_edge_ms_npu_mid(1)
-            yolo_ms_hw = scale_edge_ms(yolo_ms_mid, hw, reference)
+            yolo_ms_hw = scale_edge_ms(yolo_ms_mid, hw, reference, compiler_quality_vs_trt)
             res_adj = {"720p": 1.0, "1080p": 1.07, "4K": 1.21}[resolution]
             yolo_ms_hw *= res_adj
             # CLIP contribution — see n_streams>1 branch for same breakdown
             if pipeline.key == "trt_fp8_1hz_clip":
-                clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID / 30.0, hw, reference)
+                clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID / 30.0, hw, reference, compiler_quality_vs_trt)
             elif pipeline.key == "trt_fp8_every_frame":
-                clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID, hw, reference)
+                clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID, hw, reference, compiler_quality_vs_trt)
             elif pipeline.key == "hybrid_v2_bf16":
-                clip_ms = scale_edge_ms(29.8, hw, reference)
+                clip_ms = scale_edge_ms(29.8, hw, reference, compiler_quality_vs_trt)
             elif pipeline.key == "hybrid_v2_torchao_fp8":
-                clip_ms = scale_edge_ms(15.1, hw, reference)
+                clip_ms = scale_edge_ms(15.1, hw, reference, compiler_quality_vs_trt)
             else:  # yolo_only_fp8
                 clip_ms = 0.0
             result["yolo_ms"] = yolo_ms_hw
@@ -409,7 +431,7 @@ def project_vision(
                         "hybrid_v2_torchao_fp8", "yolo_only_fp8"):
         # YOLO portion (scales with batch size, then scale to target HW BW)
         yolo_batch_ms_mid = yolo_batch_edge_ms_npu_mid(n_streams)
-        yolo_batch_ms_hw = scale_edge_ms(yolo_batch_ms_mid, hw, reference)
+        yolo_batch_ms_hw = scale_edge_ms(yolo_batch_ms_mid, hw, reference, compiler_quality_vs_trt)
 
         # Resolution adjustment on the YOLO portion (approximate — 720p baseline,
         # 1080p ~1.05×, 4K ~1.15× based on measured bake-off ratios).
@@ -427,15 +449,15 @@ def project_vision(
             # independent of N — but per-BATCH cost scales with N, which is
             # what we add to batch_ms here.
             clip_component_ms = scale_edge_ms(
-                CLIP_FP8_EDGE_MS_NPU_MID * n_streams / 30.0, hw, reference
+                CLIP_FP8_EDGE_MS_NPU_MID * n_streams / 30.0, hw, reference, compiler_quality_vs_trt
             )
         elif pipeline.key == "trt_fp8_every_frame":
             # CLIP runs on every stream every frame — stays linear in N
-            clip_component_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID * n_streams, hw, reference)
+            clip_component_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID * n_streams, hw, reference, compiler_quality_vs_trt)
         elif pipeline.key == "hybrid_v2_bf16":
-            clip_component_ms = scale_edge_ms(29.8 * n_streams, hw, reference)
+            clip_component_ms = scale_edge_ms(29.8 * n_streams, hw, reference, compiler_quality_vs_trt)
         elif pipeline.key == "hybrid_v2_torchao_fp8":
-            clip_component_ms = scale_edge_ms(15.1 * n_streams, hw, reference)
+            clip_component_ms = scale_edge_ms(15.1 * n_streams, hw, reference, compiler_quality_vs_trt)
         # yolo_only_fp8 has no CLIP
 
         batch_ms = yolo_batch_ms_hw + clip_component_ms
