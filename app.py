@@ -260,6 +260,28 @@ with st.sidebar:
         st.caption(f"⚠️ Applying {(1 - compiler_quality) * 100:.0f}% compiler-quality haircut "
                     f"to projected vision FPS (LLM tok/s unaffected — those are vendor-measured).")
 
+    with st.expander("ℹ️ CPU preprocessing cost (not in these FPS numbers)"):
+        st.markdown(
+            "Every YOLO frame needs a **640×640 letterbox resize** before it hits "
+            "the TRT engine. That resize runs on the **host CPU** (OpenCV "
+            "`cv2.resize` bilinear), not on the GPU/NPU — and it's excluded from "
+            "the engine ms/frame numbers here, the same way it's excluded from the "
+            "5090 bake-off timings.\n\n"
+            "**Measured** (5090 host, i9-14900KF, single-thread, N=500):\n"
+            "- 720p → 640×640: **0.17 ms/frame**\n"
+            "- 1080p → 640×640: **0.32 ms/frame**\n"
+            "- 4K → 640×640: **0.33 ms/frame**\n\n"
+            "That's **~0.5–1% of one CPU core at 30 fps**. Flat across source "
+            "resolutions because the 640×640 output dominates cost.\n\n"
+            "**Edge ARM extrapolation** (Cortex-A55 ≈ 10× slower single-thread): "
+            "~**2–3 ms/frame**, ~**6–10% of one edge core at 30 fps**.\n\n"
+            "**The caveat that matters:** most edge SoCs move this off-CPU via a "
+            "fixed-function ISP, 2D GPU, or video-decoder output scaler "
+            "(Qualcomm, MediaTek, NXP i.MX 95, Ambarella, Hailo all ship one). "
+            "Pure-NPU boards without such a block (e.g., Google Coral) pay the "
+            "full CPU cost."
+        )
+
     st.markdown("---")
     st.header("LLM co-exist")
     llm_enabled = st.toggle("Share the NPU with a generative LLM",
