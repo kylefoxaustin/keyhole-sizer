@@ -40,6 +40,12 @@ PIPELINE_TO_NCU: dict[str, list[tuple[str, float]]] = {
     "trt_fp8_1hz_clip":      [("yolo_seg_fp8_trt", 1.0), ("clip_trt", 1.0 / 30.0)],
     "trt_fp8_every_frame":   [("yolo_seg_fp8_trt", 1.0), ("clip_trt", 1.0)],
     "yolo_only_fp8":         [("yolo_seg_fp8_trt", 1.0)],
+    # yolov8n-seg variants — same two-stage shape, nano YOLO + CLIP FP8.
+    # ncu workload id encodes the variant so this mapping uses the
+    # distinct yolo_seg_yolov8n-seg_fp8_trt range.
+    "yolov8n_trt_fp8_1hz_clip":    [("yolo_seg_yolov8n-seg_fp8_trt", 1.0), ("clip_trt", 1.0 / 30.0)],
+    "yolov8n_trt_fp8_every_frame": [("yolo_seg_yolov8n-seg_fp8_trt", 1.0), ("clip_trt", 1.0)],
+    "yolov8n_only_fp8":            [("yolo_seg_yolov8n-seg_fp8_trt", 1.0)],
     # YOLOE-26 one-model variants
     "yoloe26_s_pf_fp16":     [("yoloe26_pytorch_fp16", 1.0)],
     "yoloe26_s_pf_trt_fp8":  [("yoloe26_trt_fp8", 1.0)],
