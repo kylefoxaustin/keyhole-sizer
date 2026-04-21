@@ -286,6 +286,34 @@ PIPELINES = {
         vram_mb=80,
         note="The YOLO-only ceiling. Live-streaming baseline.",
     ),
+    # ─────────── yolov8n-seg variants (nano, 3.4M params) — added 2026-04-21
+    # for cross-silicon comparison against real-NPU benchmarks that are almost
+    # always published against yolov8n-seg. Same two-stage shape as the yolo11s-seg
+    # pipelines; measured 5090 TRT ms × 16.19× BW ratio → NPU Mid edge ms.
+    "yolov8n_trt_fp8_1hz_clip": VisionPipeline(
+        key="yolov8n_trt_fp8_1hz_clip",
+        label="yolov8n-seg FP8 + CLIP @ 1 Hz",
+        description="Nano YOLO-seg (3.4M) every frame; CLIP FP8 once per second.",
+        edge_ms_720p=8.4, edge_ms_1080p=8.8, edge_ms_4k=9.1,
+        vram_mb=180,
+        note="~3× faster than yolo11s-seg at the same precision — ~120 FPS ceiling @ 720p.",
+    ),
+    "yolov8n_trt_fp8_every_frame": VisionPipeline(
+        key="yolov8n_trt_fp8_every_frame",
+        label="yolov8n-seg FP8 + CLIP every frame",
+        description="Nano YOLO-seg + full-rate CLIP FP8. No keyframe debouncing.",
+        edge_ms_720p=23.0, edge_ms_1080p=23.4, edge_ms_4k=23.7,
+        vram_mb=180,
+        note="~42 FPS @ 720p — CLIP now dominates (15.1 ms), YOLO is free.",
+    ),
+    "yolov8n_only_fp8": VisionPipeline(
+        key="yolov8n_only_fp8",
+        label="yolov8n-seg FP8 only (no CLIP)",
+        description="Detection + segmentation only; drops open-vocabulary tags.",
+        edge_ms_720p=7.9, edge_ms_1080p=8.3, edge_ms_4k=8.6,
+        vram_mb=40,
+        note="YOLO-only ceiling at nano size. ~126 FPS @ 720p — cross-silicon comparison target.",
+    ),
 }
 
 
@@ -301,22 +329,44 @@ _YOLO_BATCH_EDGE_MS_NPU_MID = {
     16: 126.5,
 }
 
+# yolov8n-seg (nano) batching curve — measured 2026-04-21 from
+# data/output/bakeoff/concurrency_yolov8n-seg/summary.json × 16.19 BW ratio.
+# Only populated at these exact batch sizes; interpolated linearly between.
+_YOLOV8N_BATCH_EDGE_MS_NPU_MID = {
+    1: 8.9,
+    2: 10.2,
+    4: 12.5,
+    8: 20.3,
+    16: 34.4,
+}
+
 # CLIP single-forward edge ms at NPU Mid (all-crop batch per frame, FP8 TRT)
 CLIP_FP8_EDGE_MS_NPU_MID = 15.1
 
 
-def yolo_batch_edge_ms_npu_mid(batch: int) -> float:
-    """Edge ms per batch for YOLO-seg FP8 at NPU Mid, interpolated."""
-    keys = sorted(_YOLO_BATCH_EDGE_MS_NPU_MID.keys())
+def yolo_batch_edge_ms_npu_mid(batch: int, variant: str = "yolo11s-seg") -> float:
+    """Edge ms per batch for YOLO-seg FP8 at NPU Mid, interpolated.
+
+    `variant` selects the batching curve: "yolo11s-seg" (shipping default) or
+    "yolov8n-seg" (nano, 3.4M params — ~3× smaller, ~3× faster per-batch).
+    Unknown variants fall back to the yolo11s-seg curve.
+    """
+    table = _YOLOV8N_BATCH_EDGE_MS_NPU_MID if variant == "yolov8n-seg" else _YOLO_BATCH_EDGE_MS_NPU_MID
+    keys = sorted(table.keys())
     if batch <= keys[0]:
-        return _YOLO_BATCH_EDGE_MS_NPU_MID[keys[0]]
+        return table[keys[0]]
     if batch >= keys[-1]:
-        return _YOLO_BATCH_EDGE_MS_NPU_MID[keys[-1]]
+        return table[keys[-1]]
     for lo, hi in zip(keys, keys[1:]):
         if lo <= batch <= hi:
             t = (batch - lo) / (hi - lo)
-            return _YOLO_BATCH_EDGE_MS_NPU_MID[lo] * (1 - t) + _YOLO_BATCH_EDGE_MS_NPU_MID[hi] * t
-    return _YOLO_BATCH_EDGE_MS_NPU_MID[keys[-1]]
+            return table[lo] * (1 - t) + table[hi] * t
+    return table[keys[-1]]
+
+
+def _yolo_variant_for_pipeline(key: str) -> str:
+    """Infer YOLO variant from pipeline key (used to pick the batching curve)."""
+    return "yolov8n-seg" if key.startswith("yolov8n_") else "yolo11s-seg"
 
 
 # ───────────────────────── Scaling between NPUs ─────────────────────────
@@ -386,6 +436,7 @@ def project_vision(
     known_composed = {
         "trt_fp8_1hz_clip", "trt_fp8_every_frame",
         "hybrid_v2_bf16", "hybrid_v2_torchao_fp8", "yolo_only_fp8",
+        "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame", "yolov8n_only_fp8",
     }
 
     # Single stream case
@@ -404,21 +455,20 @@ def project_vision(
             "bandwidth_ratio_vs_ref": bandwidth_ratio(hw, reference),
         }
         if pipeline.key in known_composed:
-            # YOLO single-stream edge ms at this HW (batch=1 curve)
-            yolo_ms_mid = yolo_batch_edge_ms_npu_mid(1)
+            yolo_variant = _yolo_variant_for_pipeline(pipeline.key)
+            yolo_ms_mid = yolo_batch_edge_ms_npu_mid(1, variant=yolo_variant)
             yolo_ms_hw = scale_edge_ms(yolo_ms_mid, hw, reference, compiler_quality_vs_trt)
             res_adj = {"720p": 1.0, "1080p": 1.07, "4K": 1.21}[resolution]
             yolo_ms_hw *= res_adj
-            # CLIP contribution — see n_streams>1 branch for same breakdown
-            if pipeline.key == "trt_fp8_1hz_clip":
+            if pipeline.key in ("trt_fp8_1hz_clip", "yolov8n_trt_fp8_1hz_clip"):
                 clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID / 30.0, hw, reference, compiler_quality_vs_trt)
-            elif pipeline.key == "trt_fp8_every_frame":
+            elif pipeline.key in ("trt_fp8_every_frame", "yolov8n_trt_fp8_every_frame"):
                 clip_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID, hw, reference, compiler_quality_vs_trt)
             elif pipeline.key == "hybrid_v2_bf16":
                 clip_ms = scale_edge_ms(29.8, hw, reference, compiler_quality_vs_trt)
             elif pipeline.key == "hybrid_v2_torchao_fp8":
                 clip_ms = scale_edge_ms(15.1, hw, reference, compiler_quality_vs_trt)
-            else:  # yolo_only_fp8
+            else:  # yolo_only_fp8 / yolov8n_only_fp8
                 clip_ms = 0.0
             result["yolo_ms"] = yolo_ms_hw
             result["clip_ms"] = clip_ms
@@ -428,9 +478,11 @@ def project_vision(
     # composed of YOLO + CLIP, scale each piece independently. Fall back to
     # the naive division if we can't decompose.
     if pipeline.key in ("trt_fp8_1hz_clip", "trt_fp8_every_frame", "hybrid_v2_bf16",
-                        "hybrid_v2_torchao_fp8", "yolo_only_fp8"):
-        # YOLO portion (scales with batch size, then scale to target HW BW)
-        yolo_batch_ms_mid = yolo_batch_edge_ms_npu_mid(n_streams)
+                        "hybrid_v2_torchao_fp8", "yolo_only_fp8",
+                        "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
+                        "yolov8n_only_fp8"):
+        yolo_variant = _yolo_variant_for_pipeline(pipeline.key)
+        yolo_batch_ms_mid = yolo_batch_edge_ms_npu_mid(n_streams, variant=yolo_variant)
         yolo_batch_ms_hw = scale_edge_ms(yolo_batch_ms_mid, hw, reference, compiler_quality_vs_trt)
 
         # Resolution adjustment on the YOLO portion (approximate — 720p baseline,
@@ -442,23 +494,17 @@ def project_vision(
         # or every 30th frame for 1-Hz). Per batch of N frames (one per stream),
         # the NPU must amortize all per-stream CLIP invocations sequentially.
         clip_component_ms = 0.0
-        if pipeline.key == "trt_fp8_1hz_clip":
-            # 1 Hz = each stream calls CLIP once per 30 frames. Per batch of N
-            # frames, expected CLIP calls = N/30, so per-batch CLIP cost at the
-            # NPU = (N/30) × 15.1 ms. Per-FRAME amortized cost is 0.5 ms,
-            # independent of N — but per-BATCH cost scales with N, which is
-            # what we add to batch_ms here.
+        if pipeline.key in ("trt_fp8_1hz_clip", "yolov8n_trt_fp8_1hz_clip"):
             clip_component_ms = scale_edge_ms(
                 CLIP_FP8_EDGE_MS_NPU_MID * n_streams / 30.0, hw, reference, compiler_quality_vs_trt
             )
-        elif pipeline.key == "trt_fp8_every_frame":
-            # CLIP runs on every stream every frame — stays linear in N
+        elif pipeline.key in ("trt_fp8_every_frame", "yolov8n_trt_fp8_every_frame"):
             clip_component_ms = scale_edge_ms(CLIP_FP8_EDGE_MS_NPU_MID * n_streams, hw, reference, compiler_quality_vs_trt)
         elif pipeline.key == "hybrid_v2_bf16":
             clip_component_ms = scale_edge_ms(29.8 * n_streams, hw, reference, compiler_quality_vs_trt)
         elif pipeline.key == "hybrid_v2_torchao_fp8":
             clip_component_ms = scale_edge_ms(15.1 * n_streams, hw, reference, compiler_quality_vs_trt)
-        # yolo_only_fp8 has no CLIP
+        # yolo_only_fp8 / yolov8n_only_fp8 have no CLIP
 
         batch_ms = yolo_batch_ms_hw + clip_component_ms
         fps_per_stream = 1000 / batch_ms if batch_ms > 0 else 0
