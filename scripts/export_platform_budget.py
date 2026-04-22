@@ -34,15 +34,18 @@ from sizer.platform_budget import (
 )
 
 HW_SLUGS = {
-    "npu_low_lp5":  "NPU Low-LP5",
-    "npu_low_lp5x": "NPU Low-LP5X",
-    "npu_mid":      "NPU Mid",
-    "npu_high":     "NPU High",
-    # Backwards-compat aliases: `npu_low` and `npu_low_lp4` keep resolving
-    # to the entry-tier NPU (now spec'd as LPDDR5 @ 6.4 GT/s after the
-    # 2026-04-22 correction — previously mis-spec'd as LPDDR4 @ 4.0 GT/s).
-    "npu_low":      "NPU Low-LP5",
-    "npu_low_lp4":  "NPU Low-LP5",
+    "npu_low_lp5_32bit": "NPU Low-LP5-32bit",
+    "npu_low_lp5_64bit": "NPU Low-LP5-64bit",
+    "npu_low_lp5x":      "NPU Low-LP5X",
+    "npu_mid":           "NPU Mid",
+    "npu_high":          "NPU High",
+    # Backwards-compat aliases — older slugs resolve to the 64-bit variant
+    # (the shipping-class entry NPU before Kyle split it into 32/64-bit
+    # options on 2026-04-22). `npu_low_lp5` was the pre-split name;
+    # `npu_low` / `npu_low_lp4` are older mis-spec'd aliases.
+    "npu_low_lp5":       "NPU Low-LP5-64bit",
+    "npu_low":           "NPU Low-LP5-64bit",
+    "npu_low_lp4":       "NPU Low-LP5-64bit",
 }
 
 
