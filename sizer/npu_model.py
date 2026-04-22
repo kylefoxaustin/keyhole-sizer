@@ -62,7 +62,14 @@ RTX_5090 = Hardware(
 # hardware differences, not utilization assumptions.
 NPU_LOW_LP4 = Hardware(
     name="NPU Low-LP4",
-    peak_tops_bf16=50.0, peak_tops_int8=100.0, peak_tops_fp8=100.0,
+    # TOPS aligned to real silicon at this tier (NXP i.MX 95 Neutron
+    # N3-1024S, 2 TOPS INT8) rather than the aspirational 50/100 we had
+    # before. BF16 ~half of INT8 peak on this class; no native FP8 on
+    # Neutron → FP8 = 0 (FP8 pipelines would need to fall back to INT8
+    # path). TOPS is currently metadata only — project_vision uses
+    # bandwidth-bound scaling, not compute — but the published tier
+    # card should match reality rather than overstate it.
+    peak_tops_bf16=1.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
     mem_bandwidth_gbs=32.0, mem_capacity_gb=16.0,
     mem_bus_width_bits=64, mem_type="LPDDR4", mem_data_rate_gtps=4.0,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
