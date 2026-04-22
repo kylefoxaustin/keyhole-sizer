@@ -314,6 +314,43 @@ PIPELINES = {
         vram_mb=40,
         note="YOLO-only ceiling at nano size. ~126 FPS @ 720p — cross-silicon comparison target.",
     ),
+    # ─────────── INT8 pipelines for vendor-comparison scenarios ──────────
+    # Edge ms derived from measured 5090 INT8 TRT execute() × 16.19× BW ratio.
+    # INT8 is ~22% slower than FP16/FP8 on 5090 Blackwell because at these
+    # model sizes (3.4M / 10.1M params) kernel-launch overhead already
+    # dominates — TRT's INT8 graph inserts extra quantize/dequantize kernels
+    # that cost more than the INT8 compute saves. The speed cliff is
+    # structural (kernel-dispatch, not bandwidth) so BW-ratio scaling
+    # probably overstates edge efficiency — set expectations appropriately.
+    #
+    # Quality numbers in the note fields are box recall at 720p vs FP16
+    # baseline (detection-stability, IoU-matched). INT8 quality is highly
+    # calibration-dependent — the two nano entries differ ONLY in the
+    # calibration image set fed to TRT's Int8EntropyCalibrator2.
+    "yolo11s_trt_int8": VisionPipeline(
+        key="yolo11s_trt_int8",
+        label="yolo11s-seg INT8 (yolo-only, 20-frame PTQ)",
+        description="Shipping detector at INT8. PTQ via 20 bake-off frames.",
+        edge_ms_720p=14.7, edge_ms_1080p=15.2, edge_ms_4k=15.4,
+        vram_mb=80,
+        note="~68 FPS @ 720p edge but 35% slower than FP8. Recall 0.875 (-13% vs FP16). Larger calibration would improve quality; see yolov8n-seg's 20-frame vs coco128 pair for the effect.",
+    ),
+    "yolov8n_trt_int8_coco128": VisionPipeline(
+        key="yolov8n_trt_int8_coco128",
+        label="yolov8n-seg INT8 (coco128-seg PTQ) — vendor-comparison",
+        description="Nano detector at INT8, calibrated on 128 COCO images via Ultralytics.",
+        edge_ms_720p=10.0, edge_ms_1080p=10.4, edge_ms_4k=10.2,
+        vram_mb=55,
+        note="~100 FPS @ 720p edge, recall 0.912 (-9% vs FP16). Representative of credible vendor INT8 numbers — use this for apples-to-apples against NPU silicon benchmarks that disclose their calibration dataset.",
+    ),
+    "yolov8n_trt_int8_20frame": VisionPipeline(
+        key="yolov8n_trt_int8_20frame",
+        label="yolov8n-seg INT8 (20-frame PTQ) — CAUTIONARY",
+        description="Same engine, calibrated on 20 bake-off frames — insufficient coverage.",
+        edge_ms_720p=9.9, edge_ms_1080p=10.4, edge_ms_4k=10.5,
+        vram_mb=55,
+        note="~101 FPS @ 720p edge but recall COLLAPSES to 0.714 (-29% vs FP16). Shows what undisclosed small-calibration INT8 benchmarks actually deliver. Worst-case vendor-claim verification target.",
+    ),
 }
 
 
