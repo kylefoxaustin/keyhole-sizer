@@ -161,6 +161,34 @@ NPU_HIGH = Hardware(
 # Use `measured_edge_ms` to return the exact production number for
 # workloads where we have real silicon data — otherwise projection
 # proceeds via the usual BW / compute clamp path.
+# Reference-class GPU tier. Same silicon spec as the RTX_5090 constant
+# above but carries measured_edge_ms for every pipeline we have a real
+# Blackwell-TRT bake-off measurement for. Reuses the Phase 1 override
+# path, so selecting this tier surfaces a 'measured silicon' banner
+# (same mechanism as NPU i.MX 95). Lets users see "what Kyle's little
+# monster can do" as the top end of the tier ladder.
+# Only the (pipeline, resolution) pairs with explicit entries hit the
+# override path; everything else falls through to the existing BW
+# projection so new pipelines don't silently break.
+RTX_5090_REFERENCE = Hardware(
+    name="RTX 5090 (reference, measured)",
+    peak_tops_bf16=209.0, peak_tops_int8=419.0, peak_tops_fp8=419.0,
+    mem_bandwidth_gbs=1792.0, mem_capacity_gb=32.0,
+    mem_bus_width_bits=512, mem_type="GDDR7", mem_data_rate_gtps=28.0,
+    compute_efficiency=0.70, bandwidth_efficiency=0.85,
+    tdp_watts=575.0,
+    measured_edge_ms={
+        # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
+        # Add more entries here as backend pulls them from data/output/
+        # bakeoff/*.json — override path is additive-only, no risk.
+        "yolov8n_only_fp8":           {"720p": 0.49, "1080p": 0.49, "4K": 0.51},
+        "yolov8n_trt_int8_coco128":   {"1080p": 0.62},
+        "yolo_only_fp8":              {"720p": 0.68},  # yolo11s-seg FP8 TRT
+        "sam3_bf16":                  {"720p": 95.0, "1080p": 95.0, "4K": 95.0},
+        "efficientsam3_es_ev_s_bf16": {"720p": 27.0, "1080p": 44.0, "4K": 138.0},
+    },
+)
+
 NPU_IMX95_MEASURED = Hardware(
     name="NPU i.MX 95 (ground truth)",
     peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
@@ -181,7 +209,7 @@ NPU_LOW_LP5 = NPU_LOW_LP5_64BIT
 
 TIERS = {t.name: t for t in (NPU_LOW_LP5_32BIT, NPU_IMX95_MEASURED,
                               NPU_LOW_LP5_64BIT, NPU_LOW_LP5X,
-                              NPU_MID, NPU_HIGH)}
+                              NPU_MID, NPU_HIGH, RTX_5090_REFERENCE)}
 
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 

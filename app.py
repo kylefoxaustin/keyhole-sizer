@@ -229,7 +229,9 @@ with st.sidebar:
         "Tier preset",
         options=("NPU Low-LP5-32bit", "NPU i.MX 95 (ground truth)",
                  "NPU Low-LP5-64bit", "NPU Low-LP5X",
-                 "NPU Mid", "NPU High", "Custom"),
+                 "NPU Mid", "NPU High",
+                 "RTX 5090 (reference, measured)",
+                 "Custom"),
         index=4,  # lands on 'NPU Mid'
         help="Low-LP5-32bit = 32-bit LPDDR5 @ 6.4 GT/s (25.6 GB/s theoretical), dense INT8-only silicon. "
              "i.MX 95 = same silicon class with a real production measurement (NXP eIQ Neutron, "
@@ -240,6 +242,9 @@ with st.sidebar:
              "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5-64bit). "
              "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target, BF16/FP8-capable). "
              "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin). "
+             "RTX 5090 = the reference silicon every BW-scaling projection here is derived from "
+             "(512-bit GDDR7 @ 28 GT/s, 1792 GB/s). Blackwell-TRT 10.16 bake-off measurements "
+             "for 5 pipelines surface directly via the measured-silicon override. "
              "Custom = roll your own. All presets assume 70% bandwidth efficiency.",
         key="tier",
     )
