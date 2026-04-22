@@ -13,6 +13,7 @@ composes rows, serializes to CSV/XLSX, and wires `st.download_button`.
 """
 from __future__ import annotations
 
+import io
 from typing import Any, Optional
 
 from sizer.npu_model import (
@@ -297,6 +298,114 @@ def all_pipeline_kpi_rows(
                          compiler_quality_vs_trt=compiler_quality_vs_trt)
         for k in keys_sorted
     ]
+
+
+# ─────── XLSX export: formatted spreadsheet ─────────────────────────
+#
+# CSV can't carry bold/alignment, so when Kyle wants a human-readable
+# downloadable spreadsheet we emit XLSX via openpyxl. Formatting rules:
+#   • Row 1 (headers): Title Case, bold
+#   • Column A: right-aligned
+#   • All other columns: center-aligned
+#   • Numeric columns keep numeric type (sortable in Excel/Calc)
+#
+# openpyxl is pinned in requirements.txt (added alongside this module).
+
+# Column key → display header mapping. Handles acronyms so we don't get
+# clown-case output like "Hw" or "Ms" — those stay uppercase/lowercase
+# as readers expect them.
+_HEADER_DISPLAY: dict[str, str] = {
+    "model":         "Model",
+    "pipeline_key":  "Pipeline Key",
+    "hw":            "HW",
+    "resolution":    "Resolution",
+    "ingest_type":   "Ingest Type",
+    "ingest_ms":     "Ingest ms",
+    "yolo_type":     "YOLO Type",
+    "yolo_ms":       "YOLO ms",
+    "seg_type":      "Seg Type",
+    "seg_ms":        "Seg ms",
+    "llm_type":      "LLM Type",
+    "llm_ms":        "LLM ms",
+    "total_fps":     "Total FPS",
+}
+
+
+def kpi_rows_to_xlsx(rows: list[dict[str, Any]]) -> bytes:
+    """Render KPI rows to an XLSX byte buffer with Kyle's requested formatting:
+
+      • Row 1 is Title-Cased + bold.
+      • Column A is right-aligned.
+      • All other columns are center-aligned.
+      • Column widths auto-sized to content.
+
+    Returns raw bytes ready for `st.download_button`.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+
+    if not rows:
+        # Empty workbook with just headers from the mapping
+        rows = [{k: "" for k in _HEADER_DISPLAY}]
+
+    # Preserve column order from the first row's dict (Python dicts are
+    # insertion-ordered since 3.7). If _HEADER_DISPLAY has a mapping for
+    # the key, use that; otherwise fall back to the raw key.
+    columns = list(rows[0].keys())
+    headers = [_HEADER_DISPLAY.get(c, c.replace("_", " ").title()) for c in columns]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "KPI"
+
+    header_font = Font(bold=True)
+    header_align = Alignment(horizontal="center", vertical="center")
+    colA_align = Alignment(horizontal="right", vertical="center")
+    other_align = Alignment(horizontal="center", vertical="center")
+
+    # Header row
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.alignment = header_align
+
+    # Data rows
+    for row_idx, row in enumerate(rows, start=2):
+        for col_idx, key in enumerate(columns, start=1):
+            val = row.get(key)
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.alignment = colA_align if col_idx == 1 else other_align
+
+    # Auto-size column widths based on content (cap to a sensible max)
+    for col_idx, key in enumerate(columns, start=1):
+        col_letter = ws.cell(row=1, column=col_idx).column_letter
+        values = [headers[col_idx - 1]] + [
+            str(r.get(key, "")) if r.get(key) is not None else "" for r in rows
+        ]
+        max_len = max((len(v) for v in values), default=10)
+        ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def all_pipeline_kpi_xlsx(
+    hw: Hardware,
+    resolution: str = "720p",
+    llm_enabled: bool = False,
+    llm_quant: str = "Q4_K_M",
+    llm_workload: str = "plain_chat",
+    compiler_quality_vs_trt: float = 1.0,
+) -> bytes:
+    """Convenience: full-sweep KPI rows + XLSX bytes in one call. Drop-in
+    replacement for the CSV path in app.py — same signature."""
+    rows = all_pipeline_kpi_rows(hw, resolution,
+                                  llm_enabled=llm_enabled,
+                                  llm_quant=llm_quant,
+                                  llm_workload=llm_workload,
+                                  compiler_quality_vs_trt=compiler_quality_vs_trt)
+    return kpi_rows_to_xlsx(rows)
 
 
 # ─────── Startup assertion: stage attribution contract ───────────────

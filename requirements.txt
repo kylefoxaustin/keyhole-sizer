@@ -4,3 +4,6 @@ streamlit>=1.40.0
 pandas>=2.2.0
 numpy>=1.26.0
 plotly>=5.24.0
+# XLSX export with formatting (used by sizer/kpi_breakdown.py for the
+# KPI-breakdown download button — bold/alignment can't go through CSV).
+openpyxl>=3.1.0
