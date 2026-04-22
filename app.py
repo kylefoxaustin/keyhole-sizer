@@ -304,7 +304,7 @@ with st.sidebar:
         ("One-model open-vocab",
          ["yoloe26_s_pf_fp16", "yoloe26_s_pf_trt_fp8"],
          "yoloe26_s_pf_trt_fp8"),
-        ("Shipping (Hybrid V2 → TRT)",
+        ("Default (Hybrid V2 → TRT)",
          ["hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
           "trt_fp8_every_frame", "trt_fp8_1hz_clip", "yolo_only_fp8"],
          "trt_fp8_1hz_clip"),
@@ -318,7 +318,7 @@ with st.sidebar:
          "yolov8n_trt_int8_coco128"),
     ]
     _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
-    _DEFAULT_TRACK_INDEX = 2  # "Shipping (Hybrid V2 → TRT)"
+    _DEFAULT_TRACK_INDEX = 2  # "Default (Hybrid V2 → TRT)"
 
     # Invariant: PIPELINES ⊆ ⋃(tracks) AND ⋃(tracks) ⊆ PIPELINES.
     # Fails loud on startup/rerun rather than silently dropping a new
@@ -344,7 +344,7 @@ with st.sidebar:
         index=_DEFAULT_TRACK_INDEX,
         help="Pick a narrative track, then choose a specific pipeline within it. "
              "Tracks match the deck's optimization journey: where we started (SAM 3), "
-             "one-model open-vocab alternatives, the Hybrid V2 → TRT shipping path, "
+             "one-model open-vocab alternatives, the Hybrid V2 → TRT default path, "
              "the yolov8n nano cross-variant, and INT8 vendor-comparison points.",
         key="pipeline_track",
     )
