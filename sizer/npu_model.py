@@ -60,22 +60,21 @@ RTX_5090 = Hardware(
 # (Qwen3-30B-A3B Q4_K_M, 1K prompt, short response). All four tiers use a
 # uniform bandwidth_efficiency=0.70 so cross-tier comparisons only reflect
 # hardware differences, not utilization assumptions.
-NPU_LOW_LP4 = Hardware(
-    name="NPU Low-LP4",
-    # TOPS aligned to real silicon at this tier (NXP i.MX 95 Neutron
-    # N3-1024S, 2 TOPS INT8) rather than the aspirational 50/100 we had
-    # before. BF16 ~half of INT8 peak on this class; no native FP8 on
-    # Neutron → FP8 = 0 (FP8 pipelines would need to fall back to INT8
-    # path). TOPS is currently metadata only — project_vision uses
-    # bandwidth-bound scaling, not compute — but the published tier
-    # card should match reality rather than overstate it.
-    # NXP i.MX 95 Neutron is dense INT8 only — no native floating-point
-    # tensor ops at all. BF16 and FP8 pipelines would either fail to
-    # load or fall through to CPU/GPU at massive slowdown. Mark both as
-    # 0 so the tier card honestly reports "INT8-only silicon".
+NPU_LOW_LP5 = Hardware(
+    name="NPU Low-LP5",
+    # TOPS reflects the real silicon at this tier (NXP i.MX 95 Neutron
+    # N3-1024S class): dense INT8 only, 2 TOPS. No native floating-point
+    # tensor ops — BF16/FP8 pipelines either fail to load or fall
+    # through to CPU/GPU at massive slowdown. TOPS is currently
+    # metadata-only in project_vision (edge ms is bandwidth-bound), but
+    # the tier card should match reality rather than overstate it.
     peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
-    mem_bandwidth_gbs=32.0, mem_capacity_gb=16.0,
-    mem_bus_width_bits=64, mem_type="LPDDR4", mem_data_rate_gtps=4.0,
+    # Memory: 64-bit LPDDR5 @ 6.4 GT/s = 51.2 GB/s theoretical × 0.70 =
+    # 35.84 GB/s effective. Previously spec'd as LPDDR4 @ 4.0 GT/s = 32
+    # GB/s theoretical; Kyle corrected on 2026-04-22 — the entry-tier
+    # real silicon at this class ships with LP5 @ 6.4, not LP4.
+    mem_bandwidth_gbs=51.2, mem_capacity_gb=16.0,
+    mem_bus_width_bits=64, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     measured_llm_q4_decode_tok_s=29.27,
@@ -109,7 +108,7 @@ NPU_MID = Hardware(
 # Same bandwidth tier as NPU Mid (128-bit LPDDR5X @ 8.4 GT/s), but the
 # silicon is a dense INT8-only NPU rather than BF16/FP8-capable tensor
 # cores — a real option Kyle is evaluating. 200 TOPS dense INT8 maps to
-# roughly "Mid-class BW with Low-LP4-class precision support".
+# roughly "Mid-class BW with Low-LP5-class precision support".
 # LLM decode numbers assumed identical to NPU Mid because Q4_K_M is
 # BW-bound and the 4-bit weight dequant works equally through either
 # INT8 or BF16 paths — the BW-limited decode shouldn't change between
@@ -138,9 +137,9 @@ NPU_HIGH = Hardware(
 )
 
 # Backwards-compat alias — some older scripts / CSV rows still reference NPU_LOW.
-NPU_LOW = NPU_LOW_LP4
+NPU_LOW = NPU_LOW_LP5
 
-TIERS = {t.name: t for t in (NPU_LOW_LP4, NPU_LOW_LP5X, NPU_MID, NPU_MID_INT8, NPU_HIGH)}
+TIERS = {t.name: t for t in (NPU_LOW_LP5, NPU_LOW_LP5X, NPU_MID, NPU_MID_INT8, NPU_HIGH)}
 
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
