@@ -69,7 +69,11 @@ NPU_LOW_LP4 = Hardware(
     # path). TOPS is currently metadata only — project_vision uses
     # bandwidth-bound scaling, not compute — but the published tier
     # card should match reality rather than overstate it.
-    peak_tops_bf16=1.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
+    # NXP i.MX 95 Neutron is dense INT8 only — no native floating-point
+    # tensor ops at all. BF16 and FP8 pipelines would either fail to
+    # load or fall through to CPU/GPU at massive slowdown. Mark both as
+    # 0 so the tier card honestly reports "INT8-only silicon".
+    peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
     mem_bandwidth_gbs=32.0, mem_capacity_gb=16.0,
     mem_bus_width_bits=64, mem_type="LPDDR4", mem_data_rate_gtps=4.0,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
@@ -769,8 +773,20 @@ def vision_fps_under_llm_load(
 # ───────────────────────── Convenience ─────────────────────────
 
 def describe_hw(hw: Hardware) -> str:
+    # TOPS section adapts to the actual silicon capability rather than
+    # hard-coding BF16/FP8 (which would misreport INT8-only edge NPUs
+    # like the NXP i.MX 95 Neutron — 2 TOPS INT8, 0 BF16, 0 FP8).
+    # Format: list only the supported precisions, ordered BF16 → INT8 → FP8.
+    tops_parts = []
+    if hw.peak_tops_bf16 > 0:
+        tops_parts.append(f"{hw.peak_tops_bf16:.0f} TOPS BF16")
+    if hw.peak_tops_int8 > 0:
+        tops_parts.append(f"{hw.peak_tops_int8:.0f} INT8")
+    if hw.peak_tops_fp8 > 0:
+        tops_parts.append(f"{hw.peak_tops_fp8:.0f} FP8")
+    tops_str = " / ".join(tops_parts) if tops_parts else "no tensor TOPS reported"
     return (f"{hw.name}: {hw.mem_bus_width_bits}-bit {hw.mem_type} @ "
             f"{hw.mem_data_rate_gtps} GT/s = {hw.mem_bandwidth_gbs:.1f} GB/s theo "
             f"({hw.effective_bandwidth_gbs:.1f} GB/s effective)  •  "
-            f"{hw.peak_tops_bf16:.0f} TOPS BF16 / {hw.peak_tops_fp8:.0f} FP8  •  "
+            f"{tops_str}  •  "
             f"{hw.mem_capacity_gb:.0f} GB DRAM  •  {hw.tdp_watts:.0f} W")
