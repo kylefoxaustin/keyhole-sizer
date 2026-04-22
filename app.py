@@ -645,7 +645,7 @@ with st.expander("📥 Export data", expanded=False):
                 "enabled). ss_* columns are additive at the platform level; peak_* "
                 "are per-workload ceilings. Read the header `#` comments for caveats."
             ),
-            use_container_width=True,
+            width="stretch",
         )
     with _btn_mat_col:
         st.download_button(
@@ -658,13 +658,13 @@ with st.expander("📥 Export data", expanded=False):
                 "LLM (quant × workload × answer_kind) combination (~585 rows). "
                 "Custom HW is skipped — use 'This config' for custom. Cached hourly."
             ),
-            use_container_width=True,
+            width="stretch",
         )
     _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
     with _kpi_btn_all_col:
         if st.button(
             "📊 KPI spreadsheet (all models)",
-            use_container_width=True,
+            width="stretch",
             key="kpi_btn_all",
             help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
                  "the current HW / resolution / LLM state, plus a button to "
@@ -674,7 +674,7 @@ with st.expander("📥 Export data", expanded=False):
     with _kpi_btn_one_col:
         if st.button(
             "📊 KPI spreadsheet (this model)",
-            use_container_width=True,
+            width="stretch",
             key="kpi_btn_this",
             help="Reveal the KPI row for just the currently-selected pipeline "
                  "(the one from the sidebar), plus a button to download the XLSX.",
@@ -729,13 +729,13 @@ if _kpi_mode in ("all", "this"):
             data=_kpi_xlsx_bytes,
             file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
             key=f"kpi_dl_{_kpi_mode}",
         )
     with _kpi_data_col:
         st.dataframe(
             pd.DataFrame(_kpi_rows),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
     st.caption(
@@ -783,7 +783,7 @@ with tab_overview:
             height=300, margin=dict(l=40, r=20, t=20, b=40),
         )
         _apply_chart_theme(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
         st.caption(pipeline.note)
         if pipeline.key in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
                              "hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
@@ -828,7 +828,7 @@ with tab_overview:
             height=300, margin=dict(l=40, r=60, t=20, b=40),
         )
         _apply_chart_theme(fig2)
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
 
     # ───── DRAM bandwidth: saturation approximation vs ncu measurement ─────
     st.markdown("---")
@@ -874,7 +874,7 @@ with tab_overview:
                 showlegend=False,
             )
             _apply_chart_theme(fig_bw)
-            st.plotly_chart(fig_bw, use_container_width=True)
+            st.plotly_chart(fig_bw, width="stretch")
 
     with bw_text_col:
         if measured_bytes_per_frame is None:
@@ -975,7 +975,7 @@ with tab_overview:
                 height=360, margin=dict(l=60, r=30, t=40, b=60),
             )
             _apply_chart_theme(fig_llm)
-            st.plotly_chart(fig_llm, use_container_width=True)
+            st.plotly_chart(fig_llm, width="stretch")
             st.caption(
                 f"Current answer mode: **{answer_kind}**  •  "
                 f"TTFT 1K = **{llm['ttft_1k_sec']*1000:.0f} ms**  •  "
@@ -1011,7 +1011,7 @@ with tab_overview:
                 height=360, margin=dict(l=60, r=30, t=40, b=60),
             )
             _apply_chart_theme(fig_llm_tier)
-            st.plotly_chart(fig_llm_tier, use_container_width=True)
+            st.plotly_chart(fig_llm_tier, width="stretch")
             st.caption(
                 f"At {quant}, for this workload category. MoE wins on BW: "
                 "only 3B of 30B total are loaded per token."
@@ -1076,7 +1076,7 @@ with tab_overview:
             showlegend=False,
         )
         _apply_chart_theme(fig_dist)
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, width="stretch")
 
         mx = max(values); mn = min(v for v in values if v > 0)
         st.caption(
@@ -1135,9 +1135,9 @@ with tab_streams:
             height=420, margin=dict(l=40, r=40, t=20, b=40),
         )
         _apply_chart_theme(fig3)
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width="stretch")
     with col2:
-        st.dataframe(df_streams, use_container_width=True, hide_index=True)
+        st.dataframe(df_streams, width="stretch", hide_index=True)
         st.caption("YOLO batching amortizes kernel overhead — 4 streams at batch=4 "
                     "typically get ~70% of the single-stream FPS, not 25%.")
 
@@ -1179,7 +1179,7 @@ with tab_duty:
             height=420, margin=dict(l=40, r=40, t=20, b=40),
         )
         _apply_chart_theme(fig4)
-        st.plotly_chart(fig4, use_container_width=True)
+        st.plotly_chart(fig4, width="stretch")
 
         st.markdown(f"""
 **Current LLM projection — {hw.name} @ {quant}:**
@@ -1227,7 +1227,7 @@ with tab_detail:
                 "n_forwards (bakeoff)": c["n_forwards_in_bakeoff"],
             } for c in comps
         ])
-        st.dataframe(df_comps, use_container_width=True, hide_index=True)
+        st.dataframe(df_comps, width="stretch", hide_index=True)
         total_bytes = sum(
             c["dram_bytes_per_fire"] * c["fires_per_frame"] for c in comps
         )
