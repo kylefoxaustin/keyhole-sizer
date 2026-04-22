@@ -106,6 +106,26 @@ NPU_MID = Hardware(
     measured_llm_ttft_1k_sec=0.351,
 )
 
+# Same bandwidth tier as NPU Mid (128-bit LPDDR5X @ 8.4 GT/s), but the
+# silicon is a dense INT8-only NPU rather than BF16/FP8-capable tensor
+# cores — a real option Kyle is evaluating. 200 TOPS dense INT8 maps to
+# roughly "Mid-class BW with Low-LP4-class precision support".
+# LLM decode numbers assumed identical to NPU Mid because Q4_K_M is
+# BW-bound and the 4-bit weight dequant works equally through either
+# INT8 or BF16 paths — the BW-limited decode shouldn't change between
+# the two silicon flavors. If that assumption turns out to be wrong on
+# real silicon, swap to BW-projected numbers (leave both fields None).
+NPU_MID_INT8 = Hardware(
+    name="NPU Mid-INT8",
+    peak_tops_bf16=0.0, peak_tops_int8=200.0, peak_tops_fp8=0.0,
+    mem_bandwidth_gbs=134.4, mem_capacity_gb=24.0,
+    mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
+    compute_efficiency=0.65, bandwidth_efficiency=0.70,
+    tdp_watts=25.0,
+    measured_llm_q4_decode_tok_s=37.85,
+    measured_llm_ttft_1k_sec=0.351,
+)
+
 NPU_HIGH = Hardware(
     name="NPU High",
     peak_tops_bf16=275.0, peak_tops_int8=550.0, peak_tops_fp8=550.0,
@@ -120,7 +140,7 @@ NPU_HIGH = Hardware(
 # Backwards-compat alias — some older scripts / CSV rows still reference NPU_LOW.
 NPU_LOW = NPU_LOW_LP4
 
-TIERS = {t.name: t for t in (NPU_LOW_LP4, NPU_LOW_LP5X, NPU_MID, NPU_HIGH)}
+TIERS = {t.name: t for t in (NPU_LOW_LP4, NPU_LOW_LP5X, NPU_MID, NPU_MID_INT8, NPU_HIGH)}
 
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
