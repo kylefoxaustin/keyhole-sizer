@@ -228,10 +228,12 @@ with st.sidebar:
     st.header("Edge NPU")
     tier = st.selectbox(
         "Tier preset",
-        options=("NPU Low-LP5", "NPU Low-LP5X", "NPU Mid", "NPU High", "Custom"),
-        index=2,  # lands on 'NPU Mid'
-        help="Low-LP5 = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s theoretical), dense INT8-only silicon. "
-             "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5). "
+        options=("NPU Low-LP5-32bit", "NPU Low-LP5-64bit", "NPU Low-LP5X",
+                 "NPU Mid", "NPU High", "Custom"),
+        index=3,  # lands on 'NPU Mid'
+        help="Low-LP5-32bit = 32-bit LPDDR5 @ 6.4 GT/s (25.6 GB/s theoretical), dense INT8-only silicon. "
+             "Low-LP5-64bit = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s, 2× the 32-bit variant). "
+             "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5-64bit). "
              "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target, BF16/FP8-capable). "
              "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin). "
              "Custom = roll your own. All presets assume 70% bandwidth efficiency.",
