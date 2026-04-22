@@ -269,6 +269,24 @@ with st.sidebar:
     _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
     _DEFAULT_TRACK_INDEX = 2  # "Shipping (Hybrid V2 → TRT)"
 
+    # Invariant: PIPELINES ⊆ ⋃(tracks) AND ⋃(tracks) ⊆ PIPELINES.
+    # Fails loud on startup/rerun rather than silently dropping a new
+    # pipeline from the dropdown or silently keeping a stale key.
+    _track_pipelines = {k for _, keys, _ in PIPELINE_TRACKS for k in keys}
+    _orphaned = set(PIPELINES.keys()) - _track_pipelines
+    _unknown  = _track_pipelines - set(PIPELINES.keys())
+    if _orphaned:
+        raise RuntimeError(
+            f"PIPELINES keys orphaned from PIPELINE_TRACKS (won't appear in "
+            f"dropdown): {sorted(_orphaned)}. Add them to a track in "
+            f"app.py::PIPELINE_TRACKS."
+        )
+    if _unknown:
+        raise RuntimeError(
+            f"PIPELINE_TRACKS references unknown pipeline keys: "
+            f"{sorted(_unknown)}. Typo, or removed from PIPELINES?"
+        )
+
     track_label = st.radio(
         "Pipeline track",
         options=_TRACK_LABELS,
