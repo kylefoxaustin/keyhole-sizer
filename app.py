@@ -24,6 +24,7 @@ from sizer.platform_budget import (
 from sizer.measured import (
     measured_dram_per_frame, measured_components, bundle_metadata,
 )
+from sizer.kpi_breakdown import all_pipeline_kpi_rows
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -461,6 +462,17 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
+# KPI breakdown CSV: all 17 pipelines swept at the current HW + resolution
+# + LLM state. Generated eagerly each rerun (17-row DataFrame — cheap).
+_kpi_csv = pd.DataFrame(
+    all_pipeline_kpi_rows(
+        hw, resolution=resolution,
+        llm_enabled=llm_enabled, llm_quant=quant,
+        llm_workload=llm_workload,
+        compiler_quality_vs_trt=compiler_quality,
+    )
+).to_csv(index=False)
+
 # ── Simulating line + Download block (rows 2–3) — both live inside a
 # left-half column so their widths match: the 'Simulating:' line's right
 # edge aligns with the 'All configs' button's right edge, and the 'This
@@ -484,7 +496,7 @@ with _left_half:
         "📥 Download model run data</div>",
         unsafe_allow_html=True,
     )
-    _btn_cur_col, _btn_mat_col = st.columns(2)
+    _btn_cur_col, _btn_mat_col, _btn_kpi_col = st.columns(3)
     with _btn_cur_col:
         st.download_button(
             label="💾 This config",
@@ -508,6 +520,22 @@ with _left_half:
                 "Every preset HW tier × pipeline × resolution × stream count + every "
                 "LLM (quant × workload × answer_kind) combination (~585 rows). "
                 "Custom HW is skipped — use 'This config' for custom. Cached hourly."
+            ),
+            use_container_width=True,
+        )
+    with _btn_kpi_col:
+        st.download_button(
+            label="📊 KPI breakdown",
+            data=_kpi_csv,
+            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}.csv",
+            mime="text/csv",
+            help=(
+                "Per-pipeline KPI sheet: model, per-stage ms breakdown "
+                "(ingest + yolo + seg + llm), and total_fps across all 17 "
+                "pipelines at the current HW + resolution + LLM state. "
+                "total_fps is vision-only (LLM duty-cycles; llm_ms shown "
+                "for context). Rows ordered SAM → one-model → composed → "
+                "yolo-only."
             ),
             use_container_width=True,
         )
