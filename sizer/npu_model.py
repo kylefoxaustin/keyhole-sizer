@@ -60,25 +60,38 @@ RTX_5090 = Hardware(
 # (Qwen3-30B-A3B Q4_K_M, 1K prompt, short response). All four tiers use a
 # uniform bandwidth_efficiency=0.70 so cross-tier comparisons only reflect
 # hardware differences, not utilization assumptions.
-NPU_LOW_LP5 = Hardware(
-    name="NPU Low-LP5",
-    # TOPS reflects the real silicon at this tier (NXP i.MX 95 Neutron
-    # N3-1024S class): dense INT8 only, 2 TOPS. No native floating-point
-    # tensor ops — BF16/FP8 pipelines either fail to load or fall
-    # through to CPU/GPU at massive slowdown. TOPS is currently
-    # metadata-only in project_vision (edge ms is bandwidth-bound), but
-    # the tier card should match reality rather than overstate it.
+# Entry-tier NPU class (NXP i.MX 95 Neutron N3-1024S class): dense INT8
+# only, 2 TOPS. No native floating-point tensor ops — BF16/FP8 pipelines
+# either fail to load or fall through to CPU/GPU at massive slowdown.
+# TOPS is currently metadata-only in project_vision (edge ms is
+# bandwidth-bound), but tier cards match reality rather than overstate.
+#
+# Two silicon options at this NPU class with different memory bus widths:
+#   64-bit variant: 6.4 GT/s × 64b = 51.2 GB/s theoretical, 35.84 eff
+#   32-bit variant: 6.4 GT/s × 32b = 25.6 GB/s theoretical, 17.92 eff
+# (half the bus width → half the bandwidth; same silicon and TOPS.)
+NPU_LOW_LP5_64BIT = Hardware(
+    name="NPU Low-LP5-64bit",
     peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
-    # Memory: 64-bit LPDDR5 @ 6.4 GT/s = 51.2 GB/s theoretical × 0.70 =
-    # 35.84 GB/s effective. Previously spec'd as LPDDR4 @ 4.0 GT/s = 32
-    # GB/s theoretical; Kyle corrected on 2026-04-22 — the entry-tier
-    # real silicon at this class ships with LP5 @ 6.4, not LP4.
     mem_bandwidth_gbs=51.2, mem_capacity_gb=16.0,
     mem_bus_width_bits=64, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
+)
+
+# 32-bit LP5 variant — half the bandwidth of the 64-bit version. LLM
+# decode numbers are NOT measured on real silicon at this spec; the
+# sizer will BW-project them from the 64-bit measurement (half BW →
+# roughly half decode tok/s for the BW-bound LLM path).
+NPU_LOW_LP5_32BIT = Hardware(
+    name="NPU Low-LP5-32bit",
+    peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
+    mem_bandwidth_gbs=25.6, mem_capacity_gb=16.0,
+    mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
+    compute_efficiency=0.60, bandwidth_efficiency=0.70,
+    tdp_watts=10.0,
 )
 
 # LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
@@ -116,10 +129,14 @@ NPU_HIGH = Hardware(
     measured_llm_ttft_1k_sec=0.1755,
 )
 
-# Backwards-compat alias — some older scripts / CSV rows still reference NPU_LOW.
-NPU_LOW = NPU_LOW_LP5
+# Backwards-compat aliases — older scripts / CSV rows reference NPU_LOW
+# or NPU_LOW_LP5 (pre-split-into-32bit/64bit). Both resolve to the 64-bit
+# variant so previous FPS projections stay unchanged.
+NPU_LOW = NPU_LOW_LP5_64BIT
+NPU_LOW_LP5 = NPU_LOW_LP5_64BIT
 
-TIERS = {t.name: t for t in (NPU_LOW_LP5, NPU_LOW_LP5X, NPU_MID, NPU_HIGH)}
+TIERS = {t.name: t for t in (NPU_LOW_LP5_32BIT, NPU_LOW_LP5_64BIT,
+                              NPU_LOW_LP5X, NPU_MID, NPU_HIGH)}
 
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
@@ -282,7 +299,7 @@ PIPELINES = {
     ),
     "trt_fp8_1hz_clip": VisionPipeline(
         key="trt_fp8_1hz_clip",
-        label="TRT FP8 + CLIP @ 1 Hz (SHIPPING)",
+        label="TRT FP8 + CLIP @ 1 Hz (DEFAULT)",
         description="YOLO FP8 every frame; CLIP FP8 once per second (N=30).",
         edge_ms_720p=27.7, edge_ms_1080p=29.8, edge_ms_4k=33.3,
         vram_mb=250,
