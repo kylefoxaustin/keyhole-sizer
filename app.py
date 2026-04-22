@@ -194,6 +194,7 @@ with st.sidebar:
              "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target), "
              "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin), "
              "Custom = roll your own. All presets assume 70% bandwidth efficiency.",
+        key="tier",
     )
 
     if tier == "Custom":
@@ -203,26 +204,35 @@ with st.sidebar:
             "Memory bus width (bits)",
             options=[64, 96, 128, 192, 256, 384, 512],
             value=128,
+            key="custom_bus_width",
         )
-        mem_type = st.selectbox("Memory type", options=MEMORY_TYPES, index=2)
+        mem_type = st.selectbox("Memory type", options=MEMORY_TYPES, index=2,
+                                 key="custom_mem_type")
         data_rate = st.slider("Data rate (GT/s)", min_value=2.0, max_value=32.0,
-                               value=8.4, step=0.1)
+                               value=8.4, step=0.1,
+                               key="custom_data_rate")
         theoretical_bw = theoretical_bandwidth(bus_width, data_rate)
         st.caption(f"→ theoretical BW: **{theoretical_bw:.1f} GB/s**")
         bw_eff = st.slider("Bandwidth efficiency", 0.50, 0.95, 0.70, 0.01,
                             help="Fraction of theoretical BW realized on real workloads. "
-                                 "Presets use 0.70 (matches the tier cards above).")
+                                 "Presets use 0.70 (matches the tier cards above).",
+                            key="custom_bw_eff")
         # Both sliders share the same 50-1000 range so equal numeric values
         # sit at equal horizontal positions. FP8 on Blackwell-class silicon
         # is typically 2× BF16, but some NPUs are 1:1 or even missing FP8 —
         # decouple the sliders so the user can model either.
-        tops_bf16 = st.slider("Peak BF16 TOPS", 50, 1000, 200, 10)
+        tops_bf16 = st.slider("Peak BF16 TOPS", 50, 1000, 200, 10,
+                               key="custom_tops_bf16")
         tops_fp8 = st.slider("Peak FP8 TOPS", 0, 1000, min(1000, int(tops_bf16 * 2)), 10,
                               help="Set to 0 if silicon doesn't support FP8 natively. "
-                                   "Blackwell-class is typically 2× BF16.")
-        compute_eff = st.slider("Compute efficiency", 0.40, 0.85, 0.65, 0.01)
-        mem_cap = st.slider("DRAM capacity (GB)", 2, 64, 8, 1)
-        tdp = st.slider("TDP (W)", 2, 150, 25, 1)
+                                   "Blackwell-class is typically 2× BF16.",
+                              key="custom_tops_fp8")
+        compute_eff = st.slider("Compute efficiency", 0.40, 0.85, 0.65, 0.01,
+                                 key="custom_compute_eff")
+        mem_cap = st.slider("DRAM capacity (GB)", 2, 64, 8, 1,
+                             key="custom_mem_cap")
+        tdp = st.slider("TDP (W)", 2, 150, 25, 1,
+                         key="custom_tdp")
 
         hw = Hardware(
             name="Custom NPU",
@@ -295,6 +305,7 @@ with st.sidebar:
              "Tracks match the deck's optimization journey: where we started (SAM 3), "
              "one-model open-vocab alternatives, the Hybrid V2 → TRT shipping path, "
              "the yolov8n nano cross-variant, and INT8 vendor-comparison points.",
+        key="pipeline_track",
     )
     _, _track_keys, _canonical = next(
         t for t in PIPELINE_TRACKS if t[0] == track_label
@@ -310,10 +321,12 @@ with st.sidebar:
     pipeline = PIPELINES[pipeline_key]
     st.caption(pipeline.description)
 
-    resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=0)
+    resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=0,
+                               key="resolution")
     n_streams = st.slider("Concurrent streams", 1, 16, 1, 1,
                            help="Each stream processes its own video source. YOLO batching "
-                                "kicks in automatically (batch = N_streams).")
+                                "kicks in automatically (batch = N_streams).",
+                           key="n_streams")
 
     compiler_quality = st.slider(
         "Edge compiler quality vs TensorRT", 0.50, 1.00, 1.00, 0.05,
@@ -323,6 +336,7 @@ with st.sidebar:
              "unchanged, optimistic). **0.75 = realistic** (edge compiler 25% slower per kernel). "
              "**0.50 = pessimistic** (half as good — first-gen NPU SDK). Applied as a post-multiplier "
              "on every projected vision latency path.",
+        key="compiler_quality",
     )
     if compiler_quality < 1.00:
         st.caption(f"⚠️ Applying {(1 - compiler_quality) * 100:.0f}% compiler-quality haircut "
@@ -354,10 +368,12 @@ with st.sidebar:
     st.header("LLM co-exist")
     llm_enabled = st.toggle("Share the NPU with a generative LLM",
                              value=False,
-                             help="Qwen3-30B-A3B MoE (3B active / 30B total).")
+                             help="Qwen3-30B-A3B MoE (3B active / 30B total).",
+                             key="llm_enabled")
     if llm_enabled:
         quant = st.selectbox("Qwen3 quantization",
-                              ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0)
+                              ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
+                              key="llm_quant")
         llm_workload = st.selectbox(
             "LLM workload pattern",
             options=list(WORKLOAD_CATEGORIES.keys()),
@@ -366,6 +382,7 @@ with st.sidebar:
             help="Real-world workload categories measured on Skippy production "
                  "(n=1-5 per category). Decode tok/s spans 3.6-222 across "
                  "categories — pick the one your deployment will actually see.",
+            key="llm_workload",
         )
         st.caption(WORKLOAD_CATEGORIES[llm_workload]["description"])
 
@@ -392,14 +409,16 @@ with st.sidebar:
                 "multiplier (measured on 5090) is applied to the target NPU's plain-chat "
                 "projection. Both decode tok/s and TTFT are scaled."
             )
-        queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1)
+        queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1,
+                                     key="llm_queries_per_min")
         answer_kind = st.radio("Typical answer length",
                                 ("short", "rag"),
                                 index=0,
                                 format_func=lambda k: {
                                     "short": "Short (~200 tokens)",
                                     "rag":   "RAG (8K prompt + 2K response)"}[k],
-                                horizontal=True)
+                                horizontal=True,
+                                key="llm_answer_kind")
     else:
         quant = "Q4_K_M"
         llm_workload = "plain_chat"
