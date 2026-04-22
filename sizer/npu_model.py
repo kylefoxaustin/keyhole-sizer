@@ -37,6 +37,14 @@ class Hardware:
     measured_llm_q4_decode_tok_s: float | None = None
     measured_llm_ttft_1k_sec: float | None = None
 
+    # Optional: real-silicon edge ms per frame, keyed by (pipeline_key → resolution → ms).
+    # When populated, project_vision returns this value directly for matching
+    # (pipeline, resolution) pairs — bypassing both the BW-bound scale and the
+    # compute-bound clamp. Mirrors the measured_llm_* pattern for LLM decode.
+    # Use for tiers where we have production measurements on real silicon
+    # (e.g. NPU i.MX 95 Neutron).
+    measured_edge_ms: dict[str, dict[str, float]] | None = None
+
     @property
     def effective_bandwidth_gbs(self) -> float:
         return self.mem_bandwidth_gbs * self.bandwidth_efficiency
@@ -45,6 +53,22 @@ class Hardware:
     def effective_tops_bf16(self) -> float:
         return self.peak_tops_bf16 * self.compute_efficiency
 
+    def effective_tops(self, dtype: str) -> float:
+        """Dtype-aware effective TOPS.
+
+        `dtype` is one of 'int8', 'fp8', 'bf16', 'fp16'. FP16 falls back to
+        BF16 TOPS per the common-silicon convention that silicon supporting
+        one usually supports the other; the sizer doesn't track a separate
+        peak_tops_fp16.
+        """
+        peak = {
+            "int8": self.peak_tops_int8,
+            "fp8":  self.peak_tops_fp8,
+            "bf16": self.peak_tops_bf16,
+            "fp16": self.peak_tops_bf16,
+        }.get(dtype.lower(), self.peak_tops_bf16)
+        return peak * self.compute_efficiency
+
 
 # Reference: RTX 5090 — all Keyhole 5090 measurements happened here.
 RTX_5090 = Hardware(
@@ -52,7 +76,7 @@ RTX_5090 = Hardware(
     peak_tops_bf16=209.0, peak_tops_int8=419.0, peak_tops_fp8=419.0,
     mem_bandwidth_gbs=1792.0, mem_capacity_gb=32.0,
     mem_bus_width_bits=512, mem_type="GDDR7", mem_data_rate_gtps=28.0,
-    compute_efficiency=0.70, bandwidth_efficiency=0.85,
+    compute_efficiency=0.85, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
 )
 
@@ -75,7 +99,7 @@ NPU_LOW_LP5_64BIT = Hardware(
     peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
     mem_bandwidth_gbs=51.2, mem_capacity_gb=16.0,
     mem_bus_width_bits=64, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
+    compute_efficiency=0.19, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
@@ -90,7 +114,7 @@ NPU_LOW_LP5_32BIT = Hardware(
     peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
     mem_bandwidth_gbs=25.6, mem_capacity_gb=16.0,
     mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
+    compute_efficiency=0.19, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
 )
 
@@ -103,7 +127,7 @@ NPU_LOW_LP5X = Hardware(
     peak_tops_bf16=50.0, peak_tops_int8=100.0, peak_tops_fp8=100.0,
     mem_bandwidth_gbs=67.2, mem_capacity_gb=16.0,
     mem_bus_width_bits=64, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
+    compute_efficiency=0.19, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
 )
 
@@ -112,7 +136,7 @@ NPU_MID = Hardware(
     peak_tops_bf16=200.0, peak_tops_int8=400.0, peak_tops_fp8=400.0,
     mem_bandwidth_gbs=134.4, mem_capacity_gb=24.0,
     mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
-    compute_efficiency=0.65, bandwidth_efficiency=0.70,
+    compute_efficiency=0.45, bandwidth_efficiency=0.70,
     tdp_watts=25.0,
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.351,
@@ -123,10 +147,30 @@ NPU_HIGH = Hardware(
     peak_tops_bf16=275.0, peak_tops_int8=550.0, peak_tops_fp8=550.0,
     mem_bandwidth_gbs=179.2, mem_capacity_gb=32.0,
     mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=11.2,
-    compute_efficiency=0.70, bandwidth_efficiency=0.70,
+    compute_efficiency=0.50, bandwidth_efficiency=0.70,
     tdp_watts=40.0,
     measured_llm_q4_decode_tok_s=50.46,
     measured_llm_ttft_1k_sec=0.1755,
+)
+
+# Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
+# silicon, 32-bit LPDDR5 @ 6.4 GT/s. Kyle's production measurement on
+# the NXP eIQ toolchain, 2026-04-22: yolov8n-seg INT8 @ 1080p = 32 ms
+# (29.2 FPS), single stream, no LLM. compute_efficiency=0.19 is calibrated
+# from this measurement (12 GOPs / (2 TOPS × 0.19) = 31.6 ms ≈ 32 ms).
+# Use `measured_edge_ms` to return the exact production number for
+# workloads where we have real silicon data — otherwise projection
+# proceeds via the usual BW / compute clamp path.
+NPU_IMX95_MEASURED = Hardware(
+    name="NPU i.MX 95 (ground truth)",
+    peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
+    mem_bandwidth_gbs=25.6, mem_capacity_gb=16.0,
+    mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
+    compute_efficiency=0.19, bandwidth_efficiency=0.70,
+    tdp_watts=10.0,
+    measured_edge_ms={
+        "yolov8n_trt_int8_coco128": {"1080p": 32.0},
+    },
 )
 
 # Backwards-compat aliases — older scripts / CSV rows reference NPU_LOW
@@ -135,8 +179,9 @@ NPU_HIGH = Hardware(
 NPU_LOW = NPU_LOW_LP5_64BIT
 NPU_LOW_LP5 = NPU_LOW_LP5_64BIT
 
-TIERS = {t.name: t for t in (NPU_LOW_LP5_32BIT, NPU_LOW_LP5_64BIT,
-                              NPU_LOW_LP5X, NPU_MID, NPU_HIGH)}
+TIERS = {t.name: t for t in (NPU_LOW_LP5_32BIT, NPU_IMX95_MEASURED,
+                              NPU_LOW_LP5_64BIT, NPU_LOW_LP5X,
+                              NPU_MID, NPU_HIGH)}
 
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
@@ -167,6 +212,20 @@ class VisionPipeline:
     # Notes for display
     note: str = ""
 
+    # Optional: arithmetic intensity used by the compute-ceiling clamp in
+    # project_vision(). First-order values from model cards (~20% accurate).
+    # When None, the compute clamp is skipped for this pipeline (BW-only
+    # projection preserves prior behavior). Populate to enable compute-bound
+    # detection — required for weak-silicon / heavy-model corners where
+    # BW-scaling alone is optimistic.
+    gops_per_forward: float | None = None
+
+    # Optional: arithmetic dtype the pipeline runs at — 'int8' / 'fp8' /
+    # 'bf16' / 'fp16'. Drives which peak_tops_* the compute clamp uses.
+    # When None, project_vision falls back to a substring heuristic on the
+    # pipeline key.
+    precision: str | None = None
+
 
 PIPELINES = {
     # Baseline SAM 3 — the thing we replaced
@@ -177,6 +236,7 @@ PIPELINES = {
         edge_ms_720p=2500.0, edge_ms_1080p=2800.0, edge_ms_4k=3200.0,
         vram_mb=3800,
         note="Dead on arrival at the edge — bandwidth ceiling ~0.4 FPS.",
+        gops_per_forward=1500.0, precision="bf16",
     ),
     # Mid-era: EfficientSAM-Small + CLIP
     "essmall_fp8": VisionPipeline(
@@ -186,6 +246,7 @@ PIPELINES = {
         edge_ms_720p=202.7, edge_ms_1080p=205.6, edge_ms_4k=222.2,
         vram_mb=1100,
         note="Mask-only measurement from the FP8 activation-quant bake-off (pre-Hybrid-V2 era). Beaten end-to-end by TRT pipelines.",
+        gops_per_forward=350.0, precision="fp8",
     ),
     # One-model open-vocab simplification — Ultralytics YOLOE-26 collapses
     # our two-stage YOLO-seg + CLIP pipeline into a single model with a
@@ -279,6 +340,7 @@ PIPELINES = {
         edge_ms_720p=345.1, edge_ms_1080p=381.6, edge_ms_4k=625.9,
         vram_mb=450,
         note="Starting point of the Hybrid V2 track.",
+        gops_per_forward=225.0, precision="bf16",
     ),
     "hybrid_v2_torchao_fp8": VisionPipeline(
         key="hybrid_v2_torchao_fp8",
@@ -296,6 +358,7 @@ PIPELINES = {
         edge_ms_720p=42.3, edge_ms_1080p=46.3, edge_ms_4k=52.8,
         vram_mb=250,
         note="24 FPS single-stream — real-time without any debouncing.",
+        gops_per_forward=225.0, precision="fp8",
     ),
     "trt_fp8_1hz_clip": VisionPipeline(
         key="trt_fp8_1hz_clip",
@@ -304,6 +367,7 @@ PIPELINES = {
         edge_ms_720p=27.7, edge_ms_1080p=29.8, edge_ms_4k=33.3,
         vram_mb=250,
         note="36 FPS single-stream — the Keyhole shipping target.",
+        gops_per_forward=51.0, precision="fp8",
     ),
     "yolo_only_fp8": VisionPipeline(
         key="yolo_only_fp8",
@@ -312,6 +376,7 @@ PIPELINES = {
         edge_ms_720p=27.2, edge_ms_1080p=29.1, edge_ms_4k=33.0,
         vram_mb=80,
         note="The YOLO-only ceiling. Live-streaming baseline.",
+        gops_per_forward=45.0, precision="fp8",
     ),
     # ─────────── yolov8n-seg variants (nano, 3.4M params) — added 2026-04-21
     # for cross-silicon comparison against real-NPU benchmarks that are almost
@@ -324,6 +389,7 @@ PIPELINES = {
         edge_ms_720p=8.4, edge_ms_1080p=8.8, edge_ms_4k=9.1,
         vram_mb=180,
         note="~3× faster than yolo11s-seg at the same precision — ~120 FPS ceiling @ 720p.",
+        gops_per_forward=18.0, precision="fp8",
     ),
     "yolov8n_trt_fp8_every_frame": VisionPipeline(
         key="yolov8n_trt_fp8_every_frame",
@@ -332,6 +398,7 @@ PIPELINES = {
         edge_ms_720p=23.0, edge_ms_1080p=23.4, edge_ms_4k=23.7,
         vram_mb=180,
         note="~42 FPS @ 720p — CLIP now dominates (15.1 ms), YOLO is free.",
+        gops_per_forward=192.0, precision="fp8",
     ),
     "yolov8n_only_fp8": VisionPipeline(
         key="yolov8n_only_fp8",
@@ -340,6 +407,7 @@ PIPELINES = {
         edge_ms_720p=7.9, edge_ms_1080p=8.3, edge_ms_4k=8.6,
         vram_mb=40,
         note="YOLO-only ceiling at nano size. ~126 FPS @ 720p — cross-silicon comparison target.",
+        gops_per_forward=12.0, precision="fp8",
     ),
     # ─────────── INT8 pipelines for vendor-comparison scenarios ──────────
     # Edge ms derived from measured 5090 INT8 TRT execute() × 16.19× BW ratio.
@@ -361,6 +429,7 @@ PIPELINES = {
         edge_ms_720p=14.7, edge_ms_1080p=15.2, edge_ms_4k=15.4,
         vram_mb=80,
         note="~68 FPS @ 720p edge but 35% slower than FP8. Recall 0.875 (-13% vs FP16). Larger calibration would improve quality; see yolov8n-seg's 20-frame vs coco128 pair for the effect.",
+        gops_per_forward=45.0, precision="int8",
     ),
     "yolov8n_trt_int8_coco128": VisionPipeline(
         key="yolov8n_trt_int8_coco128",
@@ -369,6 +438,7 @@ PIPELINES = {
         edge_ms_720p=10.0, edge_ms_1080p=10.4, edge_ms_4k=10.2,
         vram_mb=55,
         note="~100 FPS @ 720p edge, recall 0.912 (-9% vs FP16). Representative of credible vendor INT8 numbers — use this for apples-to-apples against NPU silicon benchmarks that disclose their calibration dataset.",
+        gops_per_forward=12.0, precision="int8",
     ),
     "yolov8n_trt_int8_20frame": VisionPipeline(
         key="yolov8n_trt_int8_20frame",
@@ -377,6 +447,7 @@ PIPELINES = {
         edge_ms_720p=9.9, edge_ms_1080p=10.4, edge_ms_4k=10.5,
         vram_mb=55,
         note="~101 FPS @ 720p edge but recall COLLAPSES to 0.714 (-29% vs FP16). Shows what undisclosed small-calibration INT8 benchmarks actually deliver. Worst-case vendor-claim verification target.",
+        gops_per_forward=12.0, precision="int8",
     ),
 }
 
