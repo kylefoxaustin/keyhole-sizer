@@ -73,7 +73,7 @@ YOLO11X_DETECT_MS_EDGE = 30.0
 
 
 PIPELINE_STAGES: dict[str, dict[str, Any]] = {
-    # ─── Legacy / SAM 3 lineage — YOLO11x detects, SAM model segments ──
+    # ─── SAM 3 lineage — YOLO11x detects, SAM model segments ──────────
     "sam3_bf16": {
         "category":   "sam",
         "yolo_type":  "Yolo11x",
