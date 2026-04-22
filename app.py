@@ -188,12 +188,14 @@ with st.sidebar:
     st.header("Edge NPU")
     tier = st.selectbox(
         "Tier preset",
-        options=("NPU Low-LP4", "NPU Low-LP5X", "NPU Mid", "NPU High", "Custom"),
-        index=2,
-        help="Low-LP4 = 64-bit LPDDR4 @ 4.0 GT/s (32 GB/s theoretical), "
-             "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 2.1× LP4), "
-             "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target), "
-             "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin), "
+        options=("NPU Low-LP5", "NPU Low-LP5X", "NPU Mid", "NPU Mid-INT8",
+                 "NPU High", "Custom"),
+        index=2,  # still lands on 'NPU Mid'
+        help="Low-LP5 = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s theoretical), dense INT8-only silicon. "
+             "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5). "
+             "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target, BF16/FP8-capable). "
+             "Mid-INT8 = same BW as Mid but INT8-only silicon — models real dense-INT8 NPUs at this BW tier. "
+             "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin). "
              "Custom = roll your own. All presets assume 70% bandwidth efficiency.",
         key="tier",
     )
@@ -257,7 +259,7 @@ with st.sidebar:
     # tracks and coming back remembers the last pick for that track;
     # first visit to a track shows that track's canonical default.
     PIPELINE_TRACKS = [
-        ("Legacy / SAM 3 lineage",
+        ("SAM 3 lineage",
          ["sam3_bf16", "essmall_fp8",
           "efficientsam3_es_ev_s_bf16", "efficientsam3p1_es_ev_s_bf16"],
          "sam3_bf16"),
