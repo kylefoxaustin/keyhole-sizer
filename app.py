@@ -24,7 +24,9 @@ from sizer.platform_budget import (
 from sizer.measured import (
     measured_dram_per_frame, measured_components, bundle_metadata,
 )
-from sizer.kpi_breakdown import all_pipeline_kpi_xlsx
+from sizer.kpi_breakdown import (
+    pipeline_kpi_row, all_pipeline_kpi_rows, kpi_rows_to_xlsx,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -464,16 +466,6 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-# KPI breakdown XLSX: all 17 pipelines swept at the current HW + resolution
-# + LLM state, with formatted headers (bold, title case) and alignment.
-# Generated eagerly each rerun (17 rows is negligible).
-_kpi_xlsx = all_pipeline_kpi_xlsx(
-    hw, resolution=resolution,
-    llm_enabled=llm_enabled, llm_quant=quant,
-    llm_workload=llm_workload,
-    compiler_quality_vs_trt=compiler_quality,
-)
-
 # ── Simulating line + Download block (rows 2–3) — both live inside a
 # left-half column so their widths match: the 'Simulating:' line's right
 # edge aligns with the 'All configs' button's right edge, and the 'This
@@ -497,7 +489,7 @@ with _left_half:
         "📥 Download model run data</div>",
         unsafe_allow_html=True,
     )
-    _btn_cur_col, _btn_mat_col, _btn_kpi_col = st.columns(3)
+    _btn_cur_col, _btn_mat_col = st.columns(2)
     with _btn_cur_col:
         st.download_button(
             label="💾 This config",
@@ -524,22 +516,73 @@ with _left_half:
             ),
             use_container_width=True,
         )
-    with _btn_kpi_col:
+
+# ── KPI spreadsheet: two buttons, each reveals an inline preview of the
+# KPI data + a top-right Download XLSX control. Preview state persists
+# across reruns via st.session_state so changing sidebar state (HW,
+# resolution, LLM, etc.) while the preview is open refreshes its data
+# in place.
+st.markdown(
+    "<div style='text-align:center; font-size:20px; font-weight:800; "
+    "letter-spacing:0.3px; margin:20px 0 8px 0;'>"
+    "📊 KPI spreadsheet</div>",
+    unsafe_allow_html=True,
+)
+_kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
+with _kpi_btn_all_col:
+    if st.button(
+        "📊 KPI spreadsheet (all models)",
+        use_container_width=True,
+        key="kpi_btn_all",
+        help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
+             "the current HW / resolution / LLM state, plus a button to "
+             "download the formatted XLSX.",
+    ):
+        st.session_state.kpi_preview_mode = "all"
+with _kpi_btn_one_col:
+    if st.button(
+        "📊 KPI spreadsheet (this model)",
+        use_container_width=True,
+        key="kpi_btn_this",
+        help="Reveal the KPI row for just the currently-selected pipeline "
+             "(the one from the sidebar), plus a button to download the XLSX.",
+    ):
+        st.session_state.kpi_preview_mode = "this"
+
+_kpi_mode = st.session_state.get("kpi_preview_mode")
+if _kpi_mode in ("all", "this"):
+    if _kpi_mode == "all":
+        _kpi_rows = all_pipeline_kpi_rows(
+            hw, resolution=resolution,
+            llm_enabled=llm_enabled, llm_quant=quant,
+            llm_workload=llm_workload,
+            compiler_quality_vs_trt=compiler_quality,
+        )
+        _kpi_file_slug = "all"
+    else:
+        _kpi_rows = [pipeline_kpi_row(
+            pipeline_key, hw, resolution=resolution,
+            llm_enabled=llm_enabled, llm_quant=quant,
+            llm_workload=llm_workload,
+            compiler_quality_vs_trt=compiler_quality,
+        )]
+        _kpi_file_slug = pipeline_key
+    _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
+    _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
+    with _kpi_dl_col:
         st.download_button(
-            label="📊 KPI breakdown",
-            data=_kpi_xlsx,
-            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}.xlsx",
+            "⬇ Download XLSX",
+            data=_kpi_xlsx_bytes,
+            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help=(
-                "Per-pipeline KPI sheet: model, per-stage ms breakdown "
-                "(ingest + yolo + seg + llm), and total_fps across all 17 "
-                "pipelines at the current HW + resolution + LLM state. "
-                "total_fps is vision-only (LLM duty-cycles; llm_ms shown "
-                "for context). Rows ordered SAM → one-model → composed → "
-                "yolo-only. Formatted XLSX — bold headers, column A right-"
-                "aligned, numeric columns center-aligned."
-            ),
             use_container_width=True,
+            key=f"kpi_dl_{_kpi_mode}",
+        )
+    with _kpi_data_col:
+        st.dataframe(
+            pd.DataFrame(_kpi_rows),
+            use_container_width=True,
+            hide_index=True,
         )
 
 # Visual pipeline flow — reflects current pipeline + LLM selection
