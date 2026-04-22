@@ -683,6 +683,27 @@ if _kpi_mode in ("all", "this"):
             compiler_quality_vs_trt=compiler_quality,
         )]
         _kpi_file_slug = pipeline_key
+
+    # Override total_fps so it matches the metric card's Per-camera FPS
+    # exactly (same math as the website: project_vision at current hw /
+    # resolution / n_streams / compiler_quality, plus vision_fps_under_llm_load
+    # when LLM is on). The kpi_breakdown module's own total_fps is vision-only
+    # including ingest — honest, but different from what users read in the
+    # main metric row, which caused 'wait, why don't these match?' confusion.
+    for _row in _kpi_rows:
+        _pipe_for_row = PIPELINES[_row["pipeline_key"]]
+        _v_for_row = project_vision(
+            _pipe_for_row, hw, resolution, n_streams=n_streams,
+            compiler_quality_vs_trt=compiler_quality,
+        )
+        _base_fps = _v_for_row["fps_per_stream"]
+        _row["total_fps"] = round(
+            vision_fps_under_llm_load(
+                _base_fps, llm, queries_per_min, answer_kind
+            ) if llm_enabled else _base_fps,
+            2,
+        )
+
     _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
     _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
     with _kpi_dl_col:
@@ -700,6 +721,12 @@ if _kpi_mode in ("all", "this"):
             use_container_width=True,
             hide_index=True,
         )
+    st.caption(
+        "`total_fps` matches the **Per-camera FPS** metric card above — "
+        "same math (engine ms only, with LLM duty-cycle reduction applied "
+        "when LLM is on). The `ingest_ms` column is shown for reference "
+        "but not in `total_fps`."
+    )
 
 st.markdown("---")
 
