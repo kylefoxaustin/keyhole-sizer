@@ -239,11 +239,55 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Vision workload")
+
+    # Pipeline is picked in two steps: a radio for the narrative track,
+    # then a selectbox scoped to that track. Each track has its own
+    # selectbox state (via key=f"pipeline__{track_label}") so switching
+    # tracks and coming back remembers the last pick for that track;
+    # first visit to a track shows that track's canonical default.
+    PIPELINE_TRACKS = [
+        ("Legacy / SAM 3 lineage",
+         ["sam3_bf16", "essmall_fp8",
+          "efficientsam3_es_ev_s_bf16", "efficientsam3p1_es_ev_s_bf16"],
+         "sam3_bf16"),
+        ("One-model open-vocab",
+         ["yoloe26_s_pf_fp16", "yoloe26_s_pf_trt_fp8"],
+         "yoloe26_s_pf_trt_fp8"),
+        ("Shipping (Hybrid V2 → TRT)",
+         ["hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
+          "trt_fp8_every_frame", "trt_fp8_1hz_clip", "yolo_only_fp8"],
+         "trt_fp8_1hz_clip"),
+        ("YOLOv8n nano",
+         ["yolov8n_trt_fp8_every_frame", "yolov8n_trt_fp8_1hz_clip",
+          "yolov8n_only_fp8"],
+         "yolov8n_trt_fp8_1hz_clip"),
+        ("INT8 vendor-comparison",
+         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128",
+          "yolov8n_trt_int8_20frame"],
+         "yolov8n_trt_int8_coco128"),
+    ]
+    _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
+    _DEFAULT_TRACK_INDEX = 2  # "Shipping (Hybrid V2 → TRT)"
+
+    track_label = st.radio(
+        "Pipeline track",
+        options=_TRACK_LABELS,
+        index=_DEFAULT_TRACK_INDEX,
+        help="Pick a narrative track, then choose a specific pipeline within it. "
+             "Tracks match the deck's optimization journey: where we started (SAM 3), "
+             "one-model open-vocab alternatives, the Hybrid V2 → TRT shipping path, "
+             "the yolov8n nano cross-variant, and INT8 vendor-comparison points.",
+    )
+    _, _track_keys, _canonical = next(
+        t for t in PIPELINE_TRACKS if t[0] == track_label
+    )
+
     pipeline_key = st.selectbox(
         "Pipeline",
-        options=list(PIPELINES.keys()),
+        options=_track_keys,
         format_func=lambda k: PIPELINES[k].label,
-        index=list(PIPELINES.keys()).index("trt_fp8_1hz_clip"),
+        index=_track_keys.index(_canonical),
+        key=f"pipeline__{track_label}",
     )
     pipeline = PIPELINES[pipeline_key]
     st.caption(pipeline.description)
