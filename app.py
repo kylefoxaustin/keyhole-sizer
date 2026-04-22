@@ -204,7 +204,6 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
         "yolov8n_only_fp8":             ("yolov8n-seg FP8 (TRT)", True, "(no CLIP)", False),
         "yolo11s_trt_int8":              ("yolo11s-seg INT8 (TRT)\n20-frame PTQ", True, "(no CLIP)", False),
         "yolov8n_trt_int8_coco128":      ("yolov8n-seg INT8 (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
-        "yolov8n_trt_int8_20frame":      ("yolov8n-seg INT8 (TRT)\n20-frame PTQ ⚠", True, "(no CLIP)", False),
     }
     det_label, det_hl, enr_label, enr_hl = mapping.get(
         pipeline_key, ("?", False, "?", False)
@@ -320,8 +319,7 @@ with st.sidebar:
           "yolov8n_only_fp8"],
          "yolov8n_trt_fp8_1hz_clip"),
         ("INT8 vendor-comparison",
-         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128",
-          "yolov8n_trt_int8_20frame"],
+         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128"],
          "yolov8n_trt_int8_coco128"),
     ]
     _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
@@ -593,14 +591,16 @@ else:
         ),
     )
 
-# Measured-silicon badge: if project_vision returned a real production number
-# (instead of a BW-scaled projection), flag it explicitly. Ground-truth data
-# currently sourced from NXP i.MX 95 eIQ Neutron, 2026-04 measurements.
+# Measured-silicon badge: when project_vision returned a real production
+# number (instead of a BW-scaled projection), flag it explicitly. Ground-
+# truth data currently sourced from NXP i.MX 95 eIQ Neutron, 2026-04.
 if vision.get("edge_ms_source") == "measured":
     st.success(
-        f"✅ **Measured silicon** — Per-camera FPS = 1000 / {vision['per_stream_ms']:.1f} ms. "
-        f"This value comes from a real production measurement on {hw.name}, not a projection. "
-        f"Compiler-quality slider and BW-ratio scaling don't apply to this tier+pipeline pair."
+        f"✅ **Measured silicon** — Per-camera FPS = 1000 / "
+        f"**{vision['per_stream_ms']:.1f} ms**, measured on **{hw.name}** "
+        f"(NXP eIQ Neutron NPU, 2026-04). This is a real production number, "
+        f"not a projection — the compiler-quality slider and BW-ratio "
+        f"scaling do not apply to this tier+pipeline+resolution triple."
     )
 
 # ── Pipeline flow (collapsible, expanded by default) ──
@@ -791,7 +791,7 @@ with tab_overview:
                              "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
                              "yolov8n_only_fp8",
                              "yolo11s_trt_int8",
-                             "yolov8n_trt_int8_coco128", "yolov8n_trt_int8_20frame"}:
+                             "yolov8n_trt_int8_coco128"}:
             st.caption(
                 "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
                 "fixed **640²** input and CLIP at **224²**. Source resolution "

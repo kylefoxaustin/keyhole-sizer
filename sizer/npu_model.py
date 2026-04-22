@@ -440,15 +440,6 @@ PIPELINES = {
         note="~100 FPS @ 720p edge, recall 0.912 (-9% vs FP16). Representative of credible vendor INT8 numbers — use this for apples-to-apples against NPU silicon benchmarks that disclose their calibration dataset.",
         gops_per_forward=12.0, precision="int8",
     ),
-    "yolov8n_trt_int8_20frame": VisionPipeline(
-        key="yolov8n_trt_int8_20frame",
-        label="yolov8n-seg INT8 (20-frame PTQ) — CAUTIONARY",
-        description="Same engine, calibrated on 20 bake-off frames — insufficient coverage.",
-        edge_ms_720p=9.9, edge_ms_1080p=10.4, edge_ms_4k=10.5,
-        vram_mb=55,
-        note="~101 FPS @ 720p edge but recall COLLAPSES to 0.714 (-29% vs FP16). Shows what undisclosed small-calibration INT8 benchmarks actually deliver. Worst-case vendor-claim verification target.",
-        gops_per_forward=12.0, precision="int8",
-    ),
 }
 
 

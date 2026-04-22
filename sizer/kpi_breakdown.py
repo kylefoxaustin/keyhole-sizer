@@ -162,11 +162,6 @@ PIPELINE_STAGES: dict[str, dict[str, Any]] = {
         "yolo_type":  "Yolov8n-seg INT8 TRT (coco128-seg PTQ)",
         "seg_type":   None,
     },
-    "yolov8n_trt_int8_20frame": {
-        "category":   "yolo_only",
-        "yolo_type":  "Yolov8n-seg INT8 TRT (20-frame PTQ ⚠)",
-        "seg_type":   None,
-    },
 }
 
 
