@@ -83,7 +83,7 @@ HEADER_COMMENTS = [
     "#",
     "# CAVEATS (please read before using these numbers for procurement):",
     "#  - ss_power_avg_watts is a TDP × duty-cycle approximation, NOT measured per-workload.",
-    "#  - NPU tier numbers (Low-LP5/Low-LP5X/Mid/Mid-INT8/High) are bandwidth-scaled from RTX 5090 measurements,",
+    "#  - NPU tier numbers (Low-LP5/Low-LP5X/Mid/High) are bandwidth-scaled from RTX 5090 measurements,",
     "#    NOT measured on actual NPU silicon. Real vendor numbers may differ by \u00b130%.",
     "#  - ss_* columns are additive across rows; peak_* columns are NOT",
     "#    (two workloads don't peak at the same instant in steady state).",

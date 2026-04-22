@@ -90,9 +90,8 @@ power). Three ways to get the data:
 
 **Caveats baked into the CSV header comments** (read before using for procurement):
 - Power is TDP × duty-cycle approximation, NOT measured per-workload.
-- NPU Low-LP5 / Low-LP5X / Mid / Mid-INT8 / High numbers are
-  bandwidth-scaled from RTX 5090 measurements, NOT measured on actual
-  NPU silicon.
+- NPU Low-LP5 / Low-LP5X / Mid / High numbers are bandwidth-scaled
+  from RTX 5090 measurements, NOT measured on actual NPU silicon.
 
 **Consume in pandas:** `pd.read_csv(path, comment='#')`.
 
@@ -103,9 +102,8 @@ power). Three ways to get the data:
   dense INT8-only silicon class) / `NPU Low-LP5X` (same 64-bit bus,
   LPDDR5X @ 8.4 GT/s, 67.2 GB/s) / `NPU Mid` (128-bit LPDDR5X @ 8.4
   GT/s, 134.4 GB/s — Keyhole shipping target, BF16/FP8-capable) /
-  `NPU Mid-INT8` (same BW as Mid, INT8-only silicon) / `NPU High`
-  (128-bit LPDDR5X @ 11.2 GT/s, high-bin) / `Custom` (roll your own).
-  All presets assume 70% bandwidth efficiency.
+  `NPU High` (128-bit LPDDR5X @ 11.2 GT/s, high-bin) / `Custom` (roll
+  your own). All presets assume 70% bandwidth efficiency.
 - **Custom mode:** bus width, memory type, data rate, bandwidth
   efficiency, peak BF16 TOPS, peak FP8 TOPS, compute efficiency, DRAM
   capacity, TDP
