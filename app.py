@@ -101,12 +101,16 @@ if not _password_gate():
 # ───────────────────────── Header ─────────────────────────
 
 st.title("🎯 keyhole-sizer")
-st.markdown(
-    "Interactive sandbox for the Keyhole bake-off findings.  \n"
-    "Tune NPU spec, pipeline, concurrency, and LLM load to see live FPS / tok/s / duty-cycle projections.  \n"
-    "All numbers trace back to measured bake-offs (`github.com/kylefoxaustin/keyhole`, see `REPRODUCE.md`)."
-)
-st.caption("⚠️ Assumes vision/LLM time-slice on the NPU — concurrent BW contention not modeled.")
+with st.expander("ℹ About this sizer", expanded=False):
+    st.markdown(
+        "Interactive sandbox for the Keyhole bake-off findings. "
+        "Tune NPU spec, pipeline, concurrency, and LLM load to see live "
+        "FPS / tok/s / duty-cycle projections. All numbers trace back to "
+        "measured bake-offs (`github.com/kylefoxaustin/keyhole`, see "
+        "`REPRODUCE.md`).\n\n"
+        "⚠️ Assumes vision/LLM time-slice on the NPU — concurrent BW "
+        "contention not modeled."
+    )
 
 
 # ───────────────────────── Helper: pipeline strip renderer ─────────────────────────
@@ -450,10 +454,7 @@ if llm_enabled:
 else:
     llm_summary = " &middot; LLM <b>off</b>"
 
-# ── Configuration header (row 1) ──
-st.markdown("##### 🔧 Configuration")
-
-# Build the current-config rows (for the download button)
+# Build the current-config rows (needed by the 'This config' download)
 _cur_rows: list[dict] = [
     vision_workload_row(pipeline, hw, resolution, n_streams=n_streams)
 ]
@@ -466,158 +467,18 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-# ── Simulating line + Download block (rows 2–3) — both live inside a
-# left-half column so their widths match: the 'Simulating:' line's right
-# edge aligns with the 'All configs' button's right edge, and the 'This
-# config' button's left edge aligns with the 'S' in 'Simulating:'. Theme-
-# adaptive colors (no hardcoded color: → inherits Streamlit's light/dark
-# text color, readable regardless of user theme). ──
-_left_half, _right_half = st.columns([2.5, 2])
-with _left_half:
-    st.markdown(
-        "<div style='font-size:17px; line-height:1.55; margin:2px 0 14px 0;'>"
-        f"<b>Simulating:</b> {pipeline.label} &nbsp;&middot;&nbsp; "
-        f"<b>{n_streams}</b> stream{'s' if n_streams != 1 else ''} "
-        f"@ <b>{resolution}</b> &nbsp;&middot;&nbsp; "
-        f"<b>{hw.name}</b>{llm_summary}"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<div style='text-align:center; font-size:20px; font-weight:800; "
-        "letter-spacing:0.3px; margin:8px 0 8px 0;'>"
-        "📥 Download model run data</div>",
-        unsafe_allow_html=True,
-    )
-    _btn_cur_col, _btn_mat_col = st.columns(2)
-    with _btn_cur_col:
-        st.download_button(
-            label="💾 This config",
-            data=_cur_csv,
-            file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
-            mime="text/csv",
-            help=(
-                "Platform-budget CSV row for the *current* config (vision + LLM if "
-                "enabled). ss_* columns are additive at the platform level; peak_* "
-                "are per-workload ceilings. Read the header `#` comments for caveats."
-            ),
-            use_container_width=True,
-        )
-    with _btn_mat_col:
-        st.download_button(
-            label="📦 All configs",
-            data=_full_matrix_csv(),
-            file_name="keyhole_sizer_platform_budget_matrix.csv",
-            mime="text/csv",
-            help=(
-                "Every preset HW tier × pipeline × resolution × stream count + every "
-                "LLM (quant × workload × answer_kind) combination (~585 rows). "
-                "Custom HW is skipped — use 'This config' for custom. Cached hourly."
-            ),
-            use_container_width=True,
-        )
-
-# ── KPI spreadsheet: two buttons, each reveals an inline preview of the
-# KPI data + a top-right Download XLSX control. Preview state persists
-# across reruns via st.session_state so changing sidebar state (HW,
-# resolution, LLM, etc.) while the preview is open refreshes its data
-# in place.
+# ── Simulating line — full-width summary of the current selection ──
 st.markdown(
-    "<div style='text-align:center; font-size:20px; font-weight:800; "
-    "letter-spacing:0.3px; margin:20px 0 8px 0;'>"
-    "📊 KPI spreadsheet</div>",
+    "<div style='font-size:17px; line-height:1.55; margin:4px 0 10px 0;'>"
+    f"<b>Simulating:</b> {pipeline.label} &nbsp;&middot;&nbsp; "
+    f"<b>{n_streams}</b> stream{'s' if n_streams != 1 else ''} "
+    f"@ <b>{resolution}</b> &nbsp;&middot;&nbsp; "
+    f"<b>{hw.name}</b>{llm_summary}"
+    "</div>",
     unsafe_allow_html=True,
 )
-_kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
-with _kpi_btn_all_col:
-    if st.button(
-        "📊 KPI spreadsheet (all models)",
-        use_container_width=True,
-        key="kpi_btn_all",
-        help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
-             "the current HW / resolution / LLM state, plus a button to "
-             "download the formatted XLSX.",
-    ):
-        st.session_state.kpi_preview_mode = "all"
-with _kpi_btn_one_col:
-    if st.button(
-        "📊 KPI spreadsheet (this model)",
-        use_container_width=True,
-        key="kpi_btn_this",
-        help="Reveal the KPI row for just the currently-selected pipeline "
-             "(the one from the sidebar), plus a button to download the XLSX.",
-    ):
-        st.session_state.kpi_preview_mode = "this"
 
-_kpi_mode = st.session_state.get("kpi_preview_mode")
-if _kpi_mode in ("all", "this"):
-    if _kpi_mode == "all":
-        _kpi_rows = all_pipeline_kpi_rows(
-            hw, resolution=resolution,
-            llm_enabled=llm_enabled, llm_quant=quant,
-            llm_workload=llm_workload,
-            compiler_quality_vs_trt=compiler_quality,
-        )
-        _kpi_file_slug = "all"
-    else:
-        _kpi_rows = [pipeline_kpi_row(
-            pipeline_key, hw, resolution=resolution,
-            llm_enabled=llm_enabled, llm_quant=quant,
-            llm_workload=llm_workload,
-            compiler_quality_vs_trt=compiler_quality,
-        )]
-        _kpi_file_slug = pipeline_key
-    _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
-    _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
-    with _kpi_dl_col:
-        st.download_button(
-            "⬇ Download XLSX",
-            data=_kpi_xlsx_bytes,
-            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            key=f"kpi_dl_{_kpi_mode}",
-        )
-    with _kpi_data_col:
-        st.dataframe(
-            pd.DataFrame(_kpi_rows),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-# Visual pipeline flow — reflects current pipeline + LLM selection
-_render_pipeline_strip(
-    _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
-)
-_legend_html = (
-    '<div style="display:flex; flex-wrap:wrap; align-items:center; '
-    'gap:20px; margin:4px 0 2px;">'
-    '<div style="display:flex; align-items:center; gap:7px;">'
-    '<span style="display:inline-block; width:16px; height:16px; '
-    'background:#334155; border:1.5px solid #475569; border-radius:3px;"></span>'
-    '<span style="font-size:13px;">'
-    '<b>Always on</b> &nbsp;— ingest, storage</span></div>'
-    '<div style="display:flex; align-items:center; gap:7px;">'
-    '<span style="display:inline-block; width:16px; height:16px; '
-    'background:#6366F1; border:1.5px solid #6366F1; border-radius:3px;"></span>'
-    '<span style="font-size:13px;">'
-    '<b>Pipeline stage changes</b> &nbsp;— varies with your choice</span></div>'
-    '</div>'
-    '<div style="font-size:12px; opacity:0.85; margin-top:4px;">'
-    'Every stage is running — the colors just flag where your controls take effect.'
-    '</div>'
-)
-st.markdown(_legend_html, unsafe_allow_html=True)
-
-# Visual break so the metric cards below read as "outputs of the whole
-# pipeline", not as "one metric per block above". The horizontal rule +
-# section label explicitly re-anchor the reader.
-st.markdown(
-    "<hr style='border:none; border-top:1px solid #334155; margin:20px 0 4px;'>",
-    unsafe_allow_html=True,
-)
-st.markdown("##### 📊 Projected results — the whole pipeline combined")
-
+# ── Projected results: effective-under-LLM math + saturation banner ──
 vision_fps_effective = vision["fps_per_stream"]
 duty_cycle = 0.0
 llm_saturated = False
@@ -630,7 +491,6 @@ if llm_enabled:
         vision["fps_per_stream"], llm, queries_per_min, answer_kind
     )
 
-# Saturation banner — the LLM request rate alone exceeds what one NPU can deliver.
 if llm_saturated:
     max_qpm = (60 / answer_sec) if answer_sec > 0 else 0
     st.error(
@@ -643,7 +503,7 @@ if llm_saturated:
         f"answer mode (short vs RAG), upgrade NPU tier, or dedicate a second NPU to the LLM."
     )
 
-# ───────── Top metric row ─────────
+# ── Top metric row — the headline numbers, sitting above the fold ──
 c1, c2, c3, c4 = st.columns(4)
 c1.metric(
     label="Per-camera FPS",
@@ -693,6 +553,121 @@ else:
             "off-chip memory-bus ratio (bus width × data rate × efficiency)."
         ),
     )
+
+# ── Pipeline flow (collapsible, expanded by default) ──
+with st.expander("🔀 Pipeline flow", expanded=True):
+    _render_pipeline_strip(
+        _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
+    )
+    _legend_html = (
+        '<div style="display:flex; flex-wrap:wrap; align-items:center; '
+        'gap:20px; margin:4px 0 2px;">'
+        '<div style="display:flex; align-items:center; gap:7px;">'
+        '<span style="display:inline-block; width:16px; height:16px; '
+        'background:#334155; border:1.5px solid #475569; border-radius:3px;"></span>'
+        '<span style="font-size:13px;">'
+        '<b>Always on</b> &nbsp;— ingest, storage</span></div>'
+        '<div style="display:flex; align-items:center; gap:7px;">'
+        '<span style="display:inline-block; width:16px; height:16px; '
+        'background:#6366F1; border:1.5px solid #6366F1; border-radius:3px;"></span>'
+        '<span style="font-size:13px;">'
+        '<b>Pipeline stage changes</b> &nbsp;— varies with your choice</span></div>'
+        '</div>'
+        '<div style="font-size:12px; opacity:0.85; margin-top:4px;">'
+        'Every stage is running — the colors just flag where your controls take effect.'
+        '</div>'
+    )
+    st.markdown(_legend_html, unsafe_allow_html=True)
+
+# ── Export data (collapsible, collapsed by default) ──
+# Two rows: platform-budget CSVs on top, KPI-spreadsheet preview triggers
+# below. KPI preview (if active) renders just below the expander so it's
+# full-width and readable.
+with st.expander("📥 Export data", expanded=False):
+    _btn_cur_col, _btn_mat_col = st.columns(2)
+    with _btn_cur_col:
+        st.download_button(
+            label="💾 This config",
+            data=_cur_csv,
+            file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
+            mime="text/csv",
+            help=(
+                "Platform-budget CSV row for the *current* config (vision + LLM if "
+                "enabled). ss_* columns are additive at the platform level; peak_* "
+                "are per-workload ceilings. Read the header `#` comments for caveats."
+            ),
+            use_container_width=True,
+        )
+    with _btn_mat_col:
+        st.download_button(
+            label="📦 All configs",
+            data=_full_matrix_csv(),
+            file_name="keyhole_sizer_platform_budget_matrix.csv",
+            mime="text/csv",
+            help=(
+                "Every preset HW tier × pipeline × resolution × stream count + every "
+                "LLM (quant × workload × answer_kind) combination (~585 rows). "
+                "Custom HW is skipped — use 'This config' for custom. Cached hourly."
+            ),
+            use_container_width=True,
+        )
+    _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
+    with _kpi_btn_all_col:
+        if st.button(
+            "📊 KPI spreadsheet (all models)",
+            use_container_width=True,
+            key="kpi_btn_all",
+            help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
+                 "the current HW / resolution / LLM state, plus a button to "
+                 "download the formatted XLSX.",
+        ):
+            st.session_state.kpi_preview_mode = "all"
+    with _kpi_btn_one_col:
+        if st.button(
+            "📊 KPI spreadsheet (this model)",
+            use_container_width=True,
+            key="kpi_btn_this",
+            help="Reveal the KPI row for just the currently-selected pipeline "
+                 "(the one from the sidebar), plus a button to download the XLSX.",
+        ):
+            st.session_state.kpi_preview_mode = "this"
+
+# ── KPI preview (renders below the expander when a button above is active) ──
+_kpi_mode = st.session_state.get("kpi_preview_mode")
+if _kpi_mode in ("all", "this"):
+    if _kpi_mode == "all":
+        _kpi_rows = all_pipeline_kpi_rows(
+            hw, resolution=resolution,
+            llm_enabled=llm_enabled, llm_quant=quant,
+            llm_workload=llm_workload,
+            compiler_quality_vs_trt=compiler_quality,
+        )
+        _kpi_file_slug = "all"
+    else:
+        _kpi_rows = [pipeline_kpi_row(
+            pipeline_key, hw, resolution=resolution,
+            llm_enabled=llm_enabled, llm_quant=quant,
+            llm_workload=llm_workload,
+            compiler_quality_vs_trt=compiler_quality,
+        )]
+        _kpi_file_slug = pipeline_key
+    _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
+    _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
+    with _kpi_dl_col:
+        st.download_button(
+            "⬇ Download XLSX",
+            data=_kpi_xlsx_bytes,
+            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key=f"kpi_dl_{_kpi_mode}",
+        )
+    with _kpi_data_col:
+        st.dataframe(
+            pd.DataFrame(_kpi_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 st.markdown("---")
 
