@@ -113,7 +113,41 @@ with st.expander("ℹ About this sizer", expanded=False):
     )
 
 
-# ───────────────────────── Helper: pipeline strip renderer ─────────────────────────
+# ───────────────────────── Helpers: chart theme + pipeline strip ─────────────────────────
+
+# Sizer's dark-theme palette for Plotly figures. Applied consistently so
+# axis ticks, titles, and gridlines render as readable near-white-on-navy
+# instead of Plotly's default gray-on-dark (which has low contrast).
+_CHART_FG = "#EAEDF4"
+_CHART_BG = "#0F192E"
+_CHART_GRID = "#334155"
+
+
+def _apply_chart_theme(fig):
+    """Apply the sizer's dark-theme axis + legend colors to a Plotly figure.
+
+    Called AFTER the figure's primary update_layout() so per-chart titles,
+    heights, margins, and layout tweaks are preserved. Uses update_xaxes /
+    update_yaxes / update_layout which MERGE rather than replace, so any
+    chart that already sets e.g. tickfont=dict(size=13) keeps its size.
+
+    Fixes: axis ticks / axis titles / gridlines inheriting Plotly's default
+    gray-on-dark palette instead of the figure-level font color.
+    """
+    fig.update_xaxes(
+        color=_CHART_FG,
+        gridcolor=_CHART_GRID,
+        title_font=dict(color=_CHART_FG),
+    )
+    fig.update_yaxes(
+        color=_CHART_FG,
+        gridcolor=_CHART_GRID,
+        title_font=dict(color=_CHART_FG),
+    )
+    fig.update_layout(
+        legend=dict(font=dict(color=_CHART_FG)),
+    )
+
 
 def _render_pipeline_strip(stages: list[tuple[str, bool]]):
     """Horizontal pipeline flow mirroring the Keyhole deck's exec summary.
@@ -704,6 +738,7 @@ with tab_overview:
             font=dict(color="#EAEDF4"),
             height=300, margin=dict(l=40, r=20, t=20, b=40),
         )
+        _apply_chart_theme(fig)
         st.plotly_chart(fig, use_container_width=True)
         st.caption(pipeline.note)
         if pipeline.key in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
@@ -748,6 +783,7 @@ with tab_overview:
             font=dict(color="#EAEDF4"),
             height=300, margin=dict(l=40, r=60, t=20, b=40),
         )
+        _apply_chart_theme(fig2)
         st.plotly_chart(fig2, use_container_width=True)
 
     # ───── DRAM bandwidth: saturation approximation vs ncu measurement ─────
@@ -793,6 +829,7 @@ with tab_overview:
                 height=340, margin=dict(l=50, r=40, t=30, b=60),
                 showlegend=False,
             )
+            _apply_chart_theme(fig_bw)
             st.plotly_chart(fig_bw, use_container_width=True)
 
     with bw_text_col:
@@ -893,6 +930,7 @@ with tab_overview:
                             title_font=dict(size=13, color="#EAEDF4")),
                 height=360, margin=dict(l=60, r=30, t=40, b=60),
             )
+            _apply_chart_theme(fig_llm)
             st.plotly_chart(fig_llm, use_container_width=True)
             st.caption(
                 f"Current answer mode: **{answer_kind}**  •  "
@@ -928,6 +966,7 @@ with tab_overview:
                             title_font=dict(size=13, color="#EAEDF4")),
                 height=360, margin=dict(l=60, r=30, t=40, b=60),
             )
+            _apply_chart_theme(fig_llm_tier)
             st.plotly_chart(fig_llm_tier, use_container_width=True)
             st.caption(
                 f"At {quant}, for this workload category. MoE wins on BW: "
@@ -992,6 +1031,7 @@ with tab_overview:
             height=300, margin=dict(l=20, r=40, t=10, b=40),
             showlegend=False,
         )
+        _apply_chart_theme(fig_dist)
         st.plotly_chart(fig_dist, use_container_width=True)
 
         mx = max(values); mn = min(v for v in values if v > 0)
@@ -1050,6 +1090,7 @@ with tab_streams:
             legend=dict(orientation="h", y=-0.2),
             height=420, margin=dict(l=40, r=40, t=20, b=40),
         )
+        _apply_chart_theme(fig3)
         st.plotly_chart(fig3, use_container_width=True)
     with col2:
         st.dataframe(df_streams, use_container_width=True, hide_index=True)
@@ -1093,6 +1134,7 @@ with tab_duty:
             legend=dict(orientation="h", y=-0.2),
             height=420, margin=dict(l=40, r=40, t=20, b=40),
         )
+        _apply_chart_theme(fig4)
         st.plotly_chart(fig4, use_container_width=True)
 
         st.markdown(f"""
