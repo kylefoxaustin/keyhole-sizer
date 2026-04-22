@@ -161,6 +161,9 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
         "yolov8n_trt_fp8_every_frame":  ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
         "yolov8n_trt_fp8_1hz_clip":     ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
         "yolov8n_only_fp8":             ("yolov8n-seg FP8 (TRT)", True, "(no CLIP)", False),
+        "yolo11s_trt_int8":              ("yolo11s-seg INT8 (TRT)\n20-frame PTQ", True, "(no CLIP)", False),
+        "yolov8n_trt_int8_coco128":      ("yolov8n-seg INT8 (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        "yolov8n_trt_int8_20frame":      ("yolov8n-seg INT8 (TRT)\n20-frame PTQ ⚠", True, "(no CLIP)", False),
     }
     det_label, det_hl, enr_label, enr_hl = mapping.get(
         pipeline_key, ("?", False, "?", False)
@@ -580,7 +583,9 @@ with tab_overview:
                              "hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
                              "yolo_only_fp8",
                              "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
-                             "yolov8n_only_fp8"}:
+                             "yolov8n_only_fp8",
+                             "yolo11s_trt_int8",
+                             "yolov8n_trt_int8_coco128", "yolov8n_trt_int8_20frame"}:
             st.caption(
                 "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
                 "fixed **640²** input and CLIP at **224²**. Source resolution "
