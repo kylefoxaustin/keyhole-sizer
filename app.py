@@ -24,7 +24,7 @@ from sizer.platform_budget import (
 from sizer.measured import (
     measured_dram_per_frame, measured_components, bundle_metadata,
 )
-from sizer.kpi_breakdown import all_pipeline_kpi_rows
+from sizer.kpi_breakdown import all_pipeline_kpi_xlsx
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -462,16 +462,15 @@ if llm_enabled:
 _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
-# KPI breakdown CSV: all 17 pipelines swept at the current HW + resolution
-# + LLM state. Generated eagerly each rerun (17-row DataFrame — cheap).
-_kpi_csv = pd.DataFrame(
-    all_pipeline_kpi_rows(
-        hw, resolution=resolution,
-        llm_enabled=llm_enabled, llm_quant=quant,
-        llm_workload=llm_workload,
-        compiler_quality_vs_trt=compiler_quality,
-    )
-).to_csv(index=False)
+# KPI breakdown XLSX: all 17 pipelines swept at the current HW + resolution
+# + LLM state, with formatted headers (bold, title case) and alignment.
+# Generated eagerly each rerun (17 rows is negligible).
+_kpi_xlsx = all_pipeline_kpi_xlsx(
+    hw, resolution=resolution,
+    llm_enabled=llm_enabled, llm_quant=quant,
+    llm_workload=llm_workload,
+    compiler_quality_vs_trt=compiler_quality,
+)
 
 # ── Simulating line + Download block (rows 2–3) — both live inside a
 # left-half column so their widths match: the 'Simulating:' line's right
@@ -526,16 +525,17 @@ with _left_half:
     with _btn_kpi_col:
         st.download_button(
             label="📊 KPI breakdown",
-            data=_kpi_csv,
-            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}.csv",
-            mime="text/csv",
+            data=_kpi_xlsx,
+            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             help=(
                 "Per-pipeline KPI sheet: model, per-stage ms breakdown "
                 "(ingest + yolo + seg + llm), and total_fps across all 17 "
                 "pipelines at the current HW + resolution + LLM state. "
                 "total_fps is vision-only (LLM duty-cycles; llm_ms shown "
                 "for context). Rows ordered SAM → one-model → composed → "
-                "yolo-only."
+                "yolo-only. Formatted XLSX — bold headers, column A right-"
+                "aligned, numeric columns center-aligned."
             ),
             use_container_width=True,
         )
