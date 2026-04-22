@@ -367,7 +367,7 @@ with st.sidebar:
     pipeline = PIPELINES[pipeline_key]
     st.caption(pipeline.description)
 
-    resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=0,
+    resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=1,
                                key="resolution")
     n_streams = st.slider("Concurrent streams", 1, 16, 1, 1,
                            help="Each stream processes its own video source. YOLO batching "
