@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .precision import CapabilityLevel
+
 
 # ───────────────────────── Hardware tiers ─────────────────────────
 
@@ -45,6 +47,17 @@ class Hardware:
     # (e.g. NPU i.MX 95 Neutron).
     measured_edge_ms: dict[str, dict[str, float]] | None = None
 
+    # Optional: per-dtype capability taxonomy. When populated, describes
+    # what kernel path the silicon is CAPABLE of taking for each dtype —
+    # `tensor_native` / `tensor_compat` / `cuda_core` / `unsupported`.
+    # See sizer/precision.py for the taxonomy. Consumed by docs/UI to
+    # explain why measured silicon either runs a dtype successfully or
+    # errors out (e.g. 5090 INT8 = tensor_compat via sm80 IMMA binary
+    # compat; vLLM CUTLASS fresh-compile fails because SM120 lacks
+    # native INT8 tensor-core instructions). Build-time fallbacks (TRT
+    # FP8→FP16 without QDQ) are NOT captured here — that's per-engine.
+    capability_levels: dict[str, CapabilityLevel] | None = None
+
     @property
     def effective_bandwidth_gbs(self) -> float:
         return self.mem_bandwidth_gbs * self.bandwidth_efficiency
@@ -69,6 +82,64 @@ class Hardware:
         }.get(dtype.lower(), self.peak_tops_bf16)
         return peak * self.compute_efficiency
 
+    def capability_level(self, dtype: str) -> CapabilityLevel:
+        """Per-dtype kernel-path capability for this silicon.
+
+        When `capability_levels` is explicitly populated, returns the
+        declared level. Otherwise falls back to a peak-TOPS heuristic:
+        non-zero peak_tops for the dtype → 'tensor_native'; zero →
+        'unsupported'. The heuristic keeps old tier definitions working
+        without forcing every Hardware instance to declare levels.
+        """
+        dt = dtype.lower()
+        if self.capability_levels is not None and dt in self.capability_levels:
+            return self.capability_levels[dt]
+        peak = {
+            "int8": self.peak_tops_int8,
+            "fp8":  self.peak_tops_fp8,
+            "bf16": self.peak_tops_bf16,
+            "fp16": self.peak_tops_bf16,
+        }.get(dt, 0.0)
+        return "tensor_native" if peak > 0 else "unsupported"
+
+
+# Consumer Blackwell SM120 capability map — shared across RTX_5090 and
+# RTX_5090_REFERENCE since they're the same silicon. INT8 is
+# `tensor_compat` (not `tensor_native`) because SM120 dropped the new
+# INT8 tensor-core instructions that SM100 had, but sm80 IMMA kernels
+# (pre-compiled by TRT 10.16) still run correctly via CUDA binary
+# compatibility. ncu probe 2026-04-24 confirmed non-zero
+# sm__inst_executed_pipe_tensor.sum for the INT8 engine + kernel names
+# like 'sm80_xmma_fprop_implicit_gemm_i8f32_..._tensor16x8x32_*'. FP8 is
+# `tensor_native` because consumer Blackwell inherits FP8 tensor cores
+# from B200 — our TRT-10.16 FP8→FP16 fallback is a build-side QDQ issue,
+# not a hardware limitation.
+_SM120_BLACKWELL_CAPABILITY: dict[str, CapabilityLevel] = {
+    "int8": "tensor_compat",
+    "fp8":  "tensor_native",
+    "bf16": "tensor_native",
+    "fp16": "tensor_native",
+}
+
+# Edge-NPU Neutron-class (INT8-only silicon) capability map. Any
+# floating-point op either fails to load or falls through to the
+# host CPU at catastrophic slowdown — treated as `unsupported` here
+# since the sizer's BW/compute projection doesn't model host fallback.
+_NEUTRON_INT8_ONLY_CAPABILITY: dict[str, CapabilityLevel] = {
+    "int8": "tensor_native",
+    "fp8":  "unsupported",
+    "bf16": "unsupported",
+    "fp16": "unsupported",
+}
+
+# Full-dtype edge NPU (LP5X + Mid + High tiers all share this shape).
+_NPU_FULL_DTYPE_CAPABILITY: dict[str, CapabilityLevel] = {
+    "int8": "tensor_native",
+    "fp8":  "tensor_native",
+    "bf16": "tensor_native",
+    "fp16": "tensor_native",
+}
+
 
 # Reference: RTX 5090 — all Keyhole 5090 measurements happened here.
 RTX_5090 = Hardware(
@@ -78,6 +149,7 @@ RTX_5090 = Hardware(
     mem_bus_width_bits=512, mem_type="GDDR7", mem_data_rate_gtps=28.0,
     compute_efficiency=0.70, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
+    capability_levels=_SM120_BLACKWELL_CAPABILITY,
 )
 
 # Edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
@@ -103,6 +175,7 @@ NPU_LOW_LP5_64BIT = Hardware(
     tdp_watts=10.0,
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
+    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
 )
 
 # 32-bit LP5 variant — half the bandwidth of the 64-bit version. LLM
@@ -116,6 +189,7 @@ NPU_LOW_LP5_32BIT = Hardware(
     mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
+    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
 )
 
 # LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
@@ -129,6 +203,7 @@ NPU_LOW_LP5X = Hardware(
     mem_bus_width_bits=64, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
+    capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
 )
 
 NPU_MID = Hardware(
@@ -140,6 +215,7 @@ NPU_MID = Hardware(
     tdp_watts=25.0,
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.351,
+    capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
 )
 
 NPU_HIGH = Hardware(
@@ -151,6 +227,7 @@ NPU_HIGH = Hardware(
     tdp_watts=40.0,
     measured_llm_q4_decode_tok_s=50.46,
     measured_llm_ttft_1k_sec=0.1755,
+    capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
 )
 
 # Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
@@ -177,6 +254,7 @@ RTX_5090_REFERENCE = Hardware(
     mem_bus_width_bits=512, mem_type="GDDR7", mem_data_rate_gtps=28.0,
     compute_efficiency=0.70, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
+    capability_levels=_SM120_BLACKWELL_CAPABILITY,
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
         # Add more entries here as backend pulls them from data/output/
@@ -186,6 +264,19 @@ RTX_5090_REFERENCE = Hardware(
         "yolo_only_fp8":              {"720p": 0.68},  # yolo11s-seg FP8 TRT
         "sam3_bf16":                  {"720p": 95.0, "1080p": 95.0, "4K": 95.0},
         "efficientsam3_es_ev_s_bf16": {"720p": 27.0, "1080p": 44.0, "4K": 138.0},
+        # Composed YOLO+CLIP pipelines — stage-composed from backend's
+        # 2026-04-24 11:16 fresh CLIP rerun (TRT FP8 ViT-B/32) +
+        # existing per-stage YOLO numbers, with empirical crop/copy
+        # overhead from hybrid_v2 (resolution-bound, framework-indep):
+        #   crop_ms = 4.2 @ 720p / 8.1 @ 1080p / 30.2 @ 4K
+        # Formula: amortized = ((30-k)·yolo + k·(yolo+crop+clip)) / 30
+        # where k=30 for per-frame, k=1 for 1Hz (30 FPS stream).
+        # Only populated where backend has per-stage numbers for the
+        # resolution (yolo11s 5090 measured only at 720p to date).
+        "trt_fp8_1hz_clip":            {"720p": 0.87},
+        "trt_fp8_every_frame":         {"720p": 6.33},
+        "yolov8n_trt_fp8_1hz_clip":    {"720p": 0.68, "1080p": 0.80, "4K": 1.56},
+        "yolov8n_trt_fp8_every_frame": {"720p": 6.14, "1080p": 9.83, "4K": 31.96},
     },
 )
 
@@ -196,6 +287,7 @@ NPU_IMX95_MEASURED = Hardware(
     mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
+    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
     measured_edge_ms={
         "yolov8n_trt_int8_coco128": {"1080p": 32.0},
     },
