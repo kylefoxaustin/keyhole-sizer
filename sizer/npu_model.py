@@ -266,15 +266,15 @@ RTX_5090_REFERENCE = Hardware(
         "efficientsam3_es_ev_s_bf16": {"720p": 27.0, "1080p": 44.0, "4K": 138.0},
         # Composed YOLO+CLIP pipelines — stage-composed from backend's
         # 2026-04-24 11:16 fresh CLIP rerun (TRT FP8 ViT-B/32) +
-        # existing per-stage YOLO numbers, with empirical crop/copy
-        # overhead from hybrid_v2 (resolution-bound, framework-indep):
+        # yolo11s-seg/yolov8n-seg FP8 TRT per-resolution numbers from
+        # data/output/bakeoff/trt_yolo_edge_projection.json (backend
+        # 11:44), with empirical crop/copy overhead from hybrid_v2
+        # (resolution-bound, framework-indep):
         #   crop_ms = 4.2 @ 720p / 8.1 @ 1080p / 30.2 @ 4K
         # Formula: amortized = ((30-k)·yolo + k·(yolo+crop+clip)) / 30
         # where k=30 for per-frame, k=1 for 1Hz (30 FPS stream).
-        # Only populated where backend has per-stage numbers for the
-        # resolution (yolo11s 5090 measured only at 720p to date).
-        "trt_fp8_1hz_clip":            {"720p": 0.87},
-        "trt_fp8_every_frame":         {"720p": 6.33},
+        "trt_fp8_1hz_clip":            {"720p": 0.87, "1080p": 1.00, "4K": 1.79},
+        "trt_fp8_every_frame":         {"720p": 6.33, "1080p": 10.03, "4K": 32.19},
         "yolov8n_trt_fp8_1hz_clip":    {"720p": 0.68, "1080p": 0.80, "4K": 1.56},
         "yolov8n_trt_fp8_every_frame": {"720p": 6.14, "1080p": 9.83, "4K": 31.96},
     },
