@@ -43,7 +43,15 @@ CAPABILITY_LABELS: dict[CapabilityLevel, str] = {
 
 CAPABILITY_DESCRIPTIONS: dict[CapabilityLevel, str] = {
     "tensor_native": "Silicon has native tensor-core instructions for this dtype compiled for its arch.",
-    "tensor_compat": "Tensor-core execution via pre-compiled kernels from an older arch (CUDA binary compatibility).",
+    "tensor_compat": (
+        "Tensor-core execution via pre-compiled kernels from an older arch "
+        "(CUDA binary compatibility). Fresh-compile paths (vLLM CUTLASS) "
+        "hit `RuntimeError: Int8 not supported on SM120. Use FP8 "
+        "quantization instead, or run on older arch (SM < 100).` — "
+        "TRT works because it ships sm80 IMMA kernels in its binary "
+        "library; CUTLASS fails because it tries to emit SM120-native "
+        "INT8 instructions that don't exist."
+    ),
     "cuda_core":     "No tensor-core path for this dtype; execution falls through to generic CUDA cores.",
     "unsupported":   "Silicon cannot execute this dtype — the stack will fail to load or refuse the op.",
 }

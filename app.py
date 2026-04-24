@@ -28,6 +28,9 @@ from sizer.kpi_breakdown import (
     pipeline_kpi_row, all_pipeline_kpi_rows, kpi_rows_to_xlsx,
 )
 from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
+from sizer.llm_models import (
+    LLM_MODELS, DEFAULT_LLM_MODEL_KEY, CATEGORY_LABELS, accuracy_delta_pp,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -423,6 +426,69 @@ with st.sidebar:
                              help="Qwen3-30B-A3B MoE (3B active / 30B total).",
                              key="llm_enabled")
     if llm_enabled:
+        # Model selection — domain fine-tune (default) vs stock public
+        # reasoning baseline. Both are Q4_K_M MoE 30B/3B-active so decode
+        # tok/s is the same across models — accuracy is what differs.
+        llm_model_keys = list(LLM_MODELS.keys())
+        llm_model_key = st.selectbox(
+            "LLM model",
+            options=llm_model_keys,
+            format_func=lambda k: LLM_MODELS[k].label,
+            index=llm_model_keys.index(DEFAULT_LLM_MODEL_KEY),
+            help="Both models share the Q4_K_M MoE 30B/3B-active shape so "
+                 "decode tok/s and TTFT are identical — accuracy is what "
+                 "differs. Selecting answers Kyle's deck question: 'would "
+                 "a stock public reasoning model just replace the fine-tune?'",
+            key="llm_model_key",
+        )
+        _model = LLM_MODELS[llm_model_key]
+        _other_model = next(m for k, m in LLM_MODELS.items() if k != llm_model_key)
+        _delta = accuracy_delta_pp(_model, _other_model)
+        _delta_sign = "+" if _delta >= 0 else ""
+        st.caption(
+            f"**{_model.pass_rate*100:.1f}%** pass rate "
+            f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
+            f" · {_delta_sign}{_delta:.1f}pp vs {_other_model.label.split(' (')[0]}"
+        )
+        with st.expander("📊 Accuracy details"):
+            st.markdown(
+                f"**{_model.label}**  \n"
+                f"{_model.description}  \n  \n"
+                f"**Family:** {_model.family}  \n"
+                f"**Base:** {_model.base}  \n"
+                f"**Total / active params:** {_model.total_params_b:.0f}B / "
+                f"{_model.active_params_b:.0f}B  \n"
+                f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
+                f"**Specialization:** {_model.fine_tune}  \n  \n"
+                f"**Pass rate:** {_model.pass_rate*100:.1f}% "
+                f"({_model.pass_n_passes}/{_model.pass_n_total}) — "
+                f"{_delta_sign}{_delta:.1f}pp vs **{_other_model.label}** "
+                f"({_other_model.pass_rate*100:.1f}%)  \n  \n"
+                f"🔸 *{_model.deck_bullet}*"
+            )
+            if _model.category_deltas:
+                st.markdown("**Per-category Δ vs the other model** (positive = this model wins):")
+                for cat, delta_passes in _model.category_deltas.items():
+                    sign = "+" if delta_passes >= 0 else ""
+                    cat_label = CATEGORY_LABELS.get(cat, cat)
+                    st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
+                st.caption(
+                    "Δ measured vs Skippy v2 prompt set (132 samples), "
+                    "RAG on (8 chunks via hybrid retrieval). Eval by "
+                    "[backend] session 2026-04-24. Categories not listed "
+                    "are flat ±0 between the two models."
+                )
+            st.markdown(
+                "---\n"
+                "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
+                "same decode-tok/s ceiling on every NPU tier regardless of which "
+                "model's weights are in the file — bandwidth-bound physics doesn't "
+                "care. So model choice is a **quality-vs-quality** trade, not a "
+                "perf trade. The fine-tune costs nothing extra at inference time; "
+                "it just buys domain retrieval headroom that a stock reasoning "
+                "model doesn't have."
+            )
+
         quant = st.selectbox("Qwen3 quantization",
                               ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
                               key="llm_quant")
@@ -476,6 +542,7 @@ with st.sidebar:
         llm_workload = "plain_chat"
         queries_per_min = 0.0
         answer_kind = "short"
+        llm_model_key = DEFAULT_LLM_MODEL_KEY
 
 # ───────────────────────── Main area ─────────────────────────
 
@@ -489,10 +556,11 @@ llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
 # HTML form (uses <b> so it renders bold inside an HTML-styled div below).
 if llm_enabled:
     wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
+    _selected_model_short = LLM_MODELS[llm_model_key].label.split(" (")[0]
     llm_summary = (
-        f" &middot; LLM <b>on</b> &mdash; Qwen3-30B-A3B <b>{quant}</b>, "
-        f"<b>{wl_label}</b> @ <b>{queries_per_min:.1f} q/min</b> "
-        f"(<b>{answer_kind}</b> answers)"
+        f" &middot; LLM <b>on</b> &mdash; <b>{_selected_model_short}</b> "
+        f"<b>{quant}</b>, <b>{wl_label}</b> @ "
+        f"<b>{queries_per_min:.1f} q/min</b> (<b>{answer_kind}</b> answers)"
     )
 else:
     llm_summary = " &middot; LLM <b>off</b>"
