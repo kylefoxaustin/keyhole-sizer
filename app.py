@@ -305,12 +305,18 @@ with st.sidebar:
 
     st.markdown("---")
     st.header("Vision workload")
-
-    # Pipeline is picked in two steps: a radio for the narrative track,
-    # then a selectbox scoped to that track. Each track has its own
-    # selectbox state (via key=f"pipeline__{track_label}") so switching
-    # tracks and coming back remembers the last pick for that track;
-    # first visit to a track shows that track's canonical default.
+    vision_enabled = st.toggle(
+        "Enable vision pipeline",
+        value=True,
+        help="When OFF, the sizer projects only LLM workload — useful for "
+             "modeling LLM-only edge devices (e.g. local AI assistant on an "
+             "NPU without a camera input). Defaults ON for backward compat.",
+        key="vision_enabled",
+    )
+    # Pipeline-track invariant runs unconditionally — same loud-fail-on-
+    # orphan check whether vision is currently enabled or not. Catches
+    # PIPELINES/PIPELINE_TRACKS drift the moment app boots, not the moment
+    # someone toggles vision on.
     PIPELINE_TRACKS = [
         ("SAM 3 lineage",
          ["sam3_bf16", "essmall_fp8",
@@ -334,9 +340,6 @@ with st.sidebar:
     _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
     _DEFAULT_TRACK_INDEX = 2  # "Default (Hybrid V2 → TRT)"
 
-    # Invariant: PIPELINES ⊆ ⋃(tracks) AND ⋃(tracks) ⊆ PIPELINES.
-    # Fails loud on startup/rerun rather than silently dropping a new
-    # pipeline from the dropdown or silently keeping a stale key.
     _track_pipelines = {k for _, keys, _ in PIPELINE_TRACKS for k in keys}
     _orphaned = set(PIPELINES.keys()) - _track_pipelines
     _unknown  = _track_pipelines - set(PIPELINES.keys())
@@ -352,78 +355,91 @@ with st.sidebar:
             f"{sorted(_unknown)}. Typo, or removed from PIPELINES?"
         )
 
-    track_label = st.radio(
-        "Pipeline track",
-        options=_TRACK_LABELS,
-        index=_DEFAULT_TRACK_INDEX,
-        help="Pick a narrative track, then choose a specific pipeline within it. "
-             "Tracks match the deck's optimization journey: where we started (SAM 3), "
-             "one-model open-vocab alternatives, the Hybrid V2 → TRT default path, "
-             "the yolov8n nano cross-variant, and INT8 vendor-comparison points.",
-        key="pipeline_track",
-    )
-    _, _track_keys, _canonical = next(
-        t for t in PIPELINE_TRACKS if t[0] == track_label
-    )
+    if vision_enabled:
+        # Pipeline is picked in two steps: a radio for the narrative track,
+        # then a selectbox scoped to that track. Each track has its own
+        # selectbox state (via key=f"pipeline__{track_label}") so switching
+        # tracks and coming back remembers the last pick for that track;
+        # first visit to a track shows that track's canonical default.
+        track_label = st.radio(
+            "Pipeline track",
+            options=_TRACK_LABELS,
+            index=_DEFAULT_TRACK_INDEX,
+            help="Pick a narrative track, then choose a specific pipeline within it. "
+                 "Tracks match the deck's optimization journey: where we started (SAM 3), "
+                 "one-model open-vocab alternatives, the Hybrid V2 → TRT default path, "
+                 "the yolov8n nano cross-variant, and INT8 vendor-comparison points.",
+            key="pipeline_track",
+        )
+        _, _track_keys, _canonical = next(
+            t for t in PIPELINE_TRACKS if t[0] == track_label
+        )
 
-    pipeline_key = st.selectbox(
-        "Pipeline",
-        options=_track_keys,
-        format_func=lambda k: PIPELINES[k].label,
-        index=_track_keys.index(_canonical),
-        key=f"pipeline__{track_label}",
-    )
-    pipeline = PIPELINES[pipeline_key]
-    st.caption(pipeline.description)
+        pipeline_key = st.selectbox(
+            "Pipeline",
+            options=_track_keys,
+            format_func=lambda k: PIPELINES[k].label,
+            index=_track_keys.index(_canonical),
+            key=f"pipeline__{track_label}",
+        )
+        pipeline = PIPELINES[pipeline_key]
+        st.caption(pipeline.description)
 
-    resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=1,
-                               key="resolution")
-    n_streams = st.slider("Concurrent streams", 1, 16, 1, 1,
-                           help="Each stream processes its own video source. YOLO batching "
-                                "kicks in automatically (batch = N_streams).",
-                           key="n_streams")
+        resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=1,
+                                   key="resolution")
+        n_streams = st.slider("Concurrent streams", 1, 16, 1, 1,
+                               help="Each stream processes its own video source. YOLO batching "
+                                    "kicks in automatically (batch = N_streams).",
+                               key="n_streams")
 
-    compiler_quality = st.slider(
-        "Edge compiler quality vs TensorRT", 0.50, 1.00, 1.00, 0.05,
-        help="5090 measurements came out of NVIDIA TensorRT — a best-in-class compiler. "
-             "Vendor edge-NPU compilers (SNPE, NeuroPilot, OpenVINO-NPU, etc.) typically "
-             "extract a fraction of the same theoretical peak. **1.00 = parity** (projections "
-             "unchanged, optimistic). **0.75 = realistic** (edge compiler 25% slower per kernel). "
-             "**0.50 = pessimistic** (half as good — first-gen NPU SDK). Applied as a post-multiplier "
-             "on every projected vision latency path.",
-        key="compiler_quality",
-    )
-    if compiler_quality < 1.00:
-        st.caption(f"⚠️ Applying {(1 - compiler_quality) * 100:.0f}% compiler-quality haircut "
-                    f"to projected vision FPS (LLM tok/s unaffected — those are vendor-measured).")
+        compiler_quality = st.slider(
+            "Edge compiler quality vs TensorRT", 0.50, 1.00, 1.00, 0.05,
+            help="5090 measurements came out of NVIDIA TensorRT — a best-in-class compiler. "
+                 "Vendor edge-NPU compilers (SNPE, NeuroPilot, OpenVINO-NPU, etc.) typically "
+                 "extract a fraction of the same theoretical peak. **1.00 = parity** (projections "
+                 "unchanged, optimistic). **0.75 = realistic** (edge compiler 25% slower per kernel). "
+                 "**0.50 = pessimistic** (half as good — first-gen NPU SDK). Applied as a post-multiplier "
+                 "on every projected vision latency path.",
+            key="compiler_quality",
+        )
+        if compiler_quality < 1.00:
+            st.caption(f"⚠️ Applying {(1 - compiler_quality) * 100:.0f}% compiler-quality haircut "
+                        f"to projected vision FPS (LLM tok/s unaffected — those are vendor-measured).")
 
-    with st.expander("ℹ️ CPU preprocessing cost (not in these FPS numbers)"):
-        st.markdown(
-            "Every YOLO frame needs a **640×640 letterbox resize** before it hits "
-            "the TRT engine. That resize runs on the **host CPU** (OpenCV "
-            "`cv2.resize` bilinear), not on the GPU/NPU — and it's excluded from "
-            "the engine ms/frame numbers here, the same way it's excluded from the "
-            "5090 bake-off timings.\n\n"
-            "**Measured** (5090 host, i9-14900KF, single-thread, N=500):\n"
-            "- 720p → 640×640: **0.17 ms/frame**\n"
-            "- 1080p → 640×640: **0.32 ms/frame**\n"
-            "- 4K → 640×640: **0.33 ms/frame**\n\n"
-            "That's **~0.5–1% of one CPU core at 30 fps**. Flat across source "
-            "resolutions because the 640×640 output dominates cost.\n\n"
-            "**Edge ARM extrapolation** (Cortex-A55 ≈ 10× slower single-thread): "
-            "~**2–3 ms/frame**, ~**6–10% of one edge core at 30 fps**.\n\n"
-            "**The caveat that matters:** most edge SoCs move this off-CPU via a "
-            "fixed-function ISP, 2D GPU, or video-decoder output scaler "
-            "(Qualcomm, MediaTek, NXP i.MX 95, Ambarella, Hailo all ship one). "
-            "Pure-NPU boards without such a block (e.g., Google Coral) pay the "
-            "full CPU cost."
+        with st.expander("ℹ️ CPU preprocessing cost (not in these FPS numbers)"):
+            st.markdown(
+                "Every YOLO frame needs a **640×640 letterbox resize** before it hits "
+                "the TRT engine. That resize runs on the **host CPU** (OpenCV "
+                "`cv2.resize` bilinear), not on the GPU/NPU — and it's excluded from "
+                "the engine ms/frame numbers here, the same way it's excluded from the "
+                "5090 bake-off timings.\n\n"
+                "**Measured** (5090 host, i9-14900KF, single-thread, N=500):\n"
+                "- 720p → 640×640: **0.17 ms/frame**\n"
+                "- 1080p → 640×640: **0.32 ms/frame**\n"
+                "- 4K → 640×640: **0.33 ms/frame**\n\n"
+                "That's **~0.5–1% of one CPU core at 30 fps**. Flat across source "
+                "resolutions because the 640×640 output dominates cost.\n\n"
+                "**Edge ARM extrapolation** (Cortex-A55 ≈ 10× slower single-thread): "
+                "~**2–3 ms/frame**, ~**6–10% of one edge core at 30 fps**.\n\n"
+                "**The caveat that matters:** most edge SoCs move this off-CPU via a "
+                "fixed-function ISP, 2D GPU, or video-decoder output scaler "
+                "(Qualcomm, MediaTek, NXP i.MX 95, Ambarella, Hailo all ship one). "
+                "Pure-NPU boards without such a block (e.g., Google Coral) pay the "
+                "full CPU cost."
+            )
+    else:
+        st.caption(
+            "🚫 Vision off — sizing only the LLM workload. Toggle on to "
+            "include camera-stream pipelines."
         )
 
     st.markdown("---")
-    st.header("LLM co-exist")
-    llm_enabled = st.toggle("Share the NPU with a generative LLM",
+    st.header("LLM workload")
+    llm_enabled = st.toggle("Enable generative LLM",
                              value=False,
-                             help="Qwen3-30B-A3B MoE (3B active / 30B total).",
+                             help="Qwen3-30B-A3B MoE (3B active / 30B total). "
+                                  "Models LLM workload alongside vision (or alone, "
+                                  "with vision disabled).",
                              key="llm_enabled")
     if llm_enabled:
         # Model selection — domain fine-tune (default) vs stock public
@@ -546,9 +562,20 @@ with st.sidebar:
 
 # ───────────────────────── Main area ─────────────────────────
 
+# Degenerate state: nothing to size. Bail with a friendly nudge before
+# any projections or layout would attempt to render with no inputs.
+if not vision_enabled and not llm_enabled:
+    st.info(
+        "👈 Toggle **Enable vision pipeline** or **Enable generative LLM** "
+        "in the sidebar to start sizing. The app projects whichever workloads "
+        "are enabled — either alone, or both sharing the same silicon."
+    )
+    st.stop()
+
 # Compute projections
-vision = project_vision(pipeline, hw, resolution, n_streams=n_streams,
-                         compiler_quality_vs_trt=compiler_quality)
+vision = (project_vision(pipeline, hw, resolution, n_streams=n_streams,
+                          compiler_quality_vs_trt=compiler_quality)
+          if vision_enabled else None)
 llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
 
 # ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
@@ -558,17 +585,26 @@ if llm_enabled:
     wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
     _selected_model_short = LLM_MODELS[llm_model_key].label.split(" (")[0]
     llm_summary = (
-        f" &middot; LLM <b>on</b> &mdash; <b>{_selected_model_short}</b> "
+        f"<b>{_selected_model_short}</b> "
         f"<b>{quant}</b>, <b>{wl_label}</b> @ "
         f"<b>{queries_per_min:.1f} q/min</b> (<b>{answer_kind}</b> answers)"
     )
 else:
-    llm_summary = " &middot; LLM <b>off</b>"
+    llm_summary = ""
+
+if vision_enabled:
+    vision_summary = (
+        f"{pipeline.label} &nbsp;&middot;&nbsp; "
+        f"<b>{n_streams}</b> stream{'s' if n_streams != 1 else ''} "
+        f"@ <b>{resolution}</b>"
+    )
+else:
+    vision_summary = ""
 
 # Build the current-config rows (needed by the 'This config' download)
-_cur_rows: list[dict] = [
-    vision_workload_row(pipeline, hw, resolution, n_streams=n_streams)
-]
+_cur_rows: list[dict] = []
+if vision_enabled:
+    _cur_rows.append(vision_workload_row(pipeline, hw, resolution, n_streams=n_streams))
 if llm_enabled:
     _cur_rows.append(llm_workload_row(
         hw, quant, workload=llm_workload,
@@ -579,18 +615,22 @@ _cur_csv = rows_to_csv_str(_cur_rows)
 _hw_slug = hw.name.lower().replace(" ", "_")
 
 # ── Simulating line — full-width summary of the current selection ──
+# Composed dynamically: skip the vision clause when vision is off, skip the
+# LLM clause when LLM is off. (The both-off case is short-circuited above.)
+_sim_clauses = [c for c in (vision_summary, llm_summary) if c]
+_sim_body = " &nbsp;&middot;&nbsp; ".join(_sim_clauses)
 st.markdown(
     "<div style='font-size:17px; line-height:1.55; margin:4px 0 10px 0;'>"
-    f"<b>Simulating:</b> {pipeline.label} &nbsp;&middot;&nbsp; "
-    f"<b>{n_streams}</b> stream{'s' if n_streams != 1 else ''} "
-    f"@ <b>{resolution}</b> &nbsp;&middot;&nbsp; "
-    f"<b>{hw.name}</b>{llm_summary}"
+    f"<b>Simulating:</b> {_sim_body} &nbsp;&middot;&nbsp; "
+    f"<b>{hw.name}</b>"
     "</div>",
     unsafe_allow_html=True,
 )
 
 # ── Projected results: effective-under-LLM math + saturation banner ──
-vision_fps_effective = vision["fps_per_stream"]
+# Vision-effective math only meaningful when vision is on. Saturation
+# banner fires when both are on AND LLM duty cycle ≥ 100%.
+vision_fps_effective = vision["fps_per_stream"] if vision_enabled else 0.0
 duty_cycle = 0.0
 llm_saturated = False
 if llm_enabled:
@@ -598,11 +638,12 @@ if llm_enabled:
     answer_sec = llm["short_answer_sec"] if answer_kind == "short" else llm["rag_total_sec"]
     duty_cycle = qps * answer_sec
     llm_saturated = duty_cycle >= 1.0
-    vision_fps_effective = vision_fps_under_llm_load(
-        vision["fps_per_stream"], llm, queries_per_min, answer_kind
-    )
+    if vision_enabled:
+        vision_fps_effective = vision_fps_under_llm_load(
+            vision["fps_per_stream"], llm, queries_per_min, answer_kind
+        )
 
-if llm_saturated:
+if llm_saturated and vision_enabled:
     max_qpm = (60 / answer_sec) if answer_sec > 0 else 0
     st.error(
         f"⚠ **NPU oversubscribed by the LLM.** {queries_per_min:.1f} {answer_kind} "
@@ -613,62 +654,120 @@ if llm_saturated:
         f"queries/min** (100% NPU duty). Reduce query rate, use a lighter "
         f"answer mode (short vs RAG), upgrade NPU tier, or dedicate a second NPU to the LLM."
     )
+elif llm_saturated and not vision_enabled:
+    max_qpm = (60 / answer_sec) if answer_sec > 0 else 0
+    st.error(
+        f"⚠ **LLM workload exceeds NPU capacity.** {queries_per_min:.1f} {answer_kind} "
+        f"queries/min × {answer_sec:.1f} s/answer = {duty_cycle*100:.0f}% duty cycle. "
+        f"Maximum sustainable on {hw.name} at {quant}: ~**{max_qpm:.1f} queries/min** "
+        f"(100% NPU duty). Reduce rate, use a lighter answer mode, or upgrade tier."
+    )
 
 # ── Top metric row — the headline numbers, sitting above the fold ──
-c1, c2, c3, c4 = st.columns(4)
-c1.metric(
-    label="Per-camera FPS",
-    value=f"{vision_fps_effective:.1f}",
-    delta=(f"{vision_fps_effective - vision['fps_per_stream']:+.1f}  under LLM"
-            if llm_enabled else f"{n_streams} streams @ {resolution}"),
-    delta_color="inverse" if llm_enabled else "off",
-    help=(
-        "Frame rate **each individual camera stream delivers** — what the "
-        "end user sees. Targets: **30 FPS** real-time, **15 FPS** "
-        "surveillance-grade."
-    ),
-)
-c2.metric(
-    label="Aggregate FPS",
-    value=f"{vision_fps_effective * n_streams:.0f}",
-    delta=f"{n_streams} streams total",
-    delta_color="off",
-    help=(
-        "Sum of frames/sec **across all cameras** — the NPU's total "
-        "throughput capacity. `per-camera FPS × n_streams`."
-    ),
-)
-c3.metric(
-    label="Memory fit",
-    value="✓ fits" if vision["fits_in_memory"] else "✗ spills",
-    delta=f"{vision['vram_mb']:.0f} MB / {hw.mem_capacity_gb*1024:.0f} MB",
-    delta_color="off",
-)
-if llm_enabled:
-    c4.metric(
+# Layout dispatches on what's enabled:
+#   vision on  + LLM on  → 4 vision metrics (with LLM tile in c4)
+#   vision on  + LLM off → 4 vision metrics (BW ratio in c4)
+#   vision off + LLM on  → 4 LLM-focused metrics (decode, TTFT, model, queries)
+if vision_enabled:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(
+        label="Per-camera FPS",
+        value=f"{vision_fps_effective:.1f}",
+        delta=(f"{vision_fps_effective - vision['fps_per_stream']:+.1f}  under LLM"
+                if llm_enabled else f"{n_streams} streams @ {resolution}"),
+        delta_color="inverse" if llm_enabled else "off",
+        help=(
+            "Frame rate **each individual camera stream delivers** — what the "
+            "end user sees. Targets: **30 FPS** real-time, **15 FPS** "
+            "surveillance-grade."
+        ),
+    )
+    c2.metric(
+        label="Aggregate FPS",
+        value=f"{vision_fps_effective * n_streams:.0f}",
+        delta=f"{n_streams} streams total",
+        delta_color="off",
+        help=(
+            "Sum of frames/sec **across all cameras** — the NPU's total "
+            "throughput capacity. `per-camera FPS × n_streams`."
+        ),
+    )
+    c3.metric(
+        label="Memory fit",
+        value="✓ fits" if vision["fits_in_memory"] else "✗ spills",
+        delta=f"{vision['vram_mb']:.0f} MB / {hw.mem_capacity_gb*1024:.0f} MB",
+        delta_color="off",
+    )
+    if llm_enabled:
+        c4.metric(
+            label=f"LLM decode ({quant})",
+            value=f"{llm['decode_tok_s']:.1f} tok/s",
+            delta=f"TTFT 1K = {llm['ttft_1k_sec']*1000:.0f} ms",
+        )
+    else:
+        c4.metric(
+            label="DDR bandwidth ratio vs NPU Mid",
+            value=f"{vision['bandwidth_ratio_vs_ref']:.2f}×",
+            delta="reference = NPU Mid",
+            delta_color="off",
+            help=(
+                "Ratio of the current hardware's **effective DRAM (LPDDR/GDDR) "
+                "bandwidth** to NPU Mid's. Vision pipelines at these model sizes "
+                "are bandwidth-bound, so edge FPS scales roughly linearly with "
+                "this ratio. Compute is NOT compared here — this is purely the "
+                "off-chip memory-bus ratio (bus width × data rate × efficiency)."
+            ),
+        )
+else:
+    # LLM-only headline row.
+    c1, c2, c3, c4 = st.columns(4)
+    _model = LLM_MODELS[llm_model_key]
+    _short_sec = llm["short_answer_sec"]
+    _rag_sec = llm["rag_total_sec"]
+    c1.metric(
         label=f"LLM decode ({quant})",
         value=f"{llm['decode_tok_s']:.1f} tok/s",
         delta=f"TTFT 1K = {llm['ttft_1k_sec']*1000:.0f} ms",
+        help=(
+            "Sustained generation rate on the selected workload. Bandwidth-"
+            "bound at 100.8 GB/s usable on NPU Mid → ~12 tok/s for 14B dense; "
+            "MoE 30B-A3B's 3B-active footprint is what unlocks higher rates."
+        ),
     )
-else:
+    c2.metric(
+        label="Time per answer",
+        value=(f"{_short_sec:.1f} s" if answer_kind == "short" else f"{_rag_sec:.1f} s"),
+        delta=("short (~200 tok)" if answer_kind == "short" else "RAG (8K + 2K)"),
+        delta_color="off",
+        help="Wall-clock time for one user-visible response — TTFT + decode.",
+    )
+    c3.metric(
+        label="NPU duty cycle",
+        value=f"{duty_cycle*100:.0f}%",
+        delta=f"{queries_per_min:.1f} q/min",
+        delta_color="inverse" if duty_cycle >= 0.8 else "off",
+        help=(
+            "Fraction of NPU time the LLM consumes. Above 80%: queue forms, "
+            "TTFT spikes for back-to-back queries. 100%: saturated."
+        ),
+    )
     c4.metric(
-        label="DDR bandwidth ratio vs NPU Mid",
-        value=f"{vision['bandwidth_ratio_vs_ref']:.2f}×",
-        delta="reference = NPU Mid",
+        label="Pass rate (Skippy v2 eval)",
+        value=f"{_model.pass_rate*100:.1f}%",
+        delta=f"{_model.pass_n_passes}/{_model.pass_n_total} prompts",
         delta_color="off",
         help=(
-            "Ratio of the current hardware's **effective DRAM (LPDDR/GDDR) "
-            "bandwidth** to NPU Mid's. Vision pipelines at these model sizes "
-            "are bandwidth-bound, so edge FPS scales roughly linearly with "
-            "this ratio. Compute is NOT compared here — this is purely the "
-            "off-chip memory-bus ratio (bus width × data rate × efficiency)."
+            f"Accuracy of the selected model ({_model.label}) on the v2 prompt "
+            f"set with RAG enabled. Sidebar's 'Accuracy details' expander has "
+            f"the full breakdown."
         ),
     )
 
 # Measured-silicon badge: when project_vision returned a real production
 # number (instead of a BW-scaled projection), flag it explicitly and
 # attribute the measurement to the specific silicon/toolchain source.
-if vision.get("edge_ms_source") == "measured":
+# Vision-only signal — skipped when vision is disabled.
+if vision_enabled and vision.get("edge_ms_source") == "measured":
     if "i.MX 95" in hw.name:
         _attribution = "NXP eIQ Neutron NPU, production measurement 2026-04"
     elif "5090" in hw.name:
@@ -689,7 +788,8 @@ if vision.get("edge_ms_source") == "measured":
 # tiers take different paths to tensor core" reads consistently — the
 # 5090-INT8 `tensor_compat` case is interesting because the rest are
 # `tensor_native` (the common cases aren't hidden; the contrast shows).
-if pipeline.precision and hw.capability_levels:
+# Driven by the vision pipeline's precision; only meaningful with vision on.
+if vision_enabled and pipeline.precision and hw.capability_levels:
     _level = hw.capability_level(pipeline.precision)
     st.caption(
         f"**{pipeline.precision.upper()} kernel path on {hw.name}:** "
@@ -697,7 +797,13 @@ if pipeline.precision and hw.capability_levels:
     )
 
 # ── Pipeline flow (collapsible, expanded by default) ──
-with st.expander("🔀 Pipeline flow", expanded=True):
+# Vision-pipeline-centric (the diagram shows YOLO → CLIP → ... stages with
+# the LLM stage layered in when enabled). Skip entirely when vision is off
+# — the LLM-only flow doesn't have an interesting per-stage breakdown to
+# render, and the diagram's Always-on/Pipeline-stage-changes legend assumes
+# a vision pipeline.
+if vision_enabled:
+  with st.expander("🔀 Pipeline flow", expanded=True):
     _render_pipeline_strip(
         _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
     )
@@ -753,29 +859,33 @@ with st.expander("📥 Export data", expanded=False):
             ),
             width="stretch",
         )
-    _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
-    with _kpi_btn_all_col:
-        if st.button(
-            "📊 KPI spreadsheet (all models)",
-            width="stretch",
-            key="kpi_btn_all",
-            help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
-                 "the current HW / resolution / LLM state, plus a button to "
-                 "download the formatted XLSX.",
-        ):
-            st.session_state.kpi_preview_mode = "all"
-    with _kpi_btn_one_col:
-        if st.button(
-            "📊 KPI spreadsheet (this model)",
-            width="stretch",
-            key="kpi_btn_this",
-            help="Reveal the KPI row for just the currently-selected pipeline "
-                 "(the one from the sidebar), plus a button to download the XLSX.",
-        ):
-            st.session_state.kpi_preview_mode = "this"
+    # KPI spreadsheet buttons are vision-pipeline-centric (per-pipeline rows
+    # of vision KPIs). Hidden when vision is off — there's no per-pipeline
+    # KPI to surface in an LLM-only sizing.
+    if vision_enabled:
+        _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
+        with _kpi_btn_all_col:
+            if st.button(
+                "📊 KPI spreadsheet (all models)",
+                width="stretch",
+                key="kpi_btn_all",
+                help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
+                     "the current HW / resolution / LLM state, plus a button to "
+                     "download the formatted XLSX.",
+            ):
+                st.session_state.kpi_preview_mode = "all"
+        with _kpi_btn_one_col:
+            if st.button(
+                "📊 KPI spreadsheet (this model)",
+                width="stretch",
+                key="kpi_btn_this",
+                help="Reveal the KPI row for just the currently-selected pipeline "
+                     "(the one from the sidebar), plus a button to download the XLSX.",
+            ):
+                st.session_state.kpi_preview_mode = "this"
 
 # ── KPI preview (renders below the expander when a button above is active) ──
-_kpi_mode = st.session_state.get("kpi_preview_mode")
+_kpi_mode = st.session_state.get("kpi_preview_mode") if vision_enabled else None
 if _kpi_mode in ("all", "this"):
     if _kpi_mode == "all":
         _kpi_rows = all_pipeline_kpi_rows(
@@ -841,176 +951,191 @@ if _kpi_mode in ("all", "this"):
 st.markdown("---")
 
 # ───────── Tabs: charts + detail tables ─────────
-tab_overview, tab_streams, tab_duty, tab_detail = st.tabs(
-    ["📊 Overview", "🎥 Stream scaling", "⚖ Duty-cycle", "🔎 Detail"]
-)
+# Tab list adapts to what's enabled — vision-only tabs (Stream scaling) and
+# vision×LLM tabs (Duty-cycle) only show when their inputs are meaningful.
+# Overview + Detail always render; their content is gated internally.
+_tab_specs: list[tuple[str, str]] = [("📊 Overview", "overview")]
+if vision_enabled:
+    _tab_specs.append(("🎥 Stream scaling", "streams"))
+if vision_enabled and llm_enabled:
+    _tab_specs.append(("⚖ Duty-cycle", "duty"))
+_tab_specs.append(("🔎 Detail", "detail"))
+_tabs = dict(zip(
+    [s[1] for s in _tab_specs],
+    st.tabs([s[0] for s in _tab_specs]),
+))
+tab_overview = _tabs["overview"]
+tab_streams = _tabs.get("streams")
+tab_duty = _tabs.get("duty")
+tab_detail = _tabs["detail"]
 
 with tab_overview:
-    st.markdown("### Vision")
-    left, right = st.columns([1, 1])
-
-    with left:
-        st.subheader("Pipeline timing (current config)")
-        fig = go.Figure()
-        if "yolo_ms" in vision and "clip_ms" in vision:
-            fig.add_trace(go.Bar(
-                x=["YOLO-seg (batched)", "CLIP component"],
-                y=[vision["yolo_ms"], vision["clip_ms"]],
-                marker=dict(color=["#6366F1", "#22C55E"]),
-                text=[f"{vision['yolo_ms']:.1f} ms", f"{vision['clip_ms']:.1f} ms"],
-                textposition="auto",
-            ))
-        else:
-            # Fallback — single-unit pipelines (SAM 3, ES-Small alone) still get a bar
-            fig.add_trace(go.Bar(
-                x=[f"{pipeline.label} (total)"],
-                y=[vision["per_stream_ms"]],
-                marker=dict(color=["#F59E0B"]),
-                text=[f"{vision['per_stream_ms']:.1f} ms"],
-                textposition="auto",
-            ))
-        fig.update_layout(
-            yaxis_title="Edge ms per batch cycle",
-            plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-            font=dict(color="#EAEDF4"),
-            height=300, margin=dict(l=40, r=20, t=20, b=40),
-        )
-        _apply_chart_theme(fig)
-        st.plotly_chart(fig, width="stretch")
-        st.caption(pipeline.note)
-        if pipeline.key in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
-                             "hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
-                             "yolo_only_fp8",
-                             "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
-                             "yolov8n_only_fp8",
-                             "yolo11s_trt_int8",
-                             "yolov8n_trt_int8_coco128"}:
-            st.caption(
-                "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
-                "fixed **640²** input and CLIP at **224²**. Source resolution "
-                "only affects FFmpeg decode + resize — a small fraction of the "
-                "inference budget. Measured in the Keyhole bake-off: 4K is "
-                "only **~21% slower** than 720p, not 9× slower."
-            )
-
-    with right:
-        st.subheader("Per-stream FPS vs NPU tier")
-        tier_rows = []
-        for name, t_hw in TIERS.items():
-            v = project_vision(pipeline, t_hw, resolution, n_streams=n_streams,
-                               compiler_quality_vs_trt=compiler_quality)
-            tier_rows.append(dict(tier=name, fps=v["fps_per_stream"]))
-        # Add current if custom
-        if hw.name not in TIERS:
-            tier_rows.append(dict(tier=hw.name, fps=vision["fps_per_stream"]))
-        df_tier = pd.DataFrame(tier_rows)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(
-            x=df_tier["tier"], y=df_tier["fps"],
-            marker=dict(color=["#EF4444", "#22C55E", "#6366F1", "#F59E0B"][:len(df_tier)]),
-            text=[f"{f:.1f}" for f in df_tier["fps"]],
-            textposition="auto",
-        ))
-        fig2.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
-                        annotation_text="30 FPS real-time", annotation_position="right")
-        fig2.add_hline(y=15, line_dash="dot", line_color="#93A1B5",
-                        annotation_text="15 FPS surveillance", annotation_position="right")
-        fig2.update_layout(
-            yaxis_title="FPS per stream", plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-            font=dict(color="#EAEDF4"),
-            height=300, margin=dict(l=40, r=60, t=20, b=40),
-        )
-        _apply_chart_theme(fig2)
-        st.plotly_chart(fig2, width="stretch")
-
-    # ───── DRAM bandwidth: saturation approximation vs ncu measurement ─────
-    st.markdown("---")
-    st.markdown("#### DRAM bandwidth — saturation model vs ncu measurement")
-
-    measured_bytes_per_frame = measured_dram_per_frame(pipeline.key)
-    effective_total_fps = vision["fps_per_stream"] * n_streams
-    approx_gbs = hw.effective_bandwidth_gbs   # CSV saturation approx at duty=1
-
-    bw_chart_col, bw_text_col = st.columns([1.3, 1])
-    with bw_chart_col:
-        if measured_bytes_per_frame is None:
-            st.info(
-                f"No ncu measurement mapped for **{pipeline.label}** yet. "
-                "The platform-budget CSV's `ss_ddr_gbs_avg_measured` column "
-                "is blank for this pipeline; only the saturation "
-                "approximation is available."
-            )
-        else:
-            measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
-            fig_bw = go.Figure()
-            fig_bw.add_trace(go.Bar(
-                x=["Saturation model<br>(CSV ss_ddr_gbs_avg)",
-                   "Measured (ncu)<br>ss_ddr_gbs_avg_measured"],
-                y=[approx_gbs, measured_gbs],
-                marker=dict(color=["#EF4444", "#22C55E"]),
-                text=[f"{approx_gbs:.1f} GB/s", f"{measured_gbs:.2f} GB/s"],
-                textposition="outside",
-                textfont=dict(size=14, color="#EAEDF4"),
-                cliponaxis=False,
-            ))
-            fig_bw.add_hline(
-                y=hw.effective_bandwidth_gbs,
-                line_dash="dot", line_color="#93A1B5",
-                annotation_text=f"{hw.name} ceiling ({hw.effective_bandwidth_gbs:.1f} GB/s)",
-                annotation_position="top right",
-            )
-            fig_bw.update_layout(
-                yaxis_title="DRAM GB/s consumed by vision pipeline",
+    if vision_enabled:
+        st.markdown("### Vision")
+        left, right = st.columns([1, 1])
+    
+        with left:
+            st.subheader("Pipeline timing (current config)")
+            fig = go.Figure()
+            if "yolo_ms" in vision and "clip_ms" in vision:
+                fig.add_trace(go.Bar(
+                    x=["YOLO-seg (batched)", "CLIP component"],
+                    y=[vision["yolo_ms"], vision["clip_ms"]],
+                    marker=dict(color=["#6366F1", "#22C55E"]),
+                    text=[f"{vision['yolo_ms']:.1f} ms", f"{vision['clip_ms']:.1f} ms"],
+                    textposition="auto",
+                ))
+            else:
+                # Fallback — single-unit pipelines (SAM 3, ES-Small alone) still get a bar
+                fig.add_trace(go.Bar(
+                    x=[f"{pipeline.label} (total)"],
+                    y=[vision["per_stream_ms"]],
+                    marker=dict(color=["#F59E0B"]),
+                    text=[f"{vision['per_stream_ms']:.1f} ms"],
+                    textposition="auto",
+                ))
+            fig.update_layout(
+                yaxis_title="Edge ms per batch cycle",
                 plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4", size=13),
-                height=340, margin=dict(l=50, r=40, t=30, b=60),
-                showlegend=False,
+                font=dict(color="#EAEDF4"),
+                height=300, margin=dict(l=40, r=20, t=20, b=40),
             )
-            _apply_chart_theme(fig_bw)
-            st.plotly_chart(fig_bw, width="stretch")
-
-    with bw_text_col:
-        if measured_bytes_per_frame is None:
-            st.caption(
-                "**Currently mapped pipelines:** trt_fp8_1hz_clip, "
-                "trt_fp8_every_frame, yolo_only_fp8, hybrid_v2_*, "
-                "yoloe26_*, efficientsam3_es_ev_s_bf16, essmall_fp8. "
-                "**Pending:** sam3_bf16, efficientsam3p1_es_ev_s_bf16 "
-                "(kernel-replay ncu sweeps queued)."
-            )
-        else:
-            measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
-            util_pct = (measured_gbs / approx_gbs * 100) if approx_gbs > 0 else 0
-            headroom_gbs = max(0.0, approx_gbs - measured_gbs)
-            st.markdown(
-                f"**Per-frame DRAM:** {measured_bytes_per_frame / 1e6:.1f} MB  \n"
-                f"**Pipeline FPS (all streams):** {effective_total_fps:.1f}  \n"
-                f"**Measured usage:** {measured_gbs:.2f} GB/s "
-                f"({util_pct:.1f}% of {hw.name} ceiling)  \n"
-                f"**Spare bandwidth:** {headroom_gbs:.1f} GB/s"
-            )
-            comps = measured_components(pipeline.key) or []
-            if len(comps) > 1:
-                parts = " + ".join(
-                    f"`{c['ncu_workload_id']}` × {c['fires_per_frame']:.3g} "
-                    f"({c['dram_bytes_per_fire']/1e6:.1f} MB/fire)"
-                    for c in comps
+            _apply_chart_theme(fig)
+            st.plotly_chart(fig, width="stretch")
+            st.caption(pipeline.note)
+            if pipeline.key in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
+                                 "hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
+                                 "yolo_only_fp8",
+                                 "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
+                                 "yolov8n_only_fp8",
+                                 "yolo11s_trt_int8",
+                                 "yolov8n_trt_int8_coco128"}:
+                st.caption(
+                    "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
+                    "fixed **640²** input and CLIP at **224²**. Source resolution "
+                    "only affects FFmpeg decode + resize — a small fraction of the "
+                    "inference budget. Measured in the Keyhole bake-off: 4K is "
+                    "only **~21% slower** than 720p, not 9× slower."
                 )
-                st.caption(f"Composition: {parts}")
-            st.caption(
-                "The **saturation model** pessimistically assumes the workload "
-                "pins the bus at the NPU's effective bandwidth. The **measured** "
-                "value comes from ncu-counted DRAM bytes per forward × pipeline "
-                "FPS. The gap is real headroom for concurrent work — parallel "
-                "LLM, extra streams, other workloads."
+    
+        with right:
+            st.subheader("Per-stream FPS vs NPU tier")
+            tier_rows = []
+            for name, t_hw in TIERS.items():
+                v = project_vision(pipeline, t_hw, resolution, n_streams=n_streams,
+                                   compiler_quality_vs_trt=compiler_quality)
+                tier_rows.append(dict(tier=name, fps=v["fps_per_stream"]))
+            # Add current if custom
+            if hw.name not in TIERS:
+                tier_rows.append(dict(tier=hw.name, fps=vision["fps_per_stream"]))
+            df_tier = pd.DataFrame(tier_rows)
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(
+                x=df_tier["tier"], y=df_tier["fps"],
+                marker=dict(color=["#EF4444", "#22C55E", "#6366F1", "#F59E0B"][:len(df_tier)]),
+                text=[f"{f:.1f}" for f in df_tier["fps"]],
+                textposition="auto",
+            ))
+            fig2.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
+                            annotation_text="30 FPS real-time", annotation_position="right")
+            fig2.add_hline(y=15, line_dash="dot", line_color="#93A1B5",
+                            annotation_text="15 FPS surveillance", annotation_position="right")
+            fig2.update_layout(
+                yaxis_title="FPS per stream", plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+                font=dict(color="#EAEDF4"),
+                height=300, margin=dict(l=40, r=60, t=20, b=40),
             )
-            meta = bundle_metadata()
-            st.caption(
-                f"ncu bundle: `{meta['ncu_bundle_timestamp']}` · "
-                f"{meta['ncu_n_workloads']} workloads · host "
-                f"*{meta['ncu_measurement_host']}*"
-            )
-
+            _apply_chart_theme(fig2)
+            st.plotly_chart(fig2, width="stretch")
+    
+        # ───── DRAM bandwidth: saturation approximation vs ncu measurement ─────
+        st.markdown("---")
+        st.markdown("#### DRAM bandwidth — saturation model vs ncu measurement")
+    
+        measured_bytes_per_frame = measured_dram_per_frame(pipeline.key)
+        effective_total_fps = vision["fps_per_stream"] * n_streams
+        approx_gbs = hw.effective_bandwidth_gbs   # CSV saturation approx at duty=1
+    
+        bw_chart_col, bw_text_col = st.columns([1.3, 1])
+        with bw_chart_col:
+            if measured_bytes_per_frame is None:
+                st.info(
+                    f"No ncu measurement mapped for **{pipeline.label}** yet. "
+                    "The platform-budget CSV's `ss_ddr_gbs_avg_measured` column "
+                    "is blank for this pipeline; only the saturation "
+                    "approximation is available."
+                )
+            else:
+                measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
+                fig_bw = go.Figure()
+                fig_bw.add_trace(go.Bar(
+                    x=["Saturation model<br>(CSV ss_ddr_gbs_avg)",
+                       "Measured (ncu)<br>ss_ddr_gbs_avg_measured"],
+                    y=[approx_gbs, measured_gbs],
+                    marker=dict(color=["#EF4444", "#22C55E"]),
+                    text=[f"{approx_gbs:.1f} GB/s", f"{measured_gbs:.2f} GB/s"],
+                    textposition="outside",
+                    textfont=dict(size=14, color="#EAEDF4"),
+                    cliponaxis=False,
+                ))
+                fig_bw.add_hline(
+                    y=hw.effective_bandwidth_gbs,
+                    line_dash="dot", line_color="#93A1B5",
+                    annotation_text=f"{hw.name} ceiling ({hw.effective_bandwidth_gbs:.1f} GB/s)",
+                    annotation_position="top right",
+                )
+                fig_bw.update_layout(
+                    yaxis_title="DRAM GB/s consumed by vision pipeline",
+                    plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
+                    font=dict(color="#EAEDF4", size=13),
+                    height=340, margin=dict(l=50, r=40, t=30, b=60),
+                    showlegend=False,
+                )
+                _apply_chart_theme(fig_bw)
+                st.plotly_chart(fig_bw, width="stretch")
+    
+        with bw_text_col:
+            if measured_bytes_per_frame is None:
+                st.caption(
+                    "**Currently mapped pipelines:** trt_fp8_1hz_clip, "
+                    "trt_fp8_every_frame, yolo_only_fp8, hybrid_v2_*, "
+                    "yoloe26_*, efficientsam3_es_ev_s_bf16, essmall_fp8. "
+                    "**Pending:** sam3_bf16, efficientsam3p1_es_ev_s_bf16 "
+                    "(kernel-replay ncu sweeps queued)."
+                )
+            else:
+                measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
+                util_pct = (measured_gbs / approx_gbs * 100) if approx_gbs > 0 else 0
+                headroom_gbs = max(0.0, approx_gbs - measured_gbs)
+                st.markdown(
+                    f"**Per-frame DRAM:** {measured_bytes_per_frame / 1e6:.1f} MB  \n"
+                    f"**Pipeline FPS (all streams):** {effective_total_fps:.1f}  \n"
+                    f"**Measured usage:** {measured_gbs:.2f} GB/s "
+                    f"({util_pct:.1f}% of {hw.name} ceiling)  \n"
+                    f"**Spare bandwidth:** {headroom_gbs:.1f} GB/s"
+                )
+                comps = measured_components(pipeline.key) or []
+                if len(comps) > 1:
+                    parts = " + ".join(
+                        f"`{c['ncu_workload_id']}` × {c['fires_per_frame']:.3g} "
+                        f"({c['dram_bytes_per_fire']/1e6:.1f} MB/fire)"
+                        for c in comps
+                    )
+                    st.caption(f"Composition: {parts}")
+                st.caption(
+                    "The **saturation model** pessimistically assumes the workload "
+                    "pins the bus at the NPU's effective bandwidth. The **measured** "
+                    "value comes from ncu-counted DRAM bytes per forward × pipeline "
+                    "FPS. The gap is real headroom for concurrent work — parallel "
+                    "LLM, extra streams, other workloads."
+                )
+                meta = bundle_metadata()
+                st.caption(
+                    f"ncu bundle: `{meta['ncu_bundle_timestamp']}` · "
+                    f"{meta['ncu_n_workloads']} workloads · host "
+                    f"*{meta['ncu_measurement_host']}*"
+                )
+    
     # ───── LLM timing row (only when LLM is enabled) ─────
     if llm_enabled:
         st.markdown("---")
@@ -1180,7 +1305,8 @@ with tab_overview:
             f"should budget for the RAG / tool-use tail, not the plain-chat peak."
         )
 
-with tab_streams:
+if tab_streams is not None:
+  with tab_streams:
     st.subheader(f"Per-stream FPS vs concurrent stream count — {pipeline.label}")
     rows = []
     for N in [1, 2, 4, 8, 16]:
@@ -1234,11 +1360,14 @@ with tab_streams:
         st.caption("YOLO batching amortizes kernel overhead — 4 streams at batch=4 "
                     "typically get ~70% of the single-stream FPS, not 25%.")
 
-with tab_duty:
+if tab_duty is not None:
+  with tab_duty:
     st.subheader("Vision FPS under concurrent LLM load")
+    # tab_duty only exists when both vision and LLM are on, so the
+    # "enable LLM" hint below is unreachable now — kept as defensive copy.
     if not llm_enabled:
-        st.info("Enable 'Share the NPU with a generative LLM' in the sidebar to see "
-                "the duty-cycle trade-off.")
+        st.info("Enable the generative LLM in the sidebar to see the "
+                "duty-cycle trade-off.")
     else:
         qpm = np.linspace(0, 120, 200)
         qps = qpm / 60
@@ -1291,8 +1420,11 @@ with tab_detail:
     left, right = st.columns([1, 1])
     with left:
         st.subheader("Vision projection")
-        st.json({k: v for k, v in vision.items()
-                  if not isinstance(v, (dict, list))})
+        if vision_enabled:
+            st.json({k: v for k, v in vision.items()
+                      if not isinstance(v, (dict, list))})
+        else:
+            st.info("Vision pipeline disabled — toggle in sidebar to project.")
     with right:
         st.subheader("LLM projection")
         if llm_enabled:
@@ -1303,8 +1435,12 @@ with tab_detail:
 
     st.markdown("---")
     st.subheader("NCU measurement provenance")
-    comps = measured_components(pipeline.key)
-    if comps is None:
+    # Pipeline-keyed; only meaningful when vision is selected.
+    comps = measured_components(pipeline.key) if vision_enabled else None
+    if not vision_enabled:
+        st.info("Vision pipeline disabled — ncu measurement provenance is "
+                "vision-pipeline-keyed and not displayed in LLM-only mode.")
+    elif comps is None:
         st.info(
             f"No ncu measurement mapped for `{pipeline.key}`. "
             "The saturation approximation is the only figure available "
