@@ -27,6 +27,7 @@ from sizer.measured import (
 from sizer.kpi_breakdown import (
     pipeline_kpi_row, all_pipeline_kpi_rows, kpi_rows_to_xlsx,
 )
+from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -597,15 +598,34 @@ else:
     )
 
 # Measured-silicon badge: when project_vision returned a real production
-# number (instead of a BW-scaled projection), flag it explicitly. Ground-
-# truth data currently sourced from NXP i.MX 95 eIQ Neutron, 2026-04.
+# number (instead of a BW-scaled projection), flag it explicitly and
+# attribute the measurement to the specific silicon/toolchain source.
 if vision.get("edge_ms_source") == "measured":
+    if "i.MX 95" in hw.name:
+        _attribution = "NXP eIQ Neutron NPU, production measurement 2026-04"
+    elif "5090" in hw.name:
+        _attribution = "RTX 5090 Blackwell, TensorRT 10.16 bake-off 2026-04"
+    else:
+        _attribution = "production silicon"
     st.success(
         f"✅ **Measured silicon** — Per-camera FPS = 1000 / "
         f"**{vision['per_stream_ms']:.1f} ms**, measured on **{hw.name}** "
-        f"(NXP eIQ Neutron NPU, 2026-04). This is a real production number, "
-        f"not a projection — the compiler-quality slider and BW-ratio "
-        f"scaling do not apply to this tier+pipeline+resolution triple."
+        f"({_attribution}). This is a real measurement, not a projection — "
+        f"the compiler-quality slider and BW-ratio scaling do not apply "
+        f"to this tier+pipeline+resolution triple."
+    )
+
+# Capability-level caption: surfaces the kernel path the silicon takes
+# to execute this pipeline's dtype. Shown on every tier+pipeline combo
+# where both sides declare their metadata, so the narrative "different
+# tiers take different paths to tensor core" reads consistently — the
+# 5090-INT8 `tensor_compat` case is interesting because the rest are
+# `tensor_native` (the common cases aren't hidden; the contrast shows).
+if pipeline.precision and hw.capability_levels:
+    _level = hw.capability_level(pipeline.precision)
+    st.caption(
+        f"**{pipeline.precision.upper()} kernel path on {hw.name}:** "
+        f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
     )
 
 # ── Pipeline flow (collapsible, expanded by default) ──
