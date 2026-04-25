@@ -31,6 +31,10 @@ from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
 from sizer.llm_models import (
     LLM_MODELS, DEFAULT_LLM_MODEL_KEY, CATEGORY_LABELS, accuracy_delta_pp,
 )
+from sizer.llm_quant_levels import (
+    LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
+    QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
+)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -513,6 +517,85 @@ with st.sidebar:
                 "perf trade. The fine-tune costs nothing extra at inference time; "
                 "it just buys domain retrieval headroom that a stock reasoning "
                 "model doesn't have."
+            )
+
+        # ── Precision-axis quality reference ──────────────────────────
+        # Parallel to the model-axis "Accuracy details" expander above —
+        # this one captures the cost of the quantization recipe on the
+        # base model (fp16 → FP8 → W8A8 INT8). Composes with the 5090
+        # capability caption: when hw is on tensor_compat (consumer
+        # Blackwell SM120), the W8A8 row is annotated as ecosystem-blocked.
+        with st.expander("📉 Precision quality reference"):
+            _w8a8_blocked_on_tier = (
+                hw.capability_levels is not None
+                and hw.capability_level("int8") == "tensor_compat"
+            )
+            st.markdown(
+                f"**Quality cost of the quantization recipe** on Qwen2.5-14B base "
+                f"+ RAG, measured on the v2 prompt set (44 prompts × 3 samples = 132). "
+                f"fp16 reference: **{FP16_REFERENCE.pass_rate*100:.1f}%** "
+                f"({FP16_REFERENCE.pass_n_passes}/{FP16_REFERENCE.pass_n_total})."
+            )
+
+            ladder_rows: list[dict] = []
+            for cfg in LLM_QUANT_LADDER:
+                _delta = delta_pp_vs_fp16(cfg)
+                _delta_str = (
+                    "—" if cfg.key == FP16_REFERENCE.key
+                    else f"{_delta:+.1f}pp"
+                )
+                _label = cfg.label
+                if cfg.key == QWEN_W8A8_RAG.key and _w8a8_blocked_on_tier:
+                    _label = f"⚠ {_label} — n/a on {hw.name}"
+                ladder_rows.append({
+                    "Configuration":   _label,
+                    "Pass rate":       f"{cfg.pass_rate*100:.1f}%",
+                    "Δ vs fp16 base":  _delta_str,
+                    "n":               f"{cfg.pass_n_passes}/{cfg.pass_n_total}",
+                    "Host":            cfg.measurement_host,
+                })
+            st.dataframe(pd.DataFrame(ladder_rows), width="stretch", hide_index=True)
+
+            if _w8a8_blocked_on_tier:
+                st.warning(
+                    "**W8A8 INT8 is ecosystem-blocked on this tier.** Consumer "
+                    "Blackwell SM120 throws `RuntimeError: Int8 not supported on "
+                    "SM120. Use FP8 quantization instead, or run on older arch "
+                    "(SM < 100).` from `torch.ops._C.cutlass_scaled_mm`. The W8A8 "
+                    "pass-rate row above is a measured number from H100 — kept "
+                    "for the deck story, not achievable on this silicon today. "
+                    "The capability caption near the metric row carries the full "
+                    "kernel-library narrative."
+                )
+
+            st.markdown(
+                "**Where the W8A8 -3.8pp regression lives** (vs fp16 base, RAG on, "
+                "v2 reproducer 2026-04-24):"
+            )
+            for cat, delta_passes in W8A8_VS_FP16_CATEGORY_DELTAS.items():
+                cat_label = CATEGORY_LABELS.get(cat, cat)
+                if delta_passes == 0:
+                    st.markdown(f"- {cat_label}: **±0** (no measurable drift)")
+                else:
+                    sign = "+" if delta_passes > 0 else ""
+                    st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
+            st.caption(
+                "Coding + reasoning are byte-identical between fp16 and W8A8 "
+                "(Jaccard 1.0, exact-match 1.0) — structured-output tasks are "
+                "untouched by INT8. The regression localizes in retrieval-grounded "
+                "wording, not capability. **DO NOT** cite a 'refusal-specific' "
+                "regression — earlier H100 run had refusals -2 but the 2026-04-24 "
+                "reproducer had refusals ±0; that localization didn't hold."
+            )
+
+            st.markdown(
+                "---\n"
+                "**Headline framing for the deck:** W8A8 INT8 costs ~3.8pp vs fp16 "
+                "base. Going base → fine-tune adds ~5pp. So a fine-tuned W8A8 "
+                "would plausibly land near the fp16 base — W8A8 preserves enough "
+                "headroom that **lifecycle cost (the retargeting panel) dominates "
+                "the choice**, not the ~4pp quality hit. Fine-tune-vs-stock and "
+                "precision-recipe are independent axes — surfaced separately above."
             )
 
         quant = st.selectbox("Qwen3 quantization",
