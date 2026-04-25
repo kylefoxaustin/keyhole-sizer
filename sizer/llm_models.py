@@ -1,22 +1,42 @@
 """LLM model catalog for the sizer.
 
-Two selectable models for the LLM workload comparison surface:
-- Skippy's domain fine-tune (default, shipping in production)
+Three selectable models for the LLM workload comparison surface:
+- Skippy MoE domain fine-tune (default, current production)
+- Skippy dense domain fine-tune (prior production, near-parity)
 - Qwen3-30B-A3B-Thinking-2507 (stock public reasoning baseline)
 
-Both are Q4_K_M GGUF MoE 30B/3B-active, so decode-tok/s projections
-on the Hardware tiers are identical across models — bandwidth-bound
-physics doesn't care which weights are in the file. **Accuracy is the
-only thing that differs.** The comparison answers a specific question
-Kyle's silicon-architecture audience asks: "would a stock public
-reasoning model just replace the domain fine-tune?" — answer: not on
-your domain.
+Two of these are Q4_K_M GGUF MoE 30B/3B-active (Skippy MoE FT,
+Thinking stock) — same decode-tok/s ceiling on every Hardware tier
+since BW-bound physics doesn't care which weights are in the file.
+The third (Skippy dense FT, Qwen2.5-14B) has a DIFFERENT architecture:
+14B dense traverses the full weight set per token, so it's roughly
+3-4× slower than MoE 3B-active at the same BW. The sizer's perf path
+is currently hardcoded to MoE numbers (`measured_llm_q4_decode_tok_s`
+on Hardware tiers was anchored to Qwen3-30B-A3B), so when the dense
+fine-tune is selected, the headline tok/s shown in the metric tile is
+optimistic. The model expander surfaces this caveat in-line; future
+work could split `Hardware.measured_llm_*` by model architecture.
+
+The two stories the catalog answers:
+1. Model-architecture trade: "would a stock public reasoning model
+   just replace the domain fine-tune?" → not on your domain.
+2. Cost trade: "would the older dense fine-tune work just as well?" →
+   yes on quality (Δ +0.7pp), no on cost (4-5× more weights to read
+   per token).
+
+## Convention: category_deltas
+
+All `category_deltas` are **vs the production reference**
+(`PRODUCTION_REFERENCE_KEY` = Skippy MoE FT). Sign convention:
+positive = this model wins vs production. The production reference
+itself has an empty `category_deltas` dict (it can't differ from
+itself). UI surfaces these as "Per-category Δ vs Skippy MoE
+fine-tune (production)" in the accuracy expander.
 
 Accuracy from Skippy v2 prompt set: 44 prompts × 3 samples = 132,
-RAG enabled (8 chunks via hybrid retrieval), measured by [backend]
-session 2026-04-24, results in
-`eval/results/acc_diff_skippy_fine_tune_vs_thinking.md` on the
-personal-ai-framework side.
+RAG enabled (8 chunks via hybrid retrieval). Diffs:
+- `eval/results/acc_diff_skippy_fine_tune_vs_thinking.md`
+- `eval/results/acc_diff_dense_q4km_vs_moe_q4km_v2_rag.md`
 """
 from __future__ import annotations
 
@@ -61,18 +81,51 @@ SKIPPY_MOE_FINETUNE = LLMModel(
     description=(
         "Kyle's domain fine-tune of Qwen3-30B-A3B — the model shipping in "
         "Skippy production. LoRA-adapted on internal corpora (NXP datasheets, "
-        "meeting transcripts, source code). Default selection."
+        "meeting transcripts, source code). Default selection and the "
+        "**production reference** for per-category Δ comparisons across the "
+        "catalog."
     ),
     deck_bullet=(
-        "Domain fine-tuning buys +5.3pp on Kyle's RAG eval — not by making "
-        "the model 'smarter' in general, but by teaching it the retrieval "
-        "vocabulary of the domain."
+        "Domain fine-tuning buys +5.3pp on Kyle's RAG eval vs stock public "
+        "reasoning models — not by making the model 'smarter' in general, "
+        "but by teaching it the retrieval vocabulary of the domain."
     ),
+    # Production reference: vs itself = no Δs. Other entries' deltas
+    # are computed against this row.
+    category_deltas={},
+)
+
+
+SKIPPY_DENSE_FINETUNE = LLMModel(
+    key="skippy_dense_finetune",
+    label="Skippy dense fine-tune (Qwen2.5-14B)",
+    family="Dense — 14B params (no expert sparsity)",
+    base="Qwen2.5-14B (Alibaba)",
+    total_params_b=14.0,
+    active_params_b=14.0,
+    quant="Q4_K_M GGUF",
+    size_gb=9.2,
+    fine_tune="domain LoRA — same NXP/Skippy corpus as the MoE entry",
+    pass_rate=0.682,
+    pass_n_passes=90,
+    pass_n_total=132,
+    description=(
+        "Kyle's prior-production dense fine-tune. Same LoRA recipe as the "
+        "MoE entry, applied to the dense Qwen2.5-14B base. Maintained for "
+        "the dense-vs-MoE quality comparison — kept in catalog because the "
+        "answer to 'is MoE actually better?' isn't 'on quality' (it's a "
+        "wash), it's 'on cost-per-token.'"
+    ),
+    deck_bullet=(
+        "Dense and MoE fine-tunes hit near-parity on quality (Δ +0.7pp) — "
+        "MoE wins on per-token cost (3B active << 14B dense), NOT accuracy. "
+        "Choosing MoE is a cost decision, not a capability one."
+    ),
+    # Δ vs Skippy MoE FT (production reference). MoE wins rag_datasheet
+    # +3 → dense -3 here; MoE loses refusal -2 → dense +2 here.
     category_deltas={
-        "rag_datasheet": +8,    # 26 prompts; fine-tune lands the domain vocabulary
-        "rag_email":     +3,    # 1 prompt × 3 samples; stock failed all three
-        "numerical_precision": -3,  # general reasoning Thinking trains for harder
-        "refusal":       -2,    # scope-limiting tuned harder in Thinking
+        "rag_datasheet": -3,
+        "refusal":       +2,
     },
 )
 
@@ -110,11 +163,20 @@ THINKING_MOE_STOCK = LLMModel(
 
 
 LLM_MODELS: dict[str, LLMModel] = {
-    SKIPPY_MOE_FINETUNE.key: SKIPPY_MOE_FINETUNE,
-    THINKING_MOE_STOCK.key:  THINKING_MOE_STOCK,
+    # Order matters — drives selectbox display order. Convention:
+    # production first (default), then prior-production (cost-different
+    # but quality-parity), then external baselines.
+    SKIPPY_MOE_FINETUNE.key:   SKIPPY_MOE_FINETUNE,
+    SKIPPY_DENSE_FINETUNE.key: SKIPPY_DENSE_FINETUNE,
+    THINKING_MOE_STOCK.key:    THINKING_MOE_STOCK,
 }
 
 DEFAULT_LLM_MODEL_KEY = SKIPPY_MOE_FINETUNE.key
+
+# Reference for all per-category-Δ rendering. UI labels comparisons as
+# "vs Skippy MoE fine-tune (production)" and the production model
+# itself shows no per-category breakdown (it would be 0 across the board).
+PRODUCTION_REFERENCE_KEY = SKIPPY_MOE_FINETUNE.key
 
 
 def accuracy_delta_pp(a: LLMModel, b: LLMModel) -> float:

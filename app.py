@@ -30,6 +30,7 @@ from sizer.kpi_breakdown import (
 from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
 from sizer.llm_models import (
     LLM_MODELS, DEFAULT_LLM_MODEL_KEY, CATEGORY_LABELS, accuracy_delta_pp,
+    PRODUCTION_REFERENCE_KEY,
 )
 from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
@@ -472,14 +473,36 @@ with st.sidebar:
             key="llm_model_key",
         )
         _model = LLM_MODELS[llm_model_key]
-        _other_model = next(m for k, m in LLM_MODELS.items() if k != llm_model_key)
-        _delta = accuracy_delta_pp(_model, _other_model)
-        _delta_sign = "+" if _delta >= 0 else ""
-        st.caption(
-            f"**{_model.pass_rate*100:.1f}%** pass rate "
-            f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
-            f" · {_delta_sign}{_delta:.1f}pp vs {_other_model.label.split(' (')[0]}"
-        )
+        _production_model = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
+        _delta_vs_prod = accuracy_delta_pp(_model, _production_model)
+        _is_production = (llm_model_key == PRODUCTION_REFERENCE_KEY)
+        _delta_sign = "+" if _delta_vs_prod >= 0 else ""
+        if _is_production:
+            st.caption(
+                f"**{_model.pass_rate*100:.1f}%** pass rate "
+                f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
+                f" · production reference"
+            )
+        else:
+            st.caption(
+                f"**{_model.pass_rate*100:.1f}%** pass rate "
+                f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
+                f" · {_delta_sign}{_delta_vs_prod:.1f}pp vs production "
+                f"({_production_model.label.split(' (')[0]})"
+            )
+        # Dense FT perf caveat — sizer's measured_llm_q4_decode_tok_s on the
+        # Hardware tiers is anchored to MoE 30B/3B-active. Dense 14B reads
+        # ~4.7× more weights per token, so the headline tile's tok/s is
+        # optimistic by the same factor when the dense entry is selected.
+        if _model.active_params_b > 4.0:  # rough threshold catching dense models
+            st.caption(
+                f"⚠️ **Headline decode tok/s tile is optimistic for this model.** "
+                f"The sizer's tier projections are anchored to MoE 3B-active; "
+                f"dense {_model.total_params_b:.0f}B reads ~"
+                f"{_model.active_params_b/3:.1f}× more weights per token, so the "
+                f"actual decode rate would be ~{1/(_model.active_params_b/3):.0%} "
+                f"of what's shown. Quality numbers above are accurate."
+            )
         with st.expander("📊 Accuracy details"):
             st.markdown(
                 f"**{_model.label}**  \n"
@@ -490,33 +513,65 @@ with st.sidebar:
                 f"{_model.active_params_b:.0f}B  \n"
                 f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
                 f"**Specialization:** {_model.fine_tune}  \n  \n"
-                f"**Pass rate:** {_model.pass_rate*100:.1f}% "
-                f"({_model.pass_n_passes}/{_model.pass_n_total}) — "
-                f"{_delta_sign}{_delta:.1f}pp vs **{_other_model.label}** "
-                f"({_other_model.pass_rate*100:.1f}%)  \n  \n"
                 f"🔸 *{_model.deck_bullet}*"
             )
+            # Three-row catalog comparison table — all selectable models
+            # side by side, current selection highlighted with an arrow.
+            st.markdown("---")
+            st.markdown("**Catalog comparison** (all three selectable models):")
+            _catalog_rows: list[dict] = []
+            for _k, _m in LLM_MODELS.items():
+                _row_delta = accuracy_delta_pp(_m, _production_model)
+                _row_delta_str = (
+                    "—  (reference)" if _k == PRODUCTION_REFERENCE_KEY
+                    else f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
+                )
+                _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
+                _catalog_rows.append({
+                    "Model":         _row_label,
+                    "Pass rate":     f"{_m.pass_rate*100:.1f}%",
+                    "Δ vs production": _row_delta_str,
+                    "n":             f"{_m.pass_n_passes}/{_m.pass_n_total}",
+                    "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
+                })
+            st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
+
+            # Per-category Δ shown only for non-production entries (the
+            # production reference compares to itself = no Δ data).
             if _model.category_deltas:
-                st.markdown("**Per-category Δ vs the other model** (positive = this model wins):")
+                st.markdown(
+                    f"**Per-category Δ vs production** "
+                    f"({_production_model.label.split(' (')[0]}, "
+                    f"positive = this model wins):"
+                )
                 for cat, delta_passes in _model.category_deltas.items():
                     sign = "+" if delta_passes >= 0 else ""
                     cat_label = CATEGORY_LABELS.get(cat, cat)
                     st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
                 st.caption(
                     "Δ measured vs Skippy v2 prompt set (132 samples), "
-                    "RAG on (8 chunks via hybrid retrieval). Eval by "
-                    "[backend] session 2026-04-24. Categories not listed "
-                    "are flat ±0 between the two models."
+                    "RAG on (8 chunks via hybrid retrieval). Categories "
+                    "not listed are flat ±0 between this model and production."
                 )
+            elif _is_production:
+                st.caption(
+                    "This is the production reference — per-category Δ is "
+                    "zero against itself. Switch the selector above to see "
+                    "category breakdowns for the alternative entries."
+                )
+
             st.markdown(
                 "---\n"
                 "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
                 "same decode-tok/s ceiling on every NPU tier regardless of which "
                 "model's weights are in the file — bandwidth-bound physics doesn't "
-                "care. So model choice is a **quality-vs-quality** trade, not a "
-                "perf trade. The fine-tune costs nothing extra at inference time; "
-                "it just buys domain retrieval headroom that a stock reasoning "
-                "model doesn't have."
+                "care. **For the MoE entries** (Skippy MoE FT and Thinking stock), "
+                "model choice is a pure quality-vs-quality trade — no perf cost. "
+                "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
+                "math differs: dense traverses the full weight set per token, so "
+                "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
+                "alternatives. The accuracy parity (Δ +0.7pp) makes MoE the obvious "
+                "production choice — same quality, much cheaper per token."
             )
 
         # ── Precision-axis quality reference ──────────────────────────
