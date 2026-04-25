@@ -560,6 +560,95 @@ PIPELINES = {
         note="~100 FPS @ 720p edge, recall 0.912 (-9% vs FP16). Representative of credible vendor INT8 numbers — use this for apples-to-apples against NPU silicon benchmarks that disclose their calibration dataset.",
         gops_per_forward=12.0, precision="int8",
     ),
+    # ─────────── ViT alternatives (Kyle 2026-04-25 what-if) ──────────────
+    # Could vision transformers replace YOLO-seg + SAM 3? Two roles, four
+    # candidates. Edge ms = 5090 PyTorch FP16 × 16.19 BW ratio (Grounding
+    # DINO ran fp32 — its text-vision cross-attention couldn't be cleanly
+    # half-cast). Naive BW projection OVER-estimates edge cost on these
+    # models because they're compute-bound on 5090, not BW-bound — true
+    # edge perf lands between this and the DRAM-bound ceiling (sizer's
+    # measured-DRAM panel shows the gap). Recall vs YOLO11x ref boxes:
+    # rtdetr 0.947, detr 0.936, owlv2 0.926, grounding_dino 0.782.
+    "rtdetr_l_pytorch_fp16": VisionPipeline(
+        key="rtdetr_l_pytorch_fp16",
+        label="RT-DETR-L FP16 (camera, ViT what-if)",
+        description=(
+            "Ultralytics RT-DETR-L (33M params, ViT encoder + transformer "
+            "decoder). COCO-pretrained; 0.947 box recall vs YOLO11x reference. "
+            "Tested as a possible camera-stream replacement for YOLO-seg."
+        ),
+        edge_ms_720p=239.9, edge_ms_1080p=246.2, edge_ms_4k=271.0,
+        vram_mb=239,
+        note=(
+            "10× heavier per forward than yolo11s-seg FP8 TRT (2.05 GB DRAM "
+            "vs 0.22 GB). Naive BW projection 4 FPS @ NPU Mid; BW-bound "
+            "ceiling 46 FPS. Real edge sits in the 5-30 FPS band depending "
+            "on NPU compute. Either way: not a viable shipping replacement "
+            "for the YOLO-seg FP8 TRT camera stack."
+        ),
+        gops_per_forward=108.0, precision="fp16",
+    ),
+    "detr_resnet50_pytorch_fp16": VisionPipeline(
+        key="detr_resnet50_pytorch_fp16",
+        label="DETR ResNet-50 FP16 (camera, ViT what-if)",
+        description=(
+            "Facebook DETR ResNet-50 (42M params, original ViT-style detector "
+            "— CNN backbone + transformer encoder/decoder). COCO-pretrained; "
+            "0.936 box recall vs YOLO11x reference."
+        ),
+        edge_ms_720p=176.8, edge_ms_1080p=193.5, edge_ms_4k=177.6,
+        vram_mb=258,
+        note=(
+            "13× heavier per forward than yolo11s-seg FP8 TRT (2.74 GB DRAM "
+            "vs 0.22 GB). Naive BW projection 6 FPS @ NPU Mid; BW-ceiling "
+            "34 FPS. Same conclusion as RT-DETR-L: not viable for "
+            "shipping camera replacement."
+        ),
+        gops_per_forward=86.0, precision="fp16",
+    ),
+    "owlv2_base_pytorch_fp16": VisionPipeline(
+        key="owlv2_base_pytorch_fp16",
+        label="OWLv2-base FP16 (agentic, SAM 3 successor candidate)",
+        description=(
+            "Google OWLv2-base-patch16-ensemble (155M params, open-vocab "
+            "detection from text queries). 0.926 box recall vs YOLO11x ref "
+            "(open-vocab fires on 748 candidate boxes/frame, finding many "
+            "concepts YOLO doesn't track — feature, not bug, for agentic). "
+            "Real candidate to replace SAM 3 for the on-demand text-prompt "
+            "role."
+        ),
+        edge_ms_720p=239.9, edge_ms_1080p=245.4, edge_ms_4k=241.5,
+        vram_mb=447,
+        note=(
+            "**42× lighter per forward than SAM 3** (2.82 GB vs 119 GB DRAM), "
+            "**6× faster end-to-end**. 1.8× faster than EfficientSAM3 lite "
+            "(community SAM 3 successor) at 1/3 the VRAM. Same on-demand "
+            "duty-cycle math that lets shipping CLIP run at 1Hz applies "
+            "cleanly: 240 ms × ~1 query/min = 0.4% NPU duty. The real "
+            "SAM 3 lineage upgrade."
+        ),
+        gops_per_forward=150.0, precision="fp16",
+    ),
+    "grounding_dino_tiny_pytorch_fp32": VisionPipeline(
+        key="grounding_dino_tiny_pytorch_fp32",
+        label="Grounding DINO Tiny FP32 (agentic, ViT what-if)",
+        description=(
+            "IDEA-Research Grounding DINO Tiny (172M params, Swin-Tiny "
+            "backbone + DINO transformer + BERT text encoder). FP32-only "
+            "(text-vision cross-attention couldn't be cleanly half-cast). "
+            "Box recall vs YOLO11x ref: 0.782."
+        ),
+        edge_ms_720p=1131.2, edge_ms_1080p=1130.0, edge_ms_4k=1130.8,
+        vram_mb=2070,
+        note=(
+            "Between EfficientSAM3 (8.9 GB DRAM/forward) and SAM 3 (119 GB) "
+            "on the BW axis at 38.5 GB — too heavy for edge. "
+            "BW-ceiling 2.4 FPS @ NPU Mid (this one IS BW-bound, no "
+            "compute-bound rescue). 4.6× OWLv2's VRAM. Skip vs OWLv2 for "
+            "the agentic-prompt role."
+        ),
+        gops_per_forward=150.0, precision="fp32",
+    ),
 }
 
 

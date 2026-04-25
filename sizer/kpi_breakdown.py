@@ -162,6 +162,31 @@ PIPELINE_STAGES: dict[str, dict[str, Any]] = {
         "yolo_type":  "Yolov8n-seg INT8 TRT (coco128-seg PTQ)",
         "seg_type":   None,
     },
+
+    # ─── ViT alternatives (Kyle 2026-04-25 what-if) ───────────────────
+    # Camera-stream candidates: single-model object detectors. Treated
+    # as "one_model" (full pipeline time = single forward). Agentic
+    # candidates: text-prompted detection, also one_model in shape.
+    "rtdetr_l_pytorch_fp16": {
+        "category":   "one_model",
+        "yolo_type":  "RT-DETR-L FP16 (ViT)",
+        "seg_type":   None,
+    },
+    "detr_resnet50_pytorch_fp16": {
+        "category":   "one_model",
+        "yolo_type":  "DETR ResNet-50 FP16 (ViT)",
+        "seg_type":   None,
+    },
+    "owlv2_base_pytorch_fp16": {
+        "category":   "one_model",
+        "yolo_type":  "OWLv2-base FP16 (open-vocab ViT)",
+        "seg_type":   None,
+    },
+    "grounding_dino_tiny_pytorch_fp32": {
+        "category":   "one_model",
+        "yolo_type":  "Grounding DINO Tiny FP32 (text-grounded ViT)",
+        "seg_type":   None,
+    },
 }
 
 

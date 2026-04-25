@@ -69,6 +69,13 @@ PIPELINE_TO_NCU: dict[str, list[tuple[str, float]]] = {
         ("efficientsam3p1_es_ev_s__set_image",   1.0),
         ("efficientsam3p1_es_ev_s__text_prompt", 1.0),
     ],
+    # ViT alternatives (Kyle 2026-04-25 what-if). 720p-only ncu sweep —
+    # one DRAM-per-forward sample per variant, mirrors efficientsam3p1's
+    # 720p-only scope-decision pattern.
+    "rtdetr_l_pytorch_fp16":            [("rtdetr_l__720p", 1.0)],
+    "detr_resnet50_pytorch_fp16":       [("detr__720p", 1.0)],
+    "owlv2_base_pytorch_fp16":          [("owlv2__720p", 1.0)],
+    "grounding_dino_tiny_pytorch_fp32": [("grounding_dino__720p", 1.0)],
 }
 
 

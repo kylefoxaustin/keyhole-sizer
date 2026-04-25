@@ -351,6 +351,10 @@ with st.sidebar:
         ("INT8 vendor-comparison",
          ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128"],
          "yolov8n_trt_int8_coco128"),
+        ("ViT alternatives (what-if)",
+         ["rtdetr_l_pytorch_fp16", "detr_resnet50_pytorch_fp16",
+          "owlv2_base_pytorch_fp16", "grounding_dino_tiny_pytorch_fp32"],
+         "owlv2_base_pytorch_fp16"),
     ]
     _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
     _DEFAULT_TRACK_INDEX = 2  # "Default (Hybrid V2 → TRT)"
