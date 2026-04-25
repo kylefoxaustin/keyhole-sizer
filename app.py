@@ -313,6 +313,16 @@ with st.sidebar:
              "NPU without a camera input). Defaults ON for backward compat.",
         key="vision_enabled",
     )
+    if not vision_enabled:
+        # Set defaults so downstream code that incidentally references these
+        # variables (CSV file_name, KPI helpers, capability caption) doesn't
+        # NameError. Display gating uses `vision_enabled` directly.
+        pipeline_key = "yolo_only_fp8"
+        pipeline = PIPELINES[pipeline_key]
+        resolution = "1080p"
+        n_streams = 1
+        compiler_quality = 1.0
+
     # Pipeline-track invariant runs unconditionally — same loud-fail-on-
     # orphan check whether vision is currently enabled or not. Catches
     # PIPELINES/PIPELINE_TRACKS drift the moment app boots, not the moment
