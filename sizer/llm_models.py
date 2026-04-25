@@ -60,9 +60,33 @@ class LLMModel:
     pass_n_total: int
     description: str
     deck_bullet: str          # the one-line framing for the deck/UI
-    # Per-category Δ vs the OTHER model (sign convention: positive = THIS wins).
-    # Keyed by Skippy v2 prompt category. Categories not present = flat.
+    # Per-category Δ vs the production reference (sign convention:
+    # positive = THIS wins). Keyed by Skippy v2 prompt category.
+    # Categories not present = flat. Production reference's own dict
+    # is empty (it can't differ from itself).
     category_deltas: dict[str, int]
+
+    @property
+    def decode_bw_per_token_gb(self) -> float:
+        """Approximate DRAM bytes read per decode token, in GB.
+
+        First-order projection used to scale Hardware tier perf
+        anchors across model architectures:
+        - MoE: size_gb × (active/total) — only the routed experts
+          are read per token, so BW scales with active params.
+        - Dense: size_gb — every weight is read every token.
+
+        Ignores shared layers (embedding lookup, attention QKV
+        projections common across experts) and KV-cache traffic
+        (small at our 1K-prompt anchor). Refining either of those
+        would tighten the projection but doesn't change the order
+        of magnitude for the dense-vs-MoE comparison the sizer
+        cares about.
+        """
+        if self.total_params_b <= 0:
+            return self.size_gb
+        active_fraction = self.active_params_b / self.total_params_b
+        return self.size_gb * active_fraction
 
 
 SKIPPY_MOE_FINETUNE = LLMModel(
@@ -182,6 +206,57 @@ PRODUCTION_REFERENCE_KEY = SKIPPY_MOE_FINETUNE.key
 def accuracy_delta_pp(a: LLMModel, b: LLMModel) -> float:
     """Return (a.pass_rate - b.pass_rate) in percentage points."""
     return (a.pass_rate - b.pass_rate) * 100.0
+
+
+# Reference for the perf-axis scaling. Hardware tiers' measured_llm_*
+# values were anchored to this model's architecture (Qwen3-30B-A3B
+# Q4_K_M, MoE 3B-active). Other models scale relative to it.
+PERF_REFERENCE_MODEL_KEY = SKIPPY_MOE_FINETUNE.key
+
+
+def perf_scale_factor(model: LLMModel) -> float:
+    """Multiplicative factor to scale tier-anchored decode tok/s for `model`.
+
+    factor = 1.0 for the perf-reference model itself (and any model with
+    the same architecture, e.g. Thinking-stock = same Qwen3-30B-A3B base).
+    factor < 1.0 means this model is slower (more BW per token). For
+    dense 14B vs MoE 3B-active reference: factor ≈ 0.20.
+    """
+    reference = LLM_MODELS[PERF_REFERENCE_MODEL_KEY]
+    return reference.decode_bw_per_token_gb / model.decode_bw_per_token_gb
+
+
+def scale_llm_projection(
+    llm_proj: dict,
+    model: LLMModel,
+    hw_mem_capacity_gb: float | None = None,
+) -> dict:
+    """Apply per-model BW scaling to a `project_llm()` result dict.
+
+    Returns a new dict — the input is not mutated. tok/s scales by
+    `perf_scale_factor(model)`; per-token / per-answer time fields
+    scale by 1/factor (slower model = longer time-per-X). Also
+    overrides `gguf_size_gb` to the selected model's actual file
+    size and recomputes `fits_in_memory` if `hw_mem_capacity_gb`
+    is supplied (the reference model's size baked into project_llm
+    won't be accurate for the dense entry).
+    """
+    scaled = dict(llm_proj)
+    scaled["gguf_size_gb"] = model.size_gb
+    if hw_mem_capacity_gb is not None:
+        scaled["fits_in_memory"] = model.size_gb <= hw_mem_capacity_gb
+
+    factor = perf_scale_factor(model)
+    if factor == 1.0:
+        return scaled
+
+    if "decode_tok_s" in scaled:
+        scaled["decode_tok_s"] = scaled["decode_tok_s"] * factor
+    for time_key in ("ttft_1k_sec", "short_answer_sec",
+                     "rag_total_sec", "rag_prefill_sec", "rag_decode_sec"):
+        if time_key in scaled:
+            scaled[time_key] = scaled[time_key] / factor
+    return scaled
 
 
 # Human-readable category labels for the per-category breakdown UI.

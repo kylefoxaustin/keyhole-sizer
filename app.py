@@ -30,7 +30,7 @@ from sizer.kpi_breakdown import (
 from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
 from sizer.llm_models import (
     LLM_MODELS, DEFAULT_LLM_MODEL_KEY, CATEGORY_LABELS, accuracy_delta_pp,
-    PRODUCTION_REFERENCE_KEY,
+    PRODUCTION_REFERENCE_KEY, scale_llm_projection, perf_scale_factor,
 )
 from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
@@ -490,18 +490,22 @@ with st.sidebar:
                 f" · {_delta_sign}{_delta_vs_prod:.1f}pp vs production "
                 f"({_production_model.label.split(' (')[0]})"
             )
-        # Dense FT perf caveat — sizer's measured_llm_q4_decode_tok_s on the
-        # Hardware tiers is anchored to MoE 30B/3B-active. Dense 14B reads
-        # ~4.7× more weights per token, so the headline tile's tok/s is
-        # optimistic by the same factor when the dense entry is selected.
-        if _model.active_params_b > 4.0:  # rough threshold catching dense models
+        # Per-model BW-scaling note. Only fires when scaling actually
+        # changes numbers (perf_scale_factor != 1.0 — i.e. dense entry,
+        # since MoE entries share the perf-reference architecture).
+        # Headline tiles are NOW accurate for the selected model — same
+        # first-order BW-bound math the rest of the sizer uses.
+        _scale = perf_scale_factor(_model)
+        if _scale != 1.0:
+            _ref = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
             st.caption(
-                f"⚠️ **Headline decode tok/s tile is optimistic for this model.** "
-                f"The sizer's tier projections are anchored to MoE 3B-active; "
-                f"dense {_model.total_params_b:.0f}B reads ~"
-                f"{_model.active_params_b/3:.1f}× more weights per token, so the "
-                f"actual decode rate would be ~{1/(_model.active_params_b/3):.0%} "
-                f"of what's shown. Quality numbers above are accurate."
+                f"ℹ️ Headline tok/s and TTFT scaled to this model's "
+                f"BW-per-token: ~**{_model.decode_bw_per_token_gb:.1f} GB** "
+                f"read per decode token (vs **{_ref.decode_bw_per_token_gb:.1f} "
+                f"GB** for the MoE entries — {_model.total_params_b:.0f}B dense "
+                f"reads the full weight set every token, while MoE only reads "
+                f"the routed experts). Tier projections shown above reflect "
+                f"this {1/_scale:.1f}× higher per-token BW load."
             )
         with st.expander("📊 Accuracy details"):
             st.markdown(
@@ -725,6 +729,14 @@ vision = (project_vision(pipeline, hw, resolution, n_streams=n_streams,
                           compiler_quality_vs_trt=compiler_quality)
           if vision_enabled else None)
 llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
+# Apply per-model BW-scaling: project_llm() is anchored to the perf
+# reference model (Qwen3-30B-A3B MoE 3B-active). For models with
+# different architectures (e.g. dense 14B), tok/s and TTFT scale by
+# their decode_bw_per_token_gb relative to the reference. Same first-
+# order BW-bound math the rest of the sizer uses.
+if llm_enabled and llm is not None:
+    llm = scale_llm_projection(llm, LLM_MODELS[llm_model_key],
+                                hw_mem_capacity_gb=hw.mem_capacity_gb)
 
 # ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
 # Dynamic "Simulating" line reflecting the current selection.
@@ -1353,6 +1365,11 @@ with tab_overview:
             tier_llm = []
             for name, t_hw in TIERS.items():
                 l = project_llm(t_hw, quant, workload=llm_workload)
+                # Same per-model BW scaling as the headline metric:
+                # otherwise the per-tier chart shows MoE numbers when
+                # the user has selected the dense model.
+                l = scale_llm_projection(l, LLM_MODELS[llm_model_key],
+                                          hw_mem_capacity_gb=t_hw.mem_capacity_gb)
                 tier_llm.append(dict(tier=name, tok_s=l["decode_tok_s"]))
             if hw.name not in TIERS:
                 tier_llm.append(dict(tier=hw.name, tok_s=llm["decode_tok_s"]))
@@ -1387,6 +1404,13 @@ with tab_overview:
         st.markdown("#### LLM performance across real-workload mixes")
         st.caption("Hover each bar for the category's description, sample size, and measurement caveat.")
         dist = workload_distribution_on_hw(hw, quant)
+        # Apply the same per-model BW scaling to each workload's decode
+        # tok/s so the chart matches the headline metric when the user
+        # has the dense model selected.
+        _model_for_scale = LLM_MODELS[llm_model_key]
+        _llm_factor = perf_scale_factor(_model_for_scale)
+        if _llm_factor != 1.0:
+            dist = [{**d, "decode_tok_s": d["decode_tok_s"] * _llm_factor} for d in dist]
         labels = [d["label"] + f"  (n={d['n']})" for d in dist]
         values = [d["decode_tok_s"] for d in dist]
         colors = ["#6366F1" if d["key"] == llm_workload else "#374151" for d in dist]
