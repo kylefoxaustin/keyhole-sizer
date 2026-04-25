@@ -277,6 +277,18 @@ RTX_5090_REFERENCE = Hardware(
         "trt_fp8_every_frame":         {"720p": 6.33, "1080p": 10.03, "4K": 32.19},
         "yolov8n_trt_fp8_1hz_clip":    {"720p": 0.68, "1080p": 0.80, "4K": 1.56},
         "yolov8n_trt_fp8_every_frame": {"720p": 6.14, "1080p": 9.83, "4K": 31.96},
+        # ViT-alternatives bake-off (Kyle 2026-04-25 what-if). p50 ms from
+        # bakeoff_vit_alternatives.py on 5090, PyTorch FP16 except
+        # grounding_dino which ran fp32 (text-vision cross-attention
+        # couldn't be cleanly half-cast). 2 warmup + 10 timed frames per
+        # variant per resolution. Same `measured_edge_ms` override path
+        # the i.MX 95 ground-truth tier uses — picks the actual measurement
+        # over BW projection, fires the green "Measured silicon" banner,
+        # and bypasses the compiler-quality slider.
+        "rtdetr_l_pytorch_fp16":            {"720p": 14.82, "1080p": 15.21, "4K": 16.74},
+        "detr_resnet50_pytorch_fp16":       {"720p": 10.92, "1080p": 11.95, "4K": 10.97},
+        "owlv2_base_pytorch_fp16":          {"720p": 14.82, "1080p": 15.16, "4K": 14.92},
+        "grounding_dino_tiny_pytorch_fp32": {"720p": 69.87, "1080p": 69.80, "4K": 69.85},
     },
 )
 
