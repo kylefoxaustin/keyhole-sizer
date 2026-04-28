@@ -306,6 +306,44 @@ with st.sidebar:
     else:
         hw = TIERS[tier]
 
+        # ── Memory-type upgrade sub-selector for Mid + High ──────────────
+        # [backend] 2026-04-28: lets users preview LPDDR6 @ 12/14 GT/s on
+        # Mid and High without burning a top-level tier slot. Keeps the
+        # tier × precision × memory matrix tight. Other tiers (Neutron-
+        # class, LP5X, 5090) don't get the option — they're characterized
+        # by their specific memory generation, and 5090 is reference.
+        if tier in ("NPU Mid", "NPU High"):
+            from sizer.npu_model import LPDDR6_UPGRADE_OPTIONS, hw_with_memory
+            stock_label = f"{hw.mem_type} @ {hw.mem_data_rate_gtps:.1f} GT/s (stock)"
+            mem_options = [(stock_label, hw.mem_type, hw.mem_data_rate_gtps)] + \
+                           LPDDR6_UPGRADE_OPTIONS
+            mem_choice = st.selectbox(
+                "Memory upgrade",
+                options=[opt[0] for opt in mem_options],
+                index=0,
+                help=(
+                    "Preview an LPDDR6 swap on this tier. Holds 70% "
+                    "bandwidth efficiency uniformly (slightly conservative "
+                    "— LPDDR6 typically realizes 75-80% in practice per "
+                    "JEDEC). All other tier specs (TOPS, capacity, TDP) "
+                    "stay unchanged — this is a memory-only swap."
+                ),
+                key=f"mem_upgrade_{tier}",
+            )
+            chosen = next(opt for opt in mem_options if opt[0] == mem_choice)
+            if chosen[0] != stock_label:
+                # Memory swap requested — clone the tier with new memory.
+                # name_suffix surfaces in describe_hw() + Simulating line.
+                _suffix = f"{chosen[1]}-{chosen[2]:.0f}"
+                hw = hw_with_memory(hw, chosen[1], chosen[2], name_suffix=_suffix)
+                st.caption(
+                    f"⚡ Memory upgrade: **{chosen[1]} @ {chosen[2]:.0f} GT/s** → "
+                    f"**{hw.mem_bandwidth_gbs:.1f} GB/s** peak / "
+                    f"**{hw.effective_bandwidth_gbs:.1f} GB/s** effective "
+                    f"({hw.mem_bandwidth_gbs / TIERS[tier].mem_bandwidth_gbs:.2f}× "
+                    f"vs stock)"
+                )
+
     st.caption(describe_hw(hw))
 
     st.markdown("---")

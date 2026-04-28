@@ -9,7 +9,7 @@ Keyhole deck (see `scripts/bakeoff_*.py` in the parent project and
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .precision import CapabilityLevel
 
@@ -315,7 +315,46 @@ TIERS = {t.name: t for t in (NPU_LOW_LP5_32BIT, NPU_IMX95_MEASURED,
                               NPU_LOW_LP5_64BIT, NPU_LOW_LP5X,
                               NPU_MID, NPU_HIGH, RTX_5090_REFERENCE)}
 
-MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "GDDR6", "GDDR6X", "GDDR7", "HBM3")
+MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "LPDDR6",
+                "GDDR6", "GDDR6X", "GDDR7", "HBM3")
+
+
+# Memory upgrade options offered as a sub-selector on NPU Mid + NPU High
+# (per [backend] 2026-04-28). LPDDR6 @ 12 GT/s and 14 GT/s preview the
+# bandwidth headroom each tier would gain on a memory-only swap. Holds
+# the existing 70% bandwidth_efficiency uniformly across LPDDR5/LPDDR5X/
+# LPDDR6 — slightly conservative for LPDDR6 (improved subchannel
+# architecture typically realizes 75-80% in practice per JEDEC), but
+# keeps the comparison clean.
+#
+# Schema: list of (label, mem_type, mem_data_rate_gtps). Order in this
+# dict matches the order in the sidebar selectbox.
+LPDDR6_UPGRADE_OPTIONS: list[tuple[str, str, float]] = [
+    ("LPDDR6 @ 12 GT/s",  "LPDDR6", 12.0),
+    ("LPDDR6 @ 14 GT/s",  "LPDDR6", 14.0),
+]
+
+
+def hw_with_memory(hw: Hardware, mem_type: str, mem_data_rate_gtps: float,
+                    name_suffix: str | None = None) -> Hardware:
+    """Return a Hardware copy with the memory swapped (data-rate + type),
+    bandwidth recomputed from bus width × data rate / 8, and an annotated
+    name so downstream UI surfaces the variant.
+
+    Other fields (capacity, TOPS, efficiencies, tdp, capability_levels,
+    measured_edge_ms, measured_llm_*) carry through unchanged. Use this
+    for "what if we swap the memory on tier X" previews — backed by the
+    same 70% bandwidth_efficiency the rest of the model uses.
+    """
+    new_bw = hw.mem_bus_width_bits * mem_data_rate_gtps / 8
+    new_name = hw.name if name_suffix is None else f"{hw.name} ({name_suffix})"
+    return replace(
+        hw,
+        name=new_name,
+        mem_type=mem_type,
+        mem_data_rate_gtps=mem_data_rate_gtps,
+        mem_bandwidth_gbs=new_bw,
+    )
 
 
 def theoretical_bandwidth(bus_width_bits: int, data_rate_gtps: float) -> float:
