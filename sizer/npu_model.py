@@ -64,6 +64,31 @@ class Hardware:
     # FP8→FP16 without QDQ) are NOT captured here — that's per-engine.
     capability_levels: dict[str, CapabilityLevel] | None = None
 
+    # Phase 2 compute-clamp calibration (per [backend] 2026-04-29 design
+    # doc). Used by project_vision()'s two-floor model:
+    #     edge_ms = max(bw_floor, compute_floor) + compute_overhead_ms
+    # where compute_floor = tc_ops_blackwell / (effective_tops × compute_util_factor).
+    # The util_factor calibration absorbs the Blackwell-HMMA → NPU-effective
+    # conversion at the i.MX 95 anchor (12 GOPs / 2 INT8 TOPS / 0.19 = 31.6
+    # ms ≈ measured 32 ms). Constants per tier-class:
+    #   Neutron-class (i.MX 95, Low-LP5-*): 0.19
+    #   Mid:                                0.45
+    #   High:                               0.50
+    #   5090 reference:                     0.85
+    # Default 1.0 means "compute clamp disabled" — preserves prior Phase 1
+    # behavior on tiers that haven't been calibrated yet.
+    compute_util_factor: float = 1.0
+    compute_overhead_ms: float = 1.0
+
+    # Tier family — groups Hardware by silicon platform so the projection-
+    # source badge can distinguish "same-class projection from a measured
+    # anchor in this family" (🟡) from "cross-class extrapolation with no
+    # anchor in this family" (🔴). Memory-upgrade variants of a base tier
+    # inherit the family (Mid + LPDDR6-14 stays in 'mid_high' since it's
+    # the same compute platform with a memory swap). Per [backend] 12:42
+    # spec; populated explicitly per tier.
+    tier_family: str = "unknown"
+
     @property
     def effective_bandwidth_gbs(self) -> float:
         return self.mem_bandwidth_gbs * self.bandwidth_efficiency
@@ -156,6 +181,7 @@ RTX_5090 = Hardware(
     compute_efficiency=0.70, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
+    compute_util_factor=0.85, tier_family="rtx_5090",
 )
 
 # Edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
@@ -184,6 +210,7 @@ NPU_LOW_LP5_64BIT = Hardware(
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
+    compute_util_factor=0.19, tier_family="neutron",
 )
 
 # LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
@@ -198,6 +225,7 @@ NPU_LOW_LP5X = Hardware(
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
+    compute_util_factor=0.19, tier_family="low_lp5x",
 )
 
 NPU_MID = Hardware(
@@ -210,6 +238,7 @@ NPU_MID = Hardware(
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.351,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
+    compute_util_factor=0.45, tier_family="mid_high",
 )
 
 NPU_HIGH = Hardware(
@@ -232,6 +261,7 @@ NPU_HIGH = Hardware(
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.1755,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
+    compute_util_factor=0.50, tier_family="mid_high",
 )
 
 # Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
@@ -259,6 +289,7 @@ RTX_5090_REFERENCE = Hardware(
     compute_efficiency=0.70, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
+    compute_util_factor=0.85, tier_family="rtx_5090",
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
         # Add more entries here as backend pulls them from data/output/
@@ -304,6 +335,7 @@ NPU_IMX95_MEASURED = Hardware(
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
+    compute_util_factor=0.19, tier_family="neutron",
     measured_edge_ms={
         "yolov8n_trt_int8_coco128": {"1080p": 32.0},
     },
