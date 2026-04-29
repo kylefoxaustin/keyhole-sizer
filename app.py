@@ -816,7 +816,24 @@ vision = (project_vision(pipeline, hw, resolution, n_streams=n_streams,
                           compiler_quality_vs_trt=compiler_quality,
                           npu_share=npu_share)
           if vision_enabled else None)
-llm = project_llm(hw, quant, workload=llm_workload, npu_share=npu_share) if llm_enabled else None
+# dtype-mismatch gate — per [backend] 15:46 + [pai-sizer] e69237b parity.
+# Check whether the selected model's compute_dtype is supported by the
+# silicon BEFORE running the projection. If unsupported (e.g. Skippy
+# dense FT fp16 on Mid INT8-only silicon post-548bc41), short-circuit
+# project_llm with a sentinel `dtype_mismatch` result so the UI can
+# render a 🔴 banner instead of silently projecting an fp16 number for
+# silicon that physically can't run fp16. Mirrors PAI's resolution-order
+# convention from e69237b.
+_llm_dtype_supported = True
+if llm_enabled:
+    _model = LLM_MODELS[llm_model_key]
+    _required_dtype = getattr(_model, "compute_dtype", "int8")
+    _capability = hw.capability_level(_required_dtype)
+    if _capability == "unsupported":
+        _llm_dtype_supported = False
+
+llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share)
+       if (llm_enabled and _llm_dtype_supported) else None)
 # Apply per-model BW-scaling: project_llm() is anchored to the perf
 # reference model (Qwen3-30B-A3B MoE 3B-active). For models with
 # different architectures (e.g. dense 14B), tok/s and TTFT scale by
@@ -825,6 +842,24 @@ llm = project_llm(hw, quant, workload=llm_workload, npu_share=npu_share) if llm_
 if llm_enabled and llm is not None:
     llm = scale_llm_projection(llm, LLM_MODELS[llm_model_key],
                                 hw_mem_capacity_gb=hw.mem_capacity_gb)
+
+# Render the 🔴 dtype-mismatch banner upfront when the selected model's
+# compute_dtype isn't supported by the silicon. After the banner, mute
+# llm_enabled for downstream rendering — same effect as if the user
+# toggled LLM off. The banner explains why the LLM tile is missing.
+if llm_enabled and not _llm_dtype_supported:
+    _model_label = _model.label.split(" (")[0]
+    st.error(
+        f"🔴 **dtype mismatch — {_model_label} cannot run on {hw.name}**\n\n"
+        f"This model's compute path requires **{_required_dtype.upper()}** "
+        f"tensor support, but {hw.name}'s silicon is **{', '.join(k.upper() for k, v in (hw.capability_levels or {}).items() if v != 'unsupported') or 'INT8-only'}**. "
+        f"Selecting this combination silently projects fp16 numbers on "
+        f"hardware that physically can't execute fp16 weights — disabled "
+        f"to avoid misleading the audience. To compare apples-to-apples: "
+        f"either pick a different tier (NPU High / 5090 retain FP support), "
+        f"or pick an INT8-native model (Skippy MoE Q4 / Thinking-2507)."
+    )
+    llm_enabled = False  # downstream rendering safely skips LLM blocks
 
 # ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
 # Dynamic "Simulating" line reflecting the current selection.

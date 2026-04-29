@@ -66,6 +66,18 @@ class LLMModel:
     # is empty (it can't differ from itself).
     category_deltas: dict[str, int]
 
+    # Compute dtype the model executes on dedicated NPU silicon. Q4_K_M
+    # weight-only MoE models run as INT8 dequant + INT8 matmul on
+    # purpose-built INT8 NPUs (Skippy MoE Q4 / Thinking-2507). Dense Q4
+    # models like Qwen 2.5 14B Q4 use llama-cpp's fp16 internal path —
+    # weights are dequantized to fp16 for the matmul, requiring native
+    # FP16 tensor support. Per [pai-sizer] e69237b + [backend] 15:46
+    # parity ask. Used by app.py to gate dtype-mismatch projections
+    # against `Hardware.capability_levels` and surface a 🔴
+    # 'dtype_mismatch' banner instead of silently projecting fp16
+    # numbers on INT8-only silicon.
+    compute_dtype: str = "int8"
+
     @property
     def decode_bw_per_token_gb(self) -> float:
         """Approximate DRAM bytes read per decode token, in GB.
@@ -117,6 +129,10 @@ SKIPPY_MOE_FINETUNE = LLMModel(
     # Production reference: vs itself = no Δs. Other entries' deltas
     # are computed against this row.
     category_deltas={},
+    # MoE Q4 weight-only on dedicated INT8 NPU runs as INT8 dequant +
+    # INT8 matmul (the Mid silicon's native path). Validates against
+    # Mid's INT8-only capability_levels post 548bc41.
+    compute_dtype="int8",
 )
 
 
@@ -151,6 +167,12 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
         "rag_datasheet": -3,
         "refusal":       +2,
     },
+    # Dense Qwen 2.5 14B Q4 uses llama-cpp's fp16 internal path —
+    # weights dequantized to fp16 for the matmul, requires native FP16
+    # tensor support. Per [pai-sizer] e69237b: "Dense 14B Q4 stays fp16."
+    # Selecting this model on Mid (INT8-only post 548bc41) triggers
+    # 🔴 dtype_mismatch in the app.py UI gate.
+    compute_dtype="fp16",
 )
 
 
@@ -183,6 +205,9 @@ THINKING_MOE_STOCK = LLMModel(
         "numerical_precision": +3,
         "refusal":       +2,
     },
+    # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — runs the
+    # same INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
+    compute_dtype="int8",
 )
 
 
