@@ -89,6 +89,21 @@ class Hardware:
     # spec; populated explicitly per tier.
     tier_family: str = "unknown"
 
+    # LLM Phase 2 calibration constants (separate from vision's
+    # compute_util_factor per [backend] 2026-04-29 13:17 + 13:31; reuse
+    # of vision's constants for LLM was a latent bug PAI sizer hit at
+    # 33b0dfc — fixed in 0a5e94a). LLM prefill realizes ~0.10 of peak
+    # TOPS on Mid (calibrated from Skippy MoE Q4 1K-prompt anchor: 351
+    # ms TTFT = 6.5 GFLOPs/tok × 1024 / (200 BF16 TOPS × 0.10) ≈ 333 ms,
+    # within 5% of measured). Vision's util_factor 0.45 would under-
+    # predict LLM TTFT by ~4.5×. Decode realization defaults to 1.0
+    # (pure BW ceiling) — the Mid + MoE 0.66 realization is captured in
+    # the anchor's 37.85 tok/s itself; applying 0.66 globally would
+    # silently extrapolate MoE-class realization to dense-14B (model-
+    # class extrapolation, strict 🔴 territory).
+    llm_prefill_util_factor: float = 0.10
+    llm_decode_bw_realization: float = 1.0
+
     @property
     def effective_bandwidth_gbs(self) -> float:
         return self.mem_bandwidth_gbs * self.bandwidth_efficiency
@@ -239,6 +254,7 @@ NPU_MID = Hardware(
     measured_llm_ttft_1k_sec=0.351,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
     compute_util_factor=0.45, tier_family="LP5X-8.4-128b",
+    llm_prefill_util_factor=0.10,  # calibrated against the Mid TTFT 351 ms anchor
 )
 
 NPU_HIGH = Hardware(
@@ -262,6 +278,7 @@ NPU_HIGH = Hardware(
     measured_llm_ttft_1k_sec=0.1755,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
     compute_util_factor=0.50, tier_family="LP5X-8.4-128b",
+    llm_prefill_util_factor=0.11,  # Mid's 0.10 × 1.11 compute-efficiency bump per same-class derivation
 )
 
 # Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
@@ -1261,22 +1278,54 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         base_decode = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
         base_ttft = hw.measured_llm_ttft_1k_sec
     else:
-        # No anchor in this hw's tier_family — projection is a cross-class
-        # extrapolation from NPU_MID's BW-ceiling × efficiency assumption
-        # (decode) plus a TOPS-ratio TTFT scale. Marked 🔴 to reflect that
-        # the slope assumption breaks at class boundaries (per Kyle's
-        # 2026-04-29 framing). Fallback math unchanged — full two-floor
-        # Phase 2 rewrite (decode_bw_floor + prefill_compute_floor) is a
-        # follow-up commit pending Mid TTFT calibration reconciliation
-        # (preliminary math: compute_floor 74 ms vs measured 351 ms
-        # suggests LLM-side util_factor differs from vision's; need
-        # backend's confirmed calibration before shipping the math
-        # change).
+        # No anchor in this hw's tier_family — Phase 2 cross-class two-floor
+        # projection per [backend] 2026-04-29 13:17 calibration + 13:31
+        # confirmation. Replaces the prior "BW × 0.60 efficiency + TOPS-
+        # ratio TTFT" heuristic with first-principles physics:
+        #
+        #   decode_floor_ms_per_tok = active_params_GB / (eff_BW × decode_realization)
+        #   prefill_compute_ms      = (prompt_tokens × gops_per_token) / (peak_tops × prefill_util)
+        #   prefill_bw_ms           = active_params_GB / eff_BW   (weights load once)
+        #   ttft_ms                 = max(prefill_bw, prefill_compute) + overhead
+        #
+        # Calibration constants per [backend] 13:17 + matches PAI sizer's
+        # 0a5e94a:
+        #   llm_prefill_util_factor: 0.10 default (Mid anchor calibrated;
+        #     vision's 0.45 would under-predict by ~4.5×)
+        #   llm_decode_bw_realization: 1.0 default (pure BW ceiling — Mid
+        #     + MoE 0.66 realization is captured in the anchor itself, not
+        #     extrapolated to other models)
+        #
+        # Anchor for first-principles math: gops_per_token ≈ 2 × active_params_billions
+        # (matmul-bound forward, GPT-style transformer FLOP estimate).
+        # Qwen3-30B-A3B = 2 × 3 = 6 GFLOPs/tok ≈ backend's 6.5 with attention.
+        # ACTIVE_PARAMS is raw param count (3e9), so divide by 1e9 to get
+        # billions, then × 2 for the matmul FLOP factor → 6 GFLOPs/token.
+        # Unit balance: GFLOPs / (TFLOPs × util) → ms directly.
         llm_source = "cross_class"
-        efficiency = 0.60
-        base_decode = decode_ceiling * efficiency
-        compute_ratio = hw.effective_tops_bf16 / NPU_MID.effective_tops_bf16
-        base_ttft = NPU_MID.measured_llm_ttft_1k_sec / max(compute_ratio, 0.01)
+        active_params_gb = active_bytes / 1e9     # GB streamed per decode token
+        gops_per_token = 2 * (ACTIVE_PARAMS / 1e9)  # = 6 GFLOPs/tok for MoE 3B-active
+
+        # Decode: BW-floor with realization factor (default 1.0 = pure
+        # ceiling, anchor-driven elsewhere).
+        decode_bw_floor_tok_s = decode_ceiling * hw.llm_decode_bw_realization
+        base_decode = decode_bw_floor_tok_s
+
+        # Prefill (TTFT @ 1K): max(BW_load_floor, compute_floor) + overhead.
+        # GFLOPs / (TOPS × util) gives ms; peak_tops_bf16 is in TOPS units
+        # so the math is unit-balanced without further conversion.
+        # Fallback for INT8-only silicon (e.g. i.MX 95 Neutron has 0 BF16
+        # TOPS): drop to best-available tensor peak. Reflects that the
+        # workload still RUNS — just degraded to INT8 path — with the
+        # compute floor reflecting what the silicon CAN execute.
+        peak_tops_compute = max(hw.peak_tops_bf16,
+                                 hw.peak_tops_int8,
+                                 hw.peak_tops_fp8,
+                                 1e-9)
+        prefill_compute_ms = (1024 * gops_per_token) / (peak_tops_compute * hw.llm_prefill_util_factor)
+        prefill_bw_ms = (active_params_gb / hw.effective_bandwidth_gbs) * 1000
+        ttft_ms = max(prefill_bw_ms, prefill_compute_ms) + hw.compute_overhead_ms
+        base_ttft = ttft_ms / 1000  # ms → sec for downstream consumers
 
     # Apply the selected workload's multiplier (vs plain-chat reference)
     mult = workload_multiplier(workload)
