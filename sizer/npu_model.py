@@ -308,6 +308,15 @@ RTX_5090_REFERENCE = Hardware(
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
     compute_util_factor=0.85, tier_family="GDDR7-28",
     compute_overhead_ms=0.3,
+    # 5090 + Skippy MoE Q4 anchor — measured via bakeoff_llm.py per
+    # [backend] 13:55. Sustained decode 249.8 tok/s; prefill 6228 tok/s
+    # @ 2K → 1024/6228 ≈ 0.165 s TTFT @ 1K. Without this anchor, project_llm
+    # falls through to the BW-ceiling cross-class fallback (~891 tok/s)
+    # — wildly optimistic since 5090 isn't BW-saturated on small-active
+    # MoE workloads. Adding the anchor flips 5090 + MoE Q4 from
+    # 🔴 cross_class to 🟢 measured_anchor.
+    measured_llm_q4_decode_tok_s=249.8,
+    measured_llm_ttft_1k_sec=0.165,
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
         # Add more entries here as backend pulls them from data/output/
