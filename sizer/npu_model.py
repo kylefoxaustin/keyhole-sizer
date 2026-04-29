@@ -168,10 +168,12 @@ RTX_5090 = Hardware(
 # TOPS is currently metadata-only in project_vision (edge ms is
 # bandwidth-bound), but tier cards match reality rather than overstate.
 #
-# Two silicon options at this NPU class with different memory bus widths:
-#   64-bit variant: 6.4 GT/s × 64b = 51.2 GB/s theoretical, 35.84 eff
-#   32-bit variant: 6.4 GT/s × 32b = 25.6 GB/s theoretical, 17.92 eff
-# (half the bus width → half the bandwidth; same silicon and TOPS.)
+# 64-bit memory variant: 6.4 GT/s × 64b = 51.2 GB/s theoretical, 35.84 eff.
+# (The 32-bit variant of this same silicon class — 25.6 GB/s — is exposed
+# as the "NPU i.MX 95 (ground truth)" tier instead, since that's where
+# Kyle's real production measurement lives. Per 2026-04-29 redirect: a
+# synthetic "NPU Low-LP5-32bit" tier added confusion next to the measured
+# i.MX 95 entry with identical specs, so it was collapsed away.)
 NPU_LOW_LP5_64BIT = Hardware(
     name="NPU Low-LP5-64bit",
     peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
@@ -181,20 +183,6 @@ NPU_LOW_LP5_64BIT = Hardware(
     tdp_watts=10.0,
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
-    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
-)
-
-# 32-bit LP5 variant — half the bandwidth of the 64-bit version. LLM
-# decode numbers are NOT measured on real silicon at this spec; the
-# sizer will BW-project them from the 64-bit measurement (half BW →
-# roughly half decode tok/s for the BW-bound LLM path).
-NPU_LOW_LP5_32BIT = Hardware(
-    name="NPU Low-LP5-32bit",
-    peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
-    mem_bandwidth_gbs=25.6, mem_capacity_gb=16.0,
-    mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
-    tdp_watts=10.0,
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
 )
 
@@ -327,7 +315,7 @@ NPU_IMX95_MEASURED = Hardware(
 NPU_LOW = NPU_LOW_LP5_64BIT
 NPU_LOW_LP5 = NPU_LOW_LP5_64BIT
 
-TIERS = {t.name: t for t in (NPU_LOW_LP5_32BIT, NPU_IMX95_MEASURED,
+TIERS = {t.name: t for t in (NPU_IMX95_MEASURED,
                               NPU_LOW_LP5_64BIT, NPU_LOW_LP5X,
                               NPU_MID, NPU_HIGH, RTX_5090_REFERENCE)}
 

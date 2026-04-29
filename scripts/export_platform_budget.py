@@ -34,15 +34,18 @@ from sizer.platform_budget import (
 )
 
 HW_SLUGS = {
-    "npu_low_lp5_32bit": "NPU Low-LP5-32bit",
+    "npu_imx95":         "NPU i.MX 95 (ground truth)",
     "npu_low_lp5_64bit": "NPU Low-LP5-64bit",
     "npu_low_lp5x":      "NPU Low-LP5X",
     "npu_mid":           "NPU Mid",
     "npu_high":          "NPU High",
-    # Backwards-compat aliases — older slugs resolve to the 64-bit variant
-    # (the shipping-class entry NPU before Kyle split it into 32/64-bit
-    # options on 2026-04-22). `npu_low_lp5` was the pre-split name;
-    # `npu_low` / `npu_low_lp4` are older mis-spec'd aliases.
+    # Backwards-compat aliases. `npu_low_lp5_32bit` resolves to i.MX 95
+    # since that synthetic tier was collapsed into the measured ground-
+    # truth entry on 2026-04-29 (same memory class, no measurements on
+    # the synthetic side). `npu_low_lp5` was the pre-split name; `npu_low`
+    # / `npu_low_lp4` are older mis-spec'd aliases — all resolve to the
+    # 64-bit variant since that's the shipping-class entry NPU.
+    "npu_low_lp5_32bit": "NPU i.MX 95 (ground truth)",
     "npu_low_lp5":       "NPU Low-LP5-64bit",
     "npu_low":           "NPU Low-LP5-64bit",
     "npu_low_lp4":       "NPU Low-LP5-64bit",

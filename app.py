@@ -236,18 +236,19 @@ with st.sidebar:
     st.header("Edge NPU")
     tier = st.selectbox(
         "Tier preset",
-        options=("NPU Low-LP5-32bit", "NPU i.MX 95 (ground truth)",
+        options=("NPU i.MX 95 (ground truth)",
                  "NPU Low-LP5-64bit", "NPU Low-LP5X",
                  "NPU Mid", "NPU High",
                  "RTX 5090 (reference, measured)",
                  "Custom"),
-        index=4,  # lands on 'NPU Mid'
-        help="Low-LP5-32bit = 32-bit LPDDR5 @ 6.4 GT/s (25.6 GB/s theoretical), dense INT8-only silicon. "
-             "i.MX 95 = same silicon class with a real production measurement (NXP eIQ Neutron, "
-             "2026-04): yolov8n-seg INT8 @ 1080p = 32.0 ms. Selecting this tier returns the measured "
-             "number directly for workloads where we have ground-truth data; other (pipeline, resolution) "
-             "pairs fall back to the regular BW projection. "
-             "Low-LP5-64bit = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s, 2× the 32-bit variant). "
+        index=3,  # lands on 'NPU Mid'
+        help="i.MX 95 = entry-tier NPU class (NXP eIQ Neutron, 32-bit LPDDR5 @ 6.4 GT/s, 25.6 GB/s, "
+             "2 TOPS INT8 dense silicon) with a real 2026-04 production measurement: yolov8n-seg INT8 "
+             "@ 1080p = 32.0 ms. Selecting this tier returns the measured number directly for "
+             "workloads where we have ground-truth data; other (pipeline, resolution) pairs fall "
+             "back to the regular BW projection. "
+             "Low-LP5-64bit = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s, 2× the i.MX 95 bandwidth on "
+             "the same INT8-only silicon class). "
              "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5-64bit). "
              "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target, BF16/FP8-capable). "
              "High = 128-bit LPDDR5X @ 8.4 GT/s (same memory class as Mid; "
