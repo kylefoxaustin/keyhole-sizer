@@ -874,6 +874,18 @@ elif llm_saturated and not vision_enabled:
 #   vision on  + LLM on  → 4 vision metrics (with LLM tile in c4)
 #   vision on  + LLM off → 4 vision metrics (BW ratio in c4)
 #   vision off + LLM on  → 4 LLM-focused metrics (decode, TTFT, model, queries)
+def _format_ttft(seconds: float) -> str:
+    # Mirrors PAI sizer's format-by-magnitude rule (commit 1fd0bd8): integer
+    # ms below 100 ms (where ms precision matters), 2-decimal seconds above.
+    # The 100 ms crossover (rather than 1 s) avoids a "904 ms vs 903 ms"
+    # rounding flicker between stock and memory-upgraded variants — TTFT is
+    # held exactly at stock, but project_llm rounds total_s and decode_s
+    # independently, so the displayed difference can drift by 1 ms.
+    if seconds < 0.1:
+        return f"{seconds*1000:.0f} ms"
+    return f"{seconds:.2f} s"
+
+
 if vision_enabled:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
@@ -915,7 +927,7 @@ if vision_enabled:
         c4.metric(
             label=_llm_tile_label,
             value=f"{llm['decode_tok_s']:.1f} tok/s",
-            delta=f"TTFT 1K = {llm['ttft_1k_sec']*1000:.0f} ms",
+            delta=f"TTFT 1K = {_format_ttft(llm['ttft_1k_sec'])}",
             help=(
                 "BW-projected: decode tok/s scaled from the stock-memory "
                 "vendor measurement by the new/stock peak-BW ratio (active-"
@@ -964,7 +976,7 @@ else:
         ),
     )
     c2.metric(
-        label="Time per answer",
+        label="End-to-end latency",
         value=(f"{_short_sec:.1f} s" if answer_kind == "short" else f"{_rag_sec:.1f} s"),
         delta=("short (~200 tok)" if answer_kind == "short" else "RAG (8K + 2K)"),
         delta_color="off",
