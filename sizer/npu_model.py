@@ -104,6 +104,18 @@ class Hardware:
     llm_prefill_util_factor: float = 0.10
     llm_decode_bw_realization: float = 1.0
 
+    # NPU_share default per [docs] 2026-04-29 14:38: the third factor in
+    # the BW-decomposition formula `effective_NPU_BW = peak_DRAM_BW ×
+    # NPU_share × kernel_util_factor`. 5090 has dedicated VRAM (no
+    # shared bus contention) → defaults 1.0. NPU tiers share the SoC
+    # memory bus with display / camera / audio paths → defaults 0.75
+    # for the typical-system case. Users can override via the sidebar
+    # selector to model idle SoC (1.0), moderate contention (0.5), or
+    # heavy contention (0.25). Affects BW-bound regimes only — compute-
+    # bound paths (LLM TTFT, vision compute_floor) are unaffected since
+    # TOPS doesn't share the memory bus.
+    npu_share_default: float = 0.75
+
     @property
     def effective_bandwidth_gbs(self) -> float:
         return self.mem_bandwidth_gbs * self.bandwidth_efficiency
@@ -197,6 +209,7 @@ RTX_5090 = Hardware(
     tdp_watts=575.0,
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
     compute_util_factor=0.85, tier_family="GDDR7-28",
+    npu_share_default=1.0,  # Dedicated VRAM, no shared SoC contention
 )
 
 # Edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
@@ -307,6 +320,7 @@ RTX_5090_REFERENCE = Hardware(
     tdp_watts=575.0,
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
     compute_util_factor=0.85, tier_family="GDDR7-28",
+    npu_share_default=1.0,  # Dedicated VRAM, no shared SoC contention
     compute_overhead_ms=0.3,
     # 5090 + Skippy MoE Q4 anchor — measured via bakeoff_llm.py per
     # [backend] 13:55. Sustained decode 249.8 tok/s; prefill 6228 tok/s
@@ -883,7 +897,8 @@ def scale_edge_ms(reference_ms: float, hw: Hardware, reference: Hardware = NPU_M
 
 # ───────────────────────── Phase 2 compute clamp ─────────────────────
 
-def _phase2_edge_ms(pipeline: VisionPipeline, hw: Hardware) -> tuple[float, float, float] | None:
+def _phase2_edge_ms(pipeline: VisionPipeline, hw: Hardware,
+                     npu_share: float = 1.0) -> tuple[float, float, float] | None:
     """Phase 2 two-floor projection per [backend] 2026-04-29 design doc.
 
         edge_ms = max(bw_floor, compute_floor) + compute_overhead_ms
@@ -937,8 +952,11 @@ def _phase2_edge_ms(pipeline: VisionPipeline, hw: Hardware) -> tuple[float, floa
     if pipeline.vram_mb is None or pipeline.vram_mb <= 0:
         return None
 
-    # BW floor: DRAM-streaming bound. effective_bandwidth_gbs already at 70%.
-    eff_bw_gbs = hw.effective_bandwidth_gbs
+    # BW floor: DRAM-streaming bound. effective_bandwidth_gbs already at 70%
+    # bandwidth_efficiency. NPU_share scales further down (1.0 = idle SoC,
+    # 0.75 = typical contention, etc.). Compute floor is unaffected by
+    # NPU_share — TOPS doesn't share the memory bus.
+    eff_bw_gbs = hw.effective_bandwidth_gbs * max(npu_share, 1e-6)
     if eff_bw_gbs <= 0:
         return None
     bw_floor_ms = pipeline.vram_mb / eff_bw_gbs   # MB / (GB/s) = ms
@@ -973,6 +991,7 @@ def project_vision(
     yolo_batched: bool = True,
     reference: Hardware = NPU_MID,
     compiler_quality_vs_trt: float = 1.0,
+    npu_share: float | None = None,
 ) -> dict:
     """Project per-stream and total vision FPS on `hw`.
 
@@ -988,9 +1007,19 @@ def project_vision(
     slower per kernel (realistic); 0.50 = half as good (pessimistic).
     Applied uniformly to every latency path within the projection.
     """
+    # NPU_share factor — applies to BW-bound paths only. None falls back
+    # to the tier's npu_share_default (1.0 for 5090, 0.75 for NPU tiers).
+    share = npu_share if npu_share is not None else hw.npu_share_default
+    share = max(share, 1e-6)
+
     ms_field = {"720p": "edge_ms_720p", "1080p": "edge_ms_1080p", "4K": "edge_ms_4k"}[resolution]
     base_ms_at_mid = getattr(pipeline, ms_field)
     per_stream_ms = scale_edge_ms(base_ms_at_mid, hw, reference, compiler_quality_vs_trt)
+    # Legacy scale_edge_ms is BW-projected, so npu_share scales it linearly
+    # (slower wall-clock at lower share). Phase 2 path applies share inside
+    # _phase2_edge_ms instead.
+    if share < 1.0:
+        per_stream_ms = per_stream_ms / share
 
     # YOLO + CLIP split (known for the Hybrid V2 / TRT pipelines). At any
     # N_streams we include this breakdown when we can decompose.
@@ -1011,7 +1040,7 @@ def project_vision(
         # 32 ms via max(3.1 BW, 31.6 compute) + 1 = 32.6.
         # Skipped silently when calibration not available — falls back to
         # the legacy scale_edge_ms result computed above.
-        phase2 = _phase2_edge_ms(pipeline, hw)
+        phase2 = _phase2_edge_ms(pipeline, hw, npu_share=share)
         phase2_used = phase2 is not None
         if phase2_used:
             per_stream_ms, bw_floor_ms, compute_floor_ms = phase2
@@ -1043,8 +1072,21 @@ def project_vision(
         # any Phase 2 calibration data, so existing UI string comparisons
         # against "measured" continue to work unchanged.
         if measured_override_ms is not None:
-            edge_ms_source = "measured"
-            regime = None  # Direct measurement — regime classification N/A
+            # Anchor was measured at 100% NPU share. At < 100%, the BW-
+            # bound component scales linearly (compute-bound stays put,
+            # but the override is a wall-clock measurement that conflates
+            # both — first-cut treats the whole thing as BW-scaled, which
+            # is correct for BW-bound workloads and conservative for
+            # compute-bound ones since compute_floor would still be the
+            # floor regardless of share). Flips source measured →
+            # same_class_anchor for the what-if framing.
+            if share < 1.0:
+                per_stream_ms = measured_override_ms / share
+                edge_ms_source = "same_class_anchor"
+                regime = "bw_bound"  # the npu_share scaling is a BW phenomenon
+            else:
+                edge_ms_source = "measured"
+                regime = None  # Direct measurement — regime classification N/A
         elif phase2_used:
             same_family_anchor = any(
                 t.tier_family == hw.tier_family
@@ -1078,6 +1120,7 @@ def project_vision(
             "phase2_used": phase2_used,
             "bw_floor_ms": bw_floor_ms,
             "compute_floor_ms": compute_floor_ms,
+            "npu_share": share,
         }
         if pipeline.key in known_composed:
             yolo_variant = _yolo_variant_for_pipeline(pipeline.key)
@@ -1242,8 +1285,17 @@ def workload_multiplier(category: str) -> dict:
 
 
 def project_llm(hw: Hardware, quant: str = "Q4_K_M",
-                 workload: str = "plain_chat") -> dict:
+                 workload: str = "plain_chat",
+                 npu_share: float | None = None) -> dict:
     """Project LLM decode tok/s + TTFT for Qwen3-30B-A3B on `hw`.
+
+    `npu_share` ∈ (0, 1] — fraction of the NPU's effective DRAM bandwidth
+    available to this workload, modeling SoC contention (display, camera,
+    audio paths competing for the same memory bus). Scales BW-bound
+    paths only (decode tok/s, prefill BW floor). Compute-bound paths
+    (TTFT compute_floor) are unaffected — TOPS doesn't share the memory
+    bus. When None, falls back to `hw.npu_share_default` (1.0 for 5090,
+    0.75 for NPU tiers per [docs] 2026-04-29 14:38).
 
     If hw has `measured_llm_q4_decode_tok_s`, use it directly (vendor actual);
     scale to other quants by (Q4 bytes/param) / (quant bytes/param). If not,
@@ -1256,6 +1308,10 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
     """
     bpp = BYTES_PER_PARAM[quant]
     active_bytes = ACTIVE_PARAMS * bpp
+    # NPU_share factor — applies to all BW-bound paths below. Compute
+    # floors are NOT scaled (TOPS doesn't share the memory bus).
+    share = npu_share if npu_share is not None else hw.npu_share_default
+    share = max(share, 1e-6)
     decode_ceiling = hw.effective_bandwidth_gbs * 1e9 / active_bytes
 
     # Projection-source classification per [backend]/[docs] 2026-04-29
@@ -1286,6 +1342,16 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         q4_bpp = BYTES_PER_PARAM["Q4_K_M"]
         base_decode = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
         base_ttft = hw.measured_llm_ttft_1k_sec
+        # NPU_share scaling on the anchored path: anchor was measured at
+        # 100% NPU access (idle SoC). At < 100%, the BW-bound decode
+        # scales linearly; the source flips from 🟢 measured_anchor →
+        # 🟡 same_class_anchor since we're now projecting from the
+        # anchor rather than surfacing it verbatim. TTFT (compute-bound)
+        # stays unchanged. Per [docs] 2026-04-29 14:38 spec.
+        if share < 1.0:
+            base_decode *= share
+            if llm_source == "measured_anchor":
+                llm_source = "same_class_anchor"
     else:
         # No anchor in this hw's tier_family — Phase 2 cross-class two-floor
         # projection per [backend] 2026-04-29 13:17 calibration + 13:31
@@ -1316,8 +1382,9 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         gops_per_token = 2 * (ACTIVE_PARAMS / 1e9)  # = 6 GFLOPs/tok for MoE 3B-active
 
         # Decode: BW-floor with realization factor (default 1.0 = pure
-        # ceiling, anchor-driven elsewhere).
-        decode_bw_floor_tok_s = decode_ceiling * hw.llm_decode_bw_realization
+        # ceiling, anchor-driven elsewhere). NPU_share scales the
+        # effective BW available to the workload.
+        decode_bw_floor_tok_s = decode_ceiling * hw.llm_decode_bw_realization * share
         base_decode = decode_bw_floor_tok_s
 
         # Prefill (TTFT @ 1K): max(BW_load_floor, compute_floor) + overhead.
@@ -1327,12 +1394,14 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         # TOPS): drop to best-available tensor peak. Reflects that the
         # workload still RUNS — just degraded to INT8 path — with the
         # compute floor reflecting what the silicon CAN execute.
+        # NPU_share scales the BW floor only; the compute floor is
+        # unaffected since TOPS doesn't share the memory bus.
         peak_tops_compute = max(hw.peak_tops_bf16,
                                  hw.peak_tops_int8,
                                  hw.peak_tops_fp8,
                                  1e-9)
         prefill_compute_ms = (1024 * gops_per_token) / (peak_tops_compute * hw.llm_prefill_util_factor)
-        prefill_bw_ms = (active_params_gb / hw.effective_bandwidth_gbs) * 1000
+        prefill_bw_ms = (active_params_gb / (hw.effective_bandwidth_gbs * share)) * 1000
         ttft_ms = max(prefill_bw_ms, prefill_compute_ms) + hw.compute_overhead_ms
         base_ttft = ttft_ms / 1000  # ms → sec for downstream consumers
 
@@ -1374,12 +1443,8 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         # Decode regime per [pai-sizer] 33b0dfc convention. Decode on MoE
         # (3B-active) is BW-bound by physics — bytes-per-token = active
         # params, fully streamed from DRAM each token, so tok/s ∝ BW.
-        # Cross-class fallback uses BW-ceiling × 0.60 efficiency, also
-        # BW-flavored. Phase 2 LLM math swap (using backend's 13:17
-        # llm_prefill_util_factor / llm_decode_bw_realization split) will
-        # extend regime to compute_bound when full two-floor lands; for
-        # now, decode is bw_bound across all tier configurations we ship.
         "regime": "bw_bound",
+        "npu_share": share,
     }
 
 
