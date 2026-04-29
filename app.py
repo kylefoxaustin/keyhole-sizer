@@ -348,6 +348,47 @@ with st.sidebar:
                     f"vs stock)"
                 )
 
+    # ── NPU_share selector (BW-contention third factor) ─────────────────
+    # Per [docs] 2026-04-29 14:38: the third factor in the BW decomposition
+    # `effective_NPU_BW = peak_DRAM_BW × NPU_share × kernel_util_factor`.
+    # Models SoC bus contention from display / camera / audio paths.
+    # Defaults: 5090 = 100% (dedicated VRAM), NPU tiers = 75% (typical).
+    # Affects BW-bound paths only — TTFT / compute floors unchanged.
+    _share_options = [
+        ("100% — Idle SoC, NPU has full memory bus", 1.0),
+        ("75% — Light system load (typical default)", 0.75),
+        ("50% — Moderate contention (display + camera + audio concurrent)", 0.5),
+        ("25% — Heavy contention (NPU starved)", 0.25),
+    ]
+    _share_default_value = hw.npu_share_default
+    _share_default_idx = next(
+        (i for i, (_lbl, v) in enumerate(_share_options) if abs(v - _share_default_value) < 1e-6),
+        1,  # fallback to 75% if hw default is something exotic
+    )
+    npu_share_choice = st.selectbox(
+        "BW available to NPU",
+        options=[lbl for lbl, _v in _share_options],
+        index=_share_default_idx,
+        help=(
+            "Fraction of the NPU's effective DRAM bandwidth available to "
+            "this workload. Models SoC bus contention — display, camera, "
+            "audio paths competing for the same memory bus on edge silicon. "
+            "Affects BW-bound paths (LLM decode tok/s, vision FPS when "
+            "BW-bound) but NOT compute-bound paths (LLM TTFT / prefill, "
+            "vision FPS when compute-bound) — TOPS doesn't share the "
+            "memory bus. 5090 defaults to 100% (dedicated VRAM); NPU tiers "
+            "default to 75% (typical SoC contention)."
+        ),
+        key=f"npu_share_{tier}",
+    )
+    npu_share = next(v for lbl, v in _share_options if lbl == npu_share_choice)
+    if npu_share != hw.npu_share_default:
+        st.caption(
+            f"⚙ NPU share: **{npu_share*100:.0f}%** "
+            f"(default for {hw.tier_family or 'this tier'}: "
+            f"{hw.npu_share_default*100:.0f}%)"
+        )
+
     st.caption(describe_hw(hw))
 
     st.markdown("---")
@@ -772,9 +813,10 @@ if not vision_enabled and not llm_enabled:
 
 # Compute projections
 vision = (project_vision(pipeline, hw, resolution, n_streams=n_streams,
-                          compiler_quality_vs_trt=compiler_quality)
+                          compiler_quality_vs_trt=compiler_quality,
+                          npu_share=npu_share)
           if vision_enabled else None)
-llm = project_llm(hw, quant, workload=llm_workload) if llm_enabled else None
+llm = project_llm(hw, quant, workload=llm_workload, npu_share=npu_share) if llm_enabled else None
 # Apply per-model BW-scaling: project_llm() is anchored to the perf
 # reference model (Qwen3-30B-A3B MoE 3B-active). For models with
 # different architectures (e.g. dense 14B), tok/s and TTFT scale by
@@ -1025,12 +1067,19 @@ def _source_attribution(hw_name: str) -> str:
 
 
 def _render_source_banner(source: str, regime: str | None, hw_name: str,
-                            kind: str, value_str: str) -> None:
+                            kind: str, value_str: str,
+                            share: float = 1.0) -> None:
     """Render the projection-source banner for a vision or LLM tile."""
     regime_suffix = ""
     if regime in ("bw_bound", "compute_bound"):
         regime_suffix = (
             f" Regime: **{'BW-bound' if regime == 'bw_bound' else 'compute-bound'}**."
+        )
+    share_suffix = ""
+    if share < 1.0:
+        share_suffix = (
+            f" Scaled by **NPU_share = {share*100:.0f}%** "
+            f"(BW-bound paths only; TTFT / compute floors unaffected)."
         )
     if source == "measured":
         st.success(
@@ -1048,14 +1097,14 @@ def _render_source_banner(source: str, regime: str | None, hw_name: str,
         st.info(
             f"🟡 **Same-class projection** — {kind} = **{value_str}** BW-scaled "
             f"within memory family from a measured anchor (memory-upgrade overlay "
-            f"or BW-equivalent sibling tier).{regime_suffix}"
+            f"or BW-equivalent sibling tier).{regime_suffix}{share_suffix}"
         )
     elif source in ("cross_class", "projected"):
         st.warning(
             f"🟠 **Cross-class extrapolation** — {kind} = **{value_str}**. No anchor "
             f"in this hardware's memory class; projection scales from a different "
             f"silicon class via the two-floor model. Read as directional — slope "
-            f"assumption breaks at class boundaries.{regime_suffix}"
+            f"assumption breaks at class boundaries.{regime_suffix}{share_suffix}"
         )
 
 
@@ -1067,6 +1116,7 @@ if vision_enabled:
         hw.name,
         kind="Per-camera FPS = 1000 /",
         value_str=f"{vision['per_stream_ms']:.1f} ms",
+        share=vision.get("npu_share", 1.0),
     )
 
 # LLM banner — only when LLM is enabled.
@@ -1077,6 +1127,7 @@ if llm_enabled:
         hw.name,
         kind="LLM decode",
         value_str=f"{llm['decode_tok_s']:.1f} tok/s",
+        share=llm.get("npu_share", 1.0),
     )
 
 # Capability-level caption: surfaces the kernel path the silicon takes
