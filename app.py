@@ -928,10 +928,19 @@ def _format_ttft(seconds: float) -> str:
     return f"{seconds:.2f} s"
 
 
+# NPU_share marker per [pai-sizer] e521a70 convention: append "(@ X% NPU)"
+# suffix to BW-affected tile labels when share != 100%, so users see at
+# a glance that they're looking at a what-if operating point. Source
+# classification stays untouched (orthogonal axis).
+_npu_share_marker = (
+    f" (@ {npu_share*100:.0f}% NPU)"
+    if abs(npu_share - 1.0) > 1e-6 else ""
+)
+
 if vision_enabled:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(
-        label="Per-camera FPS",
+        label=f"Per-camera FPS{_npu_share_marker}",
         value=f"{vision_fps_effective:.1f}",
         delta=(f"{vision_fps_effective - vision['fps_per_stream']:+.1f}  under LLM"
                 if llm_enabled else f"{n_streams} streams @ {resolution}"),
@@ -943,7 +952,7 @@ if vision_enabled:
         ),
     )
     c2.metric(
-        label="Aggregate FPS",
+        label=f"Aggregate FPS{_npu_share_marker}",
         value=f"{vision_fps_effective * n_streams:.0f}",
         delta=f"{n_streams} streams total",
         delta_color="off",
@@ -966,6 +975,7 @@ if vision_enabled:
         _llm_tile_label = f"LLM decode ({quant})"
         if getattr(hw, "bw_projected", False):
             _llm_tile_label = f"LLM decode ({quant}, BW-proj)"
+        _llm_tile_label += _npu_share_marker
         c4.metric(
             label=_llm_tile_label,
             value=f"{llm['decode_tok_s']:.1f} tok/s",
@@ -1003,6 +1013,7 @@ else:
     _llm_tile_label_only = f"LLM decode ({quant})"
     if getattr(hw, "bw_projected", False):
         _llm_tile_label_only = f"LLM decode ({quant}, BW-proj)"
+    _llm_tile_label_only += _npu_share_marker
     c1.metric(
         label=_llm_tile_label_only,
         value=f"{llm['decode_tok_s']:.1f} tok/s",
@@ -1018,7 +1029,7 @@ else:
         ),
     )
     c2.metric(
-        label="End-to-end latency",
+        label=f"End-to-end latency{_npu_share_marker}",
         value=(f"{_short_sec:.1f} s" if answer_kind == "short" else f"{_rag_sec:.1f} s"),
         delta=("short (~200 tok)" if answer_kind == "short" else "RAG (8K + 2K)"),
         delta_color="off",

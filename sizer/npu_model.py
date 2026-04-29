@@ -1073,20 +1073,16 @@ def project_vision(
         # against "measured" continue to work unchanged.
         if measured_override_ms is not None:
             # Anchor was measured at 100% NPU share. At < 100%, the BW-
-            # bound component scales linearly (compute-bound stays put,
-            # but the override is a wall-clock measurement that conflates
-            # both — first-cut treats the whole thing as BW-scaled, which
-            # is correct for BW-bound workloads and conservative for
-            # compute-bound ones since compute_floor would still be the
-            # floor regardless of share). Flips source measured →
-            # same_class_anchor for the what-if framing.
+            # bound component scales linearly. Source stays 🟢 measured —
+            # NPU_share is treated as an orthogonal axis (operating point)
+            # from source (data pedigree). The tile-level "(@ X% NPU)"
+            # marker is the visual signal that the user is looking at a
+            # what-if. Mirrors [pai-sizer] e521a70 + matches [docs] 14:38
+            # framing.
             if share < 1.0:
                 per_stream_ms = measured_override_ms / share
-                edge_ms_source = "same_class_anchor"
-                regime = "bw_bound"  # the npu_share scaling is a BW phenomenon
-            else:
-                edge_ms_source = "measured"
-                regime = None  # Direct measurement — regime classification N/A
+            edge_ms_source = "measured"
+            regime = None  # Direct measurement — regime classification N/A
         elif phase2_used:
             same_family_anchor = any(
                 t.tier_family == hw.tier_family
@@ -1344,14 +1340,16 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         base_ttft = hw.measured_llm_ttft_1k_sec
         # NPU_share scaling on the anchored path: anchor was measured at
         # 100% NPU access (idle SoC). At < 100%, the BW-bound decode
-        # scales linearly; the source flips from 🟢 measured_anchor →
-        # 🟡 same_class_anchor since we're now projecting from the
-        # anchor rather than surfacing it verbatim. TTFT (compute-bound)
-        # stays unchanged. Per [docs] 2026-04-29 14:38 spec.
+        # scales linearly. Source classification stays 🟢 measured_anchor
+        # — NPU_share is treated as an orthogonal axis (operating point)
+        # from source (data pedigree). The tile-level "(@ X% NPU)" marker
+        # is the visual signal that the user is looking at a what-if.
+        # Mirrors [pai-sizer] e521a70 + matches [docs] 14:38 framing
+        # ("🟢 measured: NPU_share has no effect — the measurement was at
+        # a specific real-world contention level baked in"). TTFT
+        # (compute-bound) stays unchanged in either interpretation.
         if share < 1.0:
             base_decode *= share
-            if llm_source == "measured_anchor":
-                llm_source = "same_class_anchor"
     else:
         # No anchor in this hw's tier_family — Phase 2 cross-class two-floor
         # projection per [backend] 2026-04-29 13:17 calibration + 13:31
