@@ -227,11 +227,21 @@ NPU_MID = Hardware(
 NPU_HIGH = Hardware(
     name="NPU High",
     peak_tops_bf16=275.0, peak_tops_int8=550.0, peak_tops_fp8=550.0,
-    mem_bandwidth_gbs=179.2, mem_capacity_gb=32.0,
-    mem_bus_width_bits=128, mem_type="LPDDR5T", mem_data_rate_gtps=11.2,
+    # Same memory class as NPU Mid (128-bit LPDDR5X @ 8.4 GT/s = 134.4
+    # GB/s). NPU High differentiates from Mid on COMPUTE and CAPACITY
+    # rather than memory BW: 1.375× TOPS, 1.33× DRAM, higher compute
+    # efficiency (0.70 vs 0.65), 1.6× TDP. Memory upgrades (LPDDR5T,
+    # LPDDR6) are surfaced separately as upgrade-path overlays via
+    # MEMORY_UPGRADE_OPTIONS — not baked into the tier definition.
+    # Decode (BW-bound) consequently matches Mid on stock memory; the
+    # old 50.46 tok/s measurement re-emerges via the LPDDR5T-11.2
+    # overlay (37.85 × 179.2/134.4 ≈ 50.46). TTFT (compute-bound) keeps
+    # its own measurement since prefill scales with TOPS not BW.
+    mem_bandwidth_gbs=134.4, mem_capacity_gb=32.0,
+    mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
     compute_efficiency=0.70, bandwidth_efficiency=0.70,
     tdp_watts=40.0,
-    measured_llm_q4_decode_tok_s=50.46,
+    measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.1755,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
 )
@@ -326,18 +336,24 @@ MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "LPDDR6",
 
 
 # Memory upgrade options offered as a sub-selector on NPU Mid + NPU High
-# (per [backend] 2026-04-28). LPDDR6 @ 12 GT/s and 14 GT/s preview the
-# bandwidth headroom each tier would gain on a memory-only swap. Holds
-# the existing 70% bandwidth_efficiency uniformly across LPDDR5/LPDDR5X/
-# LPDDR6 — slightly conservative for LPDDR6 (improved subchannel
-# architecture typically realizes 75-80% in practice per JEDEC), but
-# keeps the comparison clean.
+# (per [backend] 2026-04-28). Preview the bandwidth headroom each tier
+# would gain on a memory-only swap. Holds the existing 70%
+# bandwidth_efficiency uniformly across LPDDR5X/LPDDR5T/LPDDR6 — slightly
+# conservative for LPDDR6 (improved subchannel architecture typically
+# realizes 75-80% in practice per JEDEC), but keeps the comparison clean.
+#
+# Sorted ascending by data rate (= BW at fixed bus width):
+#   LPDDR5T @ 11.2 GT/s — Samsung's >10 GT/s LPDDR5-class extension; first
+#                         step beyond stock LPDDR5X @ 8.4 GT/s.
+#   LPDDR6 @ 12 GT/s    — first LPDDR6 spec rate.
+#   LPDDR6 @ 14 GT/s    — top-bin LPDDR6.
 #
 # Schema: list of (label, mem_type, mem_data_rate_gtps). Order in this
-# dict matches the order in the sidebar selectbox.
-LPDDR6_UPGRADE_OPTIONS: list[tuple[str, str, float]] = [
-    ("LPDDR6 @ 12 GT/s",  "LPDDR6", 12.0),
-    ("LPDDR6 @ 14 GT/s",  "LPDDR6", 14.0),
+# list matches the order in the sidebar selectbox.
+MEMORY_UPGRADE_OPTIONS: list[tuple[str, str, float]] = [
+    ("LPDDR5T @ 11.2 GT/s", "LPDDR5T", 11.2),
+    ("LPDDR6 @ 12 GT/s",    "LPDDR6",  12.0),
+    ("LPDDR6 @ 14 GT/s",    "LPDDR6",  14.0),
 ]
 
 

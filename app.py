@@ -250,7 +250,10 @@ with st.sidebar:
              "Low-LP5-64bit = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s, 2× the 32-bit variant). "
              "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5-64bit). "
              "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target, BF16/FP8-capable). "
-             "High = 128-bit LPDDR5T @ 11.2 GT/s (Samsung's >10 GT/s LPDDR5-class extension; vendor high-bin). "
+             "High = 128-bit LPDDR5X @ 8.4 GT/s (same memory class as Mid; "
+             "differentiates on COMPUTE — 275/550/550 TOPS BF16/INT8/FP8 — and "
+             "CAPACITY — 32 GB DRAM, 40 W). Memory upgrades (LPDDR5T 11.2, "
+             "LPDDR6 12/14) are available as overlays on either Mid or High. "
              "RTX 5090 = the reference silicon every BW-scaling projection here is derived from "
              "(512-bit GDDR7 @ 28 GT/s, 1792 GB/s). Blackwell-TRT 10.16 bake-off measurements "
              "for 5 pipelines surface directly via the measured-silicon override. "
@@ -313,10 +316,10 @@ with st.sidebar:
         # class, LP5X, 5090) don't get the option — they're characterized
         # by their specific memory generation, and 5090 is reference.
         if tier in ("NPU Mid", "NPU High"):
-            from sizer.npu_model import LPDDR6_UPGRADE_OPTIONS, hw_with_memory
+            from sizer.npu_model import MEMORY_UPGRADE_OPTIONS, hw_with_memory
             stock_label = "Stock (no upgrade)"
             mem_options = [(stock_label, hw.mem_type, hw.mem_data_rate_gtps)] + \
-                           LPDDR6_UPGRADE_OPTIONS
+                           MEMORY_UPGRADE_OPTIONS
             mem_choice = st.selectbox(
                 "Memory upgrade",
                 options=[opt[0] for opt in mem_options],
