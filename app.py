@@ -1004,23 +1004,79 @@ else:
         ),
     )
 
-# Measured-silicon badge: when project_vision returned a real production
-# number (instead of a BW-scaled projection), flag it explicitly and
-# attribute the measurement to the specific silicon/toolchain source.
-# Vision-only signal — skipped when vision is disabled.
-if vision_enabled and vision.get("edge_ms_source") == "measured":
-    if "i.MX 95" in hw.name:
-        _attribution = "NXP eIQ Neutron NPU, production measurement 2026-04"
-    elif "5090" in hw.name:
-        _attribution = "RTX 5090 Blackwell, TensorRT 10.16 bake-off 2026-04"
-    else:
-        _attribution = "production silicon"
-    st.success(
-        f"✅ **Measured silicon** — Per-camera FPS = 1000 / "
-        f"**{vision['per_stream_ms']:.1f} ms**, measured on **{hw.name}** "
-        f"({_attribution}). This is a real measurement, not a projection — "
-        f"the compiler-quality slider and BW-ratio scaling do not apply "
-        f"to this tier+pipeline+resolution triple."
+# Projection-source banner: 4-state honesty signal per [pai-sizer]/[backend]
+# 2026-04-29 Phase 2 spec. Surfaces whether the displayed numbers are a
+# direct measurement, a within-class anchor projection, or a cross-class
+# extrapolation that should be read as directional. Mirrors PAI sizer's
+# 33b0dfc convention so badges look the same across both apps.
+#
+#   🟢 measured        → st.success — direct per-cell measurement
+#   🟢 measured_anchor → st.success — tier-level vendor anchor
+#   🟡 same_class_anchor → st.info  — within-family BW-scaled projection
+#   🟠 cross_class     → st.warning — cross-family extrapolation
+#   (legacy 'projected' fallback — same as cross_class semantically)
+
+def _source_attribution(hw_name: str) -> str:
+    if "i.MX 95" in hw_name:
+        return "NXP eIQ Neutron NPU, production measurement 2026-04"
+    if "5090" in hw_name:
+        return "RTX 5090 Blackwell, TensorRT 10.16 bake-off 2026-04"
+    return "production silicon"
+
+
+def _render_source_banner(source: str, regime: str | None, hw_name: str,
+                            kind: str, value_str: str) -> None:
+    """Render the projection-source banner for a vision or LLM tile."""
+    regime_suffix = ""
+    if regime in ("bw_bound", "compute_bound"):
+        regime_suffix = (
+            f" Regime: **{'BW-bound' if regime == 'bw_bound' else 'compute-bound'}**."
+        )
+    if source == "measured":
+        st.success(
+            f"🟢 **Measured silicon** — {kind} = **{value_str}** on **{hw_name}** "
+            f"({_source_attribution(hw_name)}). Direct measurement, not a projection — "
+            f"compiler-quality slider and BW-ratio scaling do not apply."
+        )
+    elif source == "measured_anchor":
+        st.success(
+            f"🟢 **Tier-level anchor** — {kind} = **{value_str}** on **{hw_name}**, "
+            f"vendor-supplied at this tier. Other quants/workloads scale from this "
+            f"anchor.{regime_suffix}"
+        )
+    elif source == "same_class_anchor":
+        st.info(
+            f"🟡 **Same-class projection** — {kind} = **{value_str}** BW-scaled "
+            f"within memory family from a measured anchor (memory-upgrade overlay "
+            f"or BW-equivalent sibling tier).{regime_suffix}"
+        )
+    elif source in ("cross_class", "projected"):
+        st.warning(
+            f"🟠 **Cross-class extrapolation** — {kind} = **{value_str}**. No anchor "
+            f"in this hardware's memory class; projection scales from a different "
+            f"silicon class via the two-floor model. Read as directional — slope "
+            f"assumption breaks at class boundaries.{regime_suffix}"
+        )
+
+
+# Vision banner — only when vision is enabled.
+if vision_enabled:
+    _render_source_banner(
+        vision.get("edge_ms_source", "projected"),
+        vision.get("regime"),
+        hw.name,
+        kind="Per-camera FPS = 1000 /",
+        value_str=f"{vision['per_stream_ms']:.1f} ms",
+    )
+
+# LLM banner — only when LLM is enabled.
+if llm_enabled:
+    _render_source_banner(
+        llm.get("llm_source", "projected"),
+        llm.get("regime"),
+        hw.name,
+        kind="LLM decode",
+        value_str=f"{llm['decode_tok_s']:.1f} tok/s",
     )
 
 # Capability-level caption: surfaces the kernel path the silicon takes

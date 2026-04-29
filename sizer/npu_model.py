@@ -181,7 +181,7 @@ RTX_5090 = Hardware(
     compute_efficiency=0.70, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
-    compute_util_factor=0.85, tier_family="rtx_5090",
+    compute_util_factor=0.85, tier_family="GDDR7-28",
 )
 
 # Edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
@@ -210,7 +210,7 @@ NPU_LOW_LP5_64BIT = Hardware(
     measured_llm_q4_decode_tok_s=29.27,
     measured_llm_ttft_1k_sec=1.67,
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
-    compute_util_factor=0.19, tier_family="neutron",
+    compute_util_factor=0.19, tier_family="Neutron-64-LP5",
 )
 
 # LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
@@ -225,7 +225,7 @@ NPU_LOW_LP5X = Hardware(
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
-    compute_util_factor=0.19, tier_family="low_lp5x",
+    compute_util_factor=0.19, tier_family="LP5X-8.4-64b",
 )
 
 NPU_MID = Hardware(
@@ -238,7 +238,7 @@ NPU_MID = Hardware(
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.351,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
-    compute_util_factor=0.45, tier_family="mid_high",
+    compute_util_factor=0.45, tier_family="LP5X-8.4-128b",
 )
 
 NPU_HIGH = Hardware(
@@ -261,7 +261,7 @@ NPU_HIGH = Hardware(
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.1755,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
-    compute_util_factor=0.50, tier_family="mid_high",
+    compute_util_factor=0.50, tier_family="LP5X-8.4-128b",
 )
 
 # Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
@@ -289,7 +289,8 @@ RTX_5090_REFERENCE = Hardware(
     compute_efficiency=0.70, bandwidth_efficiency=0.85,
     tdp_watts=575.0,
     capability_levels=_SM120_BLACKWELL_CAPABILITY,
-    compute_util_factor=0.85, tier_family="rtx_5090",
+    compute_util_factor=0.85, tier_family="GDDR7-28",
+    compute_overhead_ms=0.3,
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
         # Add more entries here as backend pulls them from data/output/
@@ -335,7 +336,7 @@ NPU_IMX95_MEASURED = Hardware(
     compute_efficiency=0.60, bandwidth_efficiency=0.70,
     tdp_watts=10.0,
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
-    compute_util_factor=0.19, tier_family="neutron",
+    compute_util_factor=0.19, tier_family="Neutron-32-LP5",
     measured_edge_ms={
         "yolov8n_trt_int8_coco128": {"1080p": 32.0},
     },
@@ -1017,16 +1018,22 @@ def project_vision(
         # against "measured" continue to work unchanged.
         if measured_override_ms is not None:
             edge_ms_source = "measured"
+            regime = None  # Direct measurement — regime classification N/A
         elif phase2_used:
-            same_class_anchor = any(
+            same_family_anchor = any(
                 t.tier_family == hw.tier_family
                 and t.measured_edge_ms is not None
                 and pipeline.key in t.measured_edge_ms
                 for t in TIERS.values()
             )
-            edge_ms_source = "same_class" if same_class_anchor else "cross_class"
+            edge_ms_source = "same_class_anchor" if same_family_anchor else "cross_class"
+            # Regime: which floor dominated the max() — captures whether
+            # the workload is BW-bound or compute-bound on this silicon.
+            # Per [pai-sizer] 33b0dfc convention; matches their badge UI.
+            regime = "bw_bound" if bw_floor_ms >= compute_floor_ms else "compute_bound"
         else:
             edge_ms_source = "projected"
+            regime = None  # Legacy BW-only path doesn't separate the floors
 
         fps_per_stream = 1000 / per_stream_ms if per_stream_ms > 0 else 0
         result = {
@@ -1041,6 +1048,7 @@ def project_vision(
             "fits_in_memory": pipeline.vram_mb < hw.mem_capacity_gb * 1024,
             "bandwidth_ratio_vs_ref": bandwidth_ratio(hw, reference),
             "edge_ms_source": edge_ms_source,
+            "regime": regime,
             "phase2_used": phase2_used,
             "bw_floor_ms": bw_floor_ms,
             "compute_floor_ms": compute_floor_ms,
@@ -1240,9 +1248,14 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
             # ratio, holding TTFT at stock. Memory-upgrade overlay stays
             # in the same memory class as its parent, so anchor is in
             # within-class scaling territory.
-            llm_source = "same_class"
+            llm_source = "same_class_anchor"
         else:
-            llm_source = "measured"
+            # Tier-level vendor anchor (not per-cell measurement). PAI
+            # sizer's 4-state taxonomy distinguishes these from per-cell
+            # 'measured' (which on keyhole would be RTX 5090 LLM bake-off
+            # cells — currently no LLM cells, only vision). Tier-level
+            # anchors in PAI's nomenclature: 'measured_anchor'.
+            llm_source = "measured_anchor"
         # Use vendor-measured Q4_K_M and scale to other quants by byte ratio
         q4_bpp = BYTES_PER_PARAM["Q4_K_M"]
         base_decode = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
@@ -1300,6 +1313,15 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         "rag_decode_sec": rag_decode_sec,
         "rag_total_sec": rag_total_sec,
         "llm_source": llm_source,
+        # Decode regime per [pai-sizer] 33b0dfc convention. Decode on MoE
+        # (3B-active) is BW-bound by physics — bytes-per-token = active
+        # params, fully streamed from DRAM each token, so tok/s ∝ BW.
+        # Cross-class fallback uses BW-ceiling × 0.60 efficiency, also
+        # BW-flavored. Phase 2 LLM math swap (using backend's 13:17
+        # llm_prefill_util_factor / llm_decode_bw_realization split) will
+        # extend regime to compute_bound when full two-floor lands; for
+        # now, decode is bw_bound across all tier configurations we ship.
+        "regime": "bw_bound",
     }
 
 
