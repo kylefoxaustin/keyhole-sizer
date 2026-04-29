@@ -901,10 +901,26 @@ if vision_enabled:
         delta_color="off",
     )
     if llm_enabled:
+        # Mark LLM tok/s as BW-projected when the user toggled an LPDDR6
+        # memory upgrade — the underlying decode rate was scaled by the
+        # peak-BW ratio in `hw_with_memory()`, not measured by a vendor.
+        # Per [backend] 2026-04-29 bug report.
+        _llm_tile_label = f"LLM decode ({quant})"
+        if getattr(hw, "bw_projected", False):
+            _llm_tile_label = f"LLM decode ({quant}, BW-proj)"
         c4.metric(
-            label=f"LLM decode ({quant})",
+            label=_llm_tile_label,
             value=f"{llm['decode_tok_s']:.1f} tok/s",
             delta=f"TTFT 1K = {llm['ttft_1k_sec']*1000:.0f} ms",
+            help=(
+                "BW-projected: decode tok/s scaled from the stock-memory "
+                "vendor measurement by the new/stock peak-BW ratio (active-"
+                "param weights are BW-bound on MoE). TTFT held at stock — "
+                "prefill is compute-bound. Memory swap is what-if; not a "
+                "vendor measurement of LPDDR6 silicon."
+                if getattr(hw, "bw_projected", False)
+                else None
+            ),
         )
     else:
         c4.metric(
@@ -926,14 +942,21 @@ else:
     _model = LLM_MODELS[llm_model_key]
     _short_sec = llm["short_answer_sec"]
     _rag_sec = llm["rag_total_sec"]
+    _llm_tile_label_only = f"LLM decode ({quant})"
+    if getattr(hw, "bw_projected", False):
+        _llm_tile_label_only = f"LLM decode ({quant}, BW-proj)"
     c1.metric(
-        label=f"LLM decode ({quant})",
+        label=_llm_tile_label_only,
         value=f"{llm['decode_tok_s']:.1f} tok/s",
         delta=f"TTFT 1K = {llm['ttft_1k_sec']*1000:.0f} ms",
         help=(
             "Sustained generation rate on the selected workload. Bandwidth-"
             "bound at 100.8 GB/s usable on NPU Mid → ~12 tok/s for 14B dense; "
             "MoE 30B-A3B's 3B-active footprint is what unlocks higher rates."
+            + ("\n\n**BW-proj** label: decode tok/s scaled by the LPDDR6 "
+                "memory upgrade's peak-BW ratio. TTFT held at stock — prefill "
+                "is compute-bound. What-if, not a vendor measurement."
+                if getattr(hw, "bw_projected", False) else "")
         ),
     )
     c2.metric(

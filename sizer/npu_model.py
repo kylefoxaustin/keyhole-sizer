@@ -39,6 +39,12 @@ class Hardware:
     measured_llm_q4_decode_tok_s: float | None = None
     measured_llm_ttft_1k_sec: float | None = None
 
+    # True when this Hardware was synthesized via `hw_with_memory()` (i.e.
+    # represents a memory-only what-if upgrade, not stock silicon). UI
+    # checks this to mark BW-projected LLM tok/s as "(BW-proj)" so users
+    # don't mistake a what-if projection for a vendor-measured number.
+    bw_projected: bool = False
+
     # Optional: real-silicon edge ms per frame, keyed by (pipeline_key → resolution → ms).
     # When populated, project_vision returns this value directly for matching
     # (pipeline, resolution) pairs — bypassing both the BW-bound scale and the
@@ -341,19 +347,43 @@ def hw_with_memory(hw: Hardware, mem_type: str, mem_data_rate_gtps: float,
     bandwidth recomputed from bus width × data rate / 8, and an annotated
     name so downstream UI surfaces the variant.
 
-    Other fields (capacity, TOPS, efficiencies, tdp, capability_levels,
-    measured_edge_ms, measured_llm_*) carry through unchanged. Use this
-    for "what if we swap the memory on tier X" previews — backed by the
-    same 70% bandwidth_efficiency the rest of the model uses.
+    BW-bound LLM decode tok/s is also scaled — `measured_llm_q4_decode_tok_s`
+    grows by the new/stock peak-BW ratio (active-param weights stream
+    through DRAM per token, BW-bound regime). TTFT (`measured_llm_ttft_1k_sec`)
+    stays at stock — prefill is compute-bound, not memory-bound, so a
+    memory-only swap shouldn't move it. Per [backend] 2026-04-29 bug
+    report against an earlier version of this function that left the
+    LLM decode field unchanged.
+
+    `measured_edge_ms` (vision override) and the per-dtype capability_levels
+    are silicon-intrinsic and stay unchanged. TOPS / capacity / TDP
+    are silicon-fixed and also stay unchanged. The `bw_projected` flag
+    is set to True so the UI can mark BW-scaled LLM numbers as
+    projections rather than vendor measurements.
     """
     new_bw = hw.mem_bus_width_bits * mem_data_rate_gtps / 8
     new_name = hw.name if name_suffix is None else f"{hw.name} ({name_suffix})"
+
+    # BW-scale the measured LLM decode tok/s. Decode is BW-bound on MoE
+    # 3B-active models — bytes per decoded token = active_size, fully
+    # streamed from DRAM per token, so tok/s scales linearly with
+    # effective BW (bandwidth_efficiency cancels: same 0.70 on both sides).
+    new_decode_tok_s = hw.measured_llm_q4_decode_tok_s
+    if (hw.measured_llm_q4_decode_tok_s is not None
+            and hw.mem_bandwidth_gbs > 0):
+        new_decode_tok_s = (
+            hw.measured_llm_q4_decode_tok_s
+            * (new_bw / hw.mem_bandwidth_gbs)
+        )
+
     return replace(
         hw,
         name=new_name,
         mem_type=mem_type,
         mem_data_rate_gtps=mem_data_rate_gtps,
         mem_bandwidth_gbs=new_bw,
+        measured_llm_q4_decode_tok_s=new_decode_tok_s,
+        bw_projected=True,
     )
 
 
