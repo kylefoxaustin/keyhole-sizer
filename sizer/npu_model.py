@@ -282,17 +282,26 @@ NPU_MID = Hardware(
 
 NPU_HIGH = Hardware(
     name="NPU High",
-    peak_tops_bf16=275.0, peak_tops_int8=550.0, peak_tops_fp8=550.0,
+    # NPU High is FP-capable silicon: 200 TOPS BF16/FP16 with the standard
+    # 2× INT8 doubling on the same MAC hardware (200 FP16 → 400 INT8 on
+    # narrower datapath). Per [docs] 2026-04-29 16:08 spec — Kyle's
+    # Option (iii): "the chip we used to call Mid (multi-precision) is
+    # the chip we're now calling High; the chip we measured (INT8-only)
+    # is what's now called Mid." So today's High silicon IS the chip
+    # that produced the prior measured_llm_ttft_1k_sec=0.1755 reading
+    # (formerly attributed to "old High"); anchor stays valid.
+    #
     # Same memory class as NPU Mid (128-bit LPDDR5X @ 8.4 GT/s = 134.4
-    # GB/s). NPU High differentiates from Mid on COMPUTE and CAPACITY
-    # rather than memory BW: 1.375× TOPS, 1.33× DRAM, higher compute
-    # efficiency (0.70 vs 0.65), 1.6× TDP. Memory upgrades (LPDDR5T,
-    # LPDDR6) are surfaced separately as upgrade-path overlays via
-    # MEMORY_UPGRADE_OPTIONS — not baked into the tier definition.
-    # Decode (BW-bound) consequently matches Mid on stock memory; the
-    # old 50.46 tok/s measurement re-emerges via the LPDDR5T-11.2
-    # overlay (37.85 × 179.2/134.4 ≈ 50.46). TTFT (compute-bound) keeps
-    # its own measurement since prefill scales with TOPS not BW.
+    # GB/s). High differentiates from Mid on COMPUTE FAMILY (FP-capable
+    # vs INT8-only) and CAPACITY (1.33× DRAM, 1.6× TDP), not memory BW.
+    # Memory upgrades (LPDDR5T, LPDDR6) are surfaced separately as
+    # upgrade-path overlays via MEMORY_UPGRADE_OPTIONS. Decode (BW-bound)
+    # matches Mid on stock memory; TTFT (compute-bound) reflects the
+    # FP-capable silicon's prefill time. The narrative is "Mid is edge
+    # INT8-only silicon. High is the inflection point where FP capability
+    # shows up — and the same silicon naturally delivers 2× INT8
+    # throughput."
+    peak_tops_bf16=200.0, peak_tops_int8=400.0, peak_tops_fp8=400.0,
     mem_bandwidth_gbs=134.4, mem_capacity_gb=32.0,
     mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
     compute_efficiency=0.70, bandwidth_efficiency=0.70,
@@ -301,7 +310,7 @@ NPU_HIGH = Hardware(
     measured_llm_ttft_1k_sec=0.1755,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
     compute_util_factor=0.50, tier_family="LP5X-8.4-128b",
-    llm_prefill_util_factor=0.11,  # Mid's 0.10 × 1.11 compute-efficiency bump per same-class derivation
+    llm_prefill_util_factor=0.10,  # per [docs] 16:08 anchor: 1024 × 6.5 / (400 INT8 × 0.10) = 166 ms calc
 )
 
 # Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
