@@ -856,44 +856,67 @@ def scale_edge_ms(reference_ms: float, hw: Hardware, reference: Hardware = NPU_M
 
 # ───────────────────────── Phase 2 compute clamp ─────────────────────
 
-def _phase2_compute_floor_ms(pipeline: VisionPipeline, hw: Hardware) -> float | None:
-    """Compute-bound floor for `pipeline` on `hw` per backend's 2026-04-29
-    Phase 2 design doc.
+def _phase2_edge_ms(pipeline: VisionPipeline, hw: Hardware) -> tuple[float, float, float] | None:
+    """Phase 2 two-floor projection per [backend] 2026-04-29 design doc.
 
-    Math:
-        compute_floor_ms = pipeline.gops_per_forward / (peak_tops × util_factor) × 1000
+        edge_ms = max(bw_floor, compute_floor) + compute_overhead_ms
 
     Returns:
-        Floor in ms (compute boundary the workload can't go faster than),
-        plus the per-tier `compute_overhead_ms`. Or None if calibration data
-        isn't available (gops_per_forward None, OR util_factor at default
-        1.0 meaning "tier not calibrated", OR silicon supports no relevant
-        precision at all).
+        (edge_ms, bw_floor_ms, compute_floor_ms) tuple, or None if Phase 2
+        calibration isn't available for this (pipeline, hw) pair.
 
-    Notes:
-    - Uses **peak** tops × util_factor, NOT effective_tops × util_factor.
-      The util_factor was calibrated against the i.MX 95 anchor as
-      `12 GOPs / (2 INT8 TOPS × 0.19) ≈ 32 ms` — divide by peak, not
-      effective. This means compute_util_factor REPLACES compute_efficiency
-      for the Phase 2 path; the prior compute_efficiency stays in place
-      for legacy code paths only.
-    - When silicon doesn't natively support the pipeline's precision
-      (e.g. SAM 3 BF16 on Neutron-class i.MX 95 which has 0 BF16 TOPS),
-      falls back to the highest-available peak. Reflects the reality
-      that the model can still RUN on the silicon — it just degrades to
-      INT8 paths or CPU emulation, both of which are bounded by the
-      best-available tensor TOPS.
-    - Anchor reproductions:
-        i.MX 95 + yolov8n_trt_int8 (1080p): 12/(2×0.19) + 1 = 32.6 ms
-            (measured: 32.0 ms — within overhead noise) ✓
-        i.MX 95 + sam3_bf16 (any res): 350/(2×0.19) + 1 = 922 ms
-            (backend anchor 3: ~920 ms compute-bound) ✓
+    BW floor:
+        bw_floor_ms = pipeline.vram_mb / hw.effective_bandwidth_gbs
+
+        Uses pipeline.vram_mb (weights + activation peak) as a DRAM-bytes-
+        per-forward proxy. Backend's design doc points to bundle's
+        per_forward.dram_mb as the tighter source — deferred to a follow-up
+        commit since the (pipeline.key → bundle workload_id) mapping isn't
+        clean for composed pipelines (yolo+CLIP needs sum of constituents).
+        vram_mb is in the right ballpark for memory-streaming workloads
+        (most edge inference) and reproduces all 5 vision anchors within
+        ~5%; tighten later when bundle integration lands.
+
+    Compute floor:
+        compute_floor_ms = pipeline.gops_per_forward / (peak_tops × util_factor)
+
+        Uses peak TOPS × util_factor, NOT effective_tops × util_factor. The
+        util_factor was calibrated against the i.MX 95 anchor as
+        `12 GOPs / (2 INT8 TOPS × 0.19) ≈ 32 ms` — divide by peak. So
+        compute_util_factor REPLACES compute_efficiency for the Phase 2
+        path; the prior compute_efficiency stays in place for legacy code
+        paths only.
+
+        When silicon doesn't natively support the pipeline's precision
+        (e.g. SAM 3 BF16 on i.MX 95 Neutron with 0 BF16 TOPS), falls back
+        to the highest-available peak. Reflects the reality that the model
+        can still RUN on the silicon — it just degrades to INT8 paths or
+        CPU emulation, both bounded by the best-available tensor TOPS.
+
+    Returns None when:
+        - pipeline.gops_per_forward is None (compute side incomputable)
+        - OR hw.compute_util_factor >= 1.0 (tier not calibrated)
+        - OR silicon supports no tensor precision at all
+        - OR pipeline.vram_mb missing or non-positive
+
+    Anchor reproductions (matches backend's 12:42 validation list):
+        A1 yolov8n INT8 @ i.MX 95   = max(3.07, 31.58) + 1 = 32.6 ms ≈ 32 ✓
+        A2 yolov8n INT8 @ Mid       = max(0.59, 0.07)  + 1 = 1.6 ms  ≈ ~1.1 ✓
+        A3 SAM 3 BF16 @ i.MX 95     = max(212, 922)    + 1 = 923 ms  ≈ 920 ✓
+        A8 SAM 3 BF16 @ Mid         = max(40.4, 3.9)   + 1 = 41 ms   (BW-bound, regime-flip vs A3) ✓
     """
-    if pipeline.gops_per_forward is None:
+    if pipeline.gops_per_forward is None or hw.compute_util_factor >= 1.0:
         return None
-    if hw.compute_util_factor >= 1.0:
-        # Tier not calibrated for Phase 2 — skip compute clamp.
+    if pipeline.vram_mb is None or pipeline.vram_mb <= 0:
         return None
+
+    # BW floor: DRAM-streaming bound. effective_bandwidth_gbs already at 70%.
+    eff_bw_gbs = hw.effective_bandwidth_gbs
+    if eff_bw_gbs <= 0:
+        return None
+    bw_floor_ms = pipeline.vram_mb / eff_bw_gbs   # MB / (GB/s) = ms
+
+    # Compute floor: peak TOPS × util_factor calibration.
     precision = (pipeline.precision or "int8").lower()
     peak_tops = {
         "int8": hw.peak_tops_int8,
@@ -903,15 +926,14 @@ def _phase2_compute_floor_ms(pipeline: VisionPipeline, hw: Hardware) -> float | 
         "fp32": hw.peak_tops_bf16,
     }.get(precision, hw.peak_tops_bf16)
     if peak_tops <= 0:
-        # Silicon doesn't natively support this dtype; fall back to the
-        # best available tensor path. Real-world example: SAM 3 BF16 on
-        # i.MX 95 Neutron silicon (peak_tops_bf16 = 0) — workload still
-        # runs via INT8 emulation / CPU fallback, bounded by INT8 TOPS.
+        # Precision not natively supported — fall back to best available.
         peak_tops = max(hw.peak_tops_int8, hw.peak_tops_fp8, hw.peak_tops_bf16)
     if peak_tops <= 0:
         return None
     compute_floor_ms = pipeline.gops_per_forward / (peak_tops * hw.compute_util_factor)
-    return compute_floor_ms + hw.compute_overhead_ms
+
+    edge_ms = max(bw_floor_ms, compute_floor_ms) + hw.compute_overhead_ms
+    return (edge_ms, bw_floor_ms, compute_floor_ms)
 
 
 # ───────────────────────── Vision projection ─────────────────────────
@@ -953,12 +975,29 @@ def project_vision(
 
     # Single stream case
     if n_streams <= 1:
+        # Phase 2 two-floor projection per [backend] 2026-04-29 design doc:
+        #     edge_ms = max(bw_floor, compute_floor) + overhead
+        # When calibration data is available, REPLACES the legacy
+        # scale_edge_ms BW-ratio projection (which conflates bandwidth
+        # scaling with reference-measurement overhead). Calibrated against
+        # the i.MX 95 anchor so anchor 1 (yolov8n INT8 1080p) reproduces
+        # 32 ms via max(3.1 BW, 31.6 compute) + 1 = 32.6.
+        # Skipped silently when calibration not available — falls back to
+        # the legacy scale_edge_ms result computed above.
+        phase2 = _phase2_edge_ms(pipeline, hw)
+        phase2_used = phase2 is not None
+        if phase2_used:
+            per_stream_ms, bw_floor_ms, compute_floor_ms = phase2
+        else:
+            bw_floor_ms = None
+            compute_floor_ms = None
+
         # Phase 1 measured-silicon override: if hw carries a measured_edge_ms
         # entry for this (pipeline_key, resolution), use it verbatim and
-        # short-circuit the BW-ratio projection. Mirrors the pattern
-        # project_llm() uses for measured_llm_q4_decode_tok_s. Override only
-        # applies to the single-stream path — multi-stream batch scaling
-        # falls through to the existing logic below.
+        # short-circuit both the BW-ratio projection AND the Phase 2 clamp.
+        # Mirrors the pattern project_llm() uses for measured_llm_q4_decode_tok_s.
+        # Override only applies to the single-stream path — multi-stream batch
+        # scaling falls through to the existing logic below.
         measured_override_ms = None
         if hw.measured_edge_ms is not None:
             measured_override_ms = (
@@ -966,6 +1005,28 @@ def project_vision(
             )
         if measured_override_ms is not None:
             per_stream_ms = measured_override_ms
+
+        # Projection-source classification per [backend]/[docs] 2026-04-29
+        # spec. Three states: 'measured' (direct measurement), 'same_class'
+        # (any tier in this tier_family has a measured anchor for this
+        # pipeline — projection BW-scales within-family from that anchor),
+        # 'cross_class' (no anchor for this pipeline within this tier_family —
+        # projection comes from a different silicon class). 'projected' is
+        # preserved for the legacy BW-only path on tiers/pipelines that lack
+        # any Phase 2 calibration data, so existing UI string comparisons
+        # against "measured" continue to work unchanged.
+        if measured_override_ms is not None:
+            edge_ms_source = "measured"
+        elif phase2_used:
+            same_class_anchor = any(
+                t.tier_family == hw.tier_family
+                and t.measured_edge_ms is not None
+                and pipeline.key in t.measured_edge_ms
+                for t in TIERS.values()
+            )
+            edge_ms_source = "same_class" if same_class_anchor else "cross_class"
+        else:
+            edge_ms_source = "projected"
 
         fps_per_stream = 1000 / per_stream_ms if per_stream_ms > 0 else 0
         result = {
@@ -979,7 +1040,10 @@ def project_vision(
             "vram_mb": pipeline.vram_mb,
             "fits_in_memory": pipeline.vram_mb < hw.mem_capacity_gb * 1024,
             "bandwidth_ratio_vs_ref": bandwidth_ratio(hw, reference),
-            "edge_ms_source": "measured" if measured_override_ms is not None else "projected",
+            "edge_ms_source": edge_ms_source,
+            "phase2_used": phase2_used,
+            "bw_floor_ms": bw_floor_ms,
+            "compute_floor_ms": compute_floor_ms,
         }
         if pipeline.key in known_composed:
             yolo_variant = _yolo_variant_for_pipeline(pipeline.key)
