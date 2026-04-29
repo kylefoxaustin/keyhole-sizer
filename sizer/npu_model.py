@@ -258,14 +258,24 @@ NPU_LOW_LP5X = Hardware(
 
 NPU_MID = Hardware(
     name="NPU Mid",
-    peak_tops_bf16=200.0, peak_tops_int8=400.0, peak_tops_fp8=400.0,
+    # NPU Mid is INT8-only silicon — no native floating-point tensor ops.
+    # Per [docs] 2026-04-29 14:58 correction: the actual measured chip is
+    # 200 TOPS INT8 only, NOT BF16/FP8/FP16 multi-precision as previously
+    # labeled. Existing Mid LLM anchor (37.85 tok/s / 351 ms TTFT) was
+    # measured on INT8/INT4 silicon, so the locked calibration constants
+    # (llm_prefill_util_factor=0.10, llm_decode_bw_realization default 1.0)
+    # are already INT8-native — only the spec label needs correcting.
+    peak_tops_bf16=0.0, peak_tops_int8=200.0, peak_tops_fp8=0.0,
     mem_bandwidth_gbs=134.4, mem_capacity_gb=24.0,
     mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
     compute_efficiency=0.65, bandwidth_efficiency=0.70,
     tdp_watts=25.0,
     measured_llm_q4_decode_tok_s=37.85,
     measured_llm_ttft_1k_sec=0.351,
-    capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
+    # Reused from i.MX 95 / Low-LP5-64bit — same INT8-only capability
+    # shape (different silicon family but identical runtime behavior:
+    # int8 tensor_native, FP dtypes unsupported).
+    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
     compute_util_factor=0.45, tier_family="LP5X-8.4-128b",
     llm_prefill_util_factor=0.10,  # calibrated against the Mid TTFT 351 ms anchor
 )
