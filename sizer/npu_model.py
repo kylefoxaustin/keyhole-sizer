@@ -228,7 +228,7 @@ NPU_HIGH = Hardware(
     name="NPU High",
     peak_tops_bf16=275.0, peak_tops_int8=550.0, peak_tops_fp8=550.0,
     mem_bandwidth_gbs=179.2, mem_capacity_gb=32.0,
-    mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=11.2,
+    mem_bus_width_bits=128, mem_type="LPDDR5T", mem_data_rate_gtps=11.2,
     compute_efficiency=0.70, bandwidth_efficiency=0.70,
     tdp_watts=40.0,
     measured_llm_q4_decode_tok_s=50.46,

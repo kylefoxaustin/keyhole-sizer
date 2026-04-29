@@ -250,7 +250,7 @@ with st.sidebar:
              "Low-LP5-64bit = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s, 2× the 32-bit variant). "
              "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5-64bit). "
              "Mid = 128-bit LPDDR5X @ 8.4 GT/s (Keyhole shipping target, BF16/FP8-capable). "
-             "High = 128-bit LPDDR5X @ 11.2 GT/s (vendor high-bin). "
+             "High = 128-bit LPDDR5T @ 11.2 GT/s (Samsung's >10 GT/s LPDDR5-class extension; vendor high-bin). "
              "RTX 5090 = the reference silicon every BW-scaling projection here is derived from "
              "(512-bit GDDR7 @ 28 GT/s, 1792 GB/s). Blackwell-TRT 10.16 bake-off measurements "
              "for 5 pipelines surface directly via the measured-silicon override. "
@@ -314,7 +314,7 @@ with st.sidebar:
         # by their specific memory generation, and 5090 is reference.
         if tier in ("NPU Mid", "NPU High"):
             from sizer.npu_model import LPDDR6_UPGRADE_OPTIONS, hw_with_memory
-            stock_label = f"{hw.mem_type} @ {hw.mem_data_rate_gtps:.1f} GT/s (stock)"
+            stock_label = "Stock (no upgrade)"
             mem_options = [(stock_label, hw.mem_type, hw.mem_data_rate_gtps)] + \
                            LPDDR6_UPGRADE_OPTIONS
             mem_choice = st.selectbox(
