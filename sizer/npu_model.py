@@ -854,6 +854,66 @@ def scale_edge_ms(reference_ms: float, hw: Hardware, reference: Hardware = NPU_M
     return reference_ms / r / q
 
 
+# ───────────────────────── Phase 2 compute clamp ─────────────────────
+
+def _phase2_compute_floor_ms(pipeline: VisionPipeline, hw: Hardware) -> float | None:
+    """Compute-bound floor for `pipeline` on `hw` per backend's 2026-04-29
+    Phase 2 design doc.
+
+    Math:
+        compute_floor_ms = pipeline.gops_per_forward / (peak_tops × util_factor) × 1000
+
+    Returns:
+        Floor in ms (compute boundary the workload can't go faster than),
+        plus the per-tier `compute_overhead_ms`. Or None if calibration data
+        isn't available (gops_per_forward None, OR util_factor at default
+        1.0 meaning "tier not calibrated", OR silicon supports no relevant
+        precision at all).
+
+    Notes:
+    - Uses **peak** tops × util_factor, NOT effective_tops × util_factor.
+      The util_factor was calibrated against the i.MX 95 anchor as
+      `12 GOPs / (2 INT8 TOPS × 0.19) ≈ 32 ms` — divide by peak, not
+      effective. This means compute_util_factor REPLACES compute_efficiency
+      for the Phase 2 path; the prior compute_efficiency stays in place
+      for legacy code paths only.
+    - When silicon doesn't natively support the pipeline's precision
+      (e.g. SAM 3 BF16 on Neutron-class i.MX 95 which has 0 BF16 TOPS),
+      falls back to the highest-available peak. Reflects the reality
+      that the model can still RUN on the silicon — it just degrades to
+      INT8 paths or CPU emulation, both of which are bounded by the
+      best-available tensor TOPS.
+    - Anchor reproductions:
+        i.MX 95 + yolov8n_trt_int8 (1080p): 12/(2×0.19) + 1 = 32.6 ms
+            (measured: 32.0 ms — within overhead noise) ✓
+        i.MX 95 + sam3_bf16 (any res): 350/(2×0.19) + 1 = 922 ms
+            (backend anchor 3: ~920 ms compute-bound) ✓
+    """
+    if pipeline.gops_per_forward is None:
+        return None
+    if hw.compute_util_factor >= 1.0:
+        # Tier not calibrated for Phase 2 — skip compute clamp.
+        return None
+    precision = (pipeline.precision or "int8").lower()
+    peak_tops = {
+        "int8": hw.peak_tops_int8,
+        "fp8":  hw.peak_tops_fp8,
+        "bf16": hw.peak_tops_bf16,
+        "fp16": hw.peak_tops_bf16,
+        "fp32": hw.peak_tops_bf16,
+    }.get(precision, hw.peak_tops_bf16)
+    if peak_tops <= 0:
+        # Silicon doesn't natively support this dtype; fall back to the
+        # best available tensor path. Real-world example: SAM 3 BF16 on
+        # i.MX 95 Neutron silicon (peak_tops_bf16 = 0) — workload still
+        # runs via INT8 emulation / CPU fallback, bounded by INT8 TOPS.
+        peak_tops = max(hw.peak_tops_int8, hw.peak_tops_fp8, hw.peak_tops_bf16)
+    if peak_tops <= 0:
+        return None
+    compute_floor_ms = pipeline.gops_per_forward / (peak_tops * hw.compute_util_factor)
+    return compute_floor_ms + hw.compute_overhead_ms
+
+
 # ───────────────────────── Vision projection ─────────────────────────
 
 def project_vision(
