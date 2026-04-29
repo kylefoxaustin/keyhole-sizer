@@ -1224,13 +1224,42 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
     active_bytes = ACTIVE_PARAMS * bpp
     decode_ceiling = hw.effective_bandwidth_gbs * 1e9 / active_bytes
 
+    # Projection-source classification per [backend]/[docs] 2026-04-29
+    # spec. Three states: 'measured' (direct vendor/silicon measurement on
+    # this tier), 'same_class' (BW-scaled within memory class from a
+    # measured anchor — typically memory-upgrade overlay variants like
+    # Mid + LPDDR6-14 derived from Mid stock), 'cross_class' (no anchor in
+    # the same memory class — BW-ceiling × efficiency-constant fallback,
+    # known to be wildly off when prefill is compute-bound or decode hits
+    # a tier-class boundary). Mirrors project_vision()'s edge_ms_source
+    # field so UI badges work uniformly across vision and LLM tiles.
     if hw.measured_llm_q4_decode_tok_s is not None:
+        if getattr(hw, "bw_projected", False):
+            # `hw_with_memory()` clone of an anchored tier — the
+            # measured_llm field was BW-scaled by the new/stock peak-BW
+            # ratio, holding TTFT at stock. Memory-upgrade overlay stays
+            # in the same memory class as its parent, so anchor is in
+            # within-class scaling territory.
+            llm_source = "same_class"
+        else:
+            llm_source = "measured"
         # Use vendor-measured Q4_K_M and scale to other quants by byte ratio
         q4_bpp = BYTES_PER_PARAM["Q4_K_M"]
         base_decode = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
         base_ttft = hw.measured_llm_ttft_1k_sec
     else:
-        # Fall back to NPU-Mid-class efficiency (~60% of BW ceiling)
+        # No anchor in this hw's tier_family — projection is a cross-class
+        # extrapolation from NPU_MID's BW-ceiling × efficiency assumption
+        # (decode) plus a TOPS-ratio TTFT scale. Marked 🔴 to reflect that
+        # the slope assumption breaks at class boundaries (per Kyle's
+        # 2026-04-29 framing). Fallback math unchanged — full two-floor
+        # Phase 2 rewrite (decode_bw_floor + prefill_compute_floor) is a
+        # follow-up commit pending Mid TTFT calibration reconciliation
+        # (preliminary math: compute_floor 74 ms vs measured 351 ms
+        # suggests LLM-side util_factor differs from vision's; need
+        # backend's confirmed calibration before shipping the math
+        # change).
+        llm_source = "cross_class"
         efficiency = 0.60
         base_decode = decode_ceiling * efficiency
         compute_ratio = hw.effective_tops_bf16 / NPU_MID.effective_tops_bf16
@@ -1270,6 +1299,7 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         "rag_prefill_sec": rag_prefill_sec,
         "rag_decode_sec": rag_decode_sec,
         "rag_total_sec": rag_total_sec,
+        "llm_source": llm_source,
     }
 
 
