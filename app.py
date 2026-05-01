@@ -433,7 +433,7 @@ with st.sidebar:
           "yolov8n_only_fp8"],
          "yolov8n_trt_fp8_1hz_clip"),
         ("INT8 vendor-comparison",
-         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128"],
+         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128", "resnet50v1_int8_224"],
          "yolov8n_trt_int8_coco128"),
         ("ViT alternatives (what-if)",
          ["rtdetr_l_pytorch_fp16", "detr_resnet50_pytorch_fp16",

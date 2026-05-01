@@ -265,6 +265,10 @@ NPU_LOW_LP5X = Hardware(
     # vram_mb=55; measured 500 FPS implies ~47 MB DRAM streaming).
     measured_edge_ms={
         "yolov8n_trt_int8_coco128": {"1080p": 2.0},
+        # ResNet-50v1 INT8 224×224: 1125 inf/s = 0.889 ms (Kyle 2026-05-01).
+        # Constant-time at 224×224 input, so anchor applies at all three
+        # camera-resolution slots.
+        "resnet50v1_int8_224": {"720p": 0.889, "1080p": 0.889, "4K": 0.889},
     },
 )
 
@@ -748,6 +752,24 @@ PIPELINES = {
         vram_mb=55,
         note="~100 FPS @ 720p edge, recall 0.912 (-9% vs FP16). Representative of credible vendor INT8 numbers — use this for apples-to-apples against NPU silicon benchmarks that disclose their calibration dataset.",
         gops_per_forward=12.0, precision="int8",
+    ),
+    # ResNet-50v1 INT8 image classification — canonical vendor-comparison
+    # benchmark for the 100-TOPS edge-NPU class. Added 2026-05-01 to support
+    # Kyle's anchor measurement (1125 inf/s on Low-LP5X-class silicon).
+    # Constant-time at 224×224 input regardless of camera resolution.
+    "resnet50v1_int8_224": VisionPipeline(
+        key="resnet50v1_int8_224",
+        label="ResNet-50v1 INT8 (image classification, 224×224)",
+        description="Standard ImageNet image-classification benchmark — 25.5M params, 4.1 GFLOPs/forward. Canonical vendor-comparison shape; constant-time at 224×224 input regardless of camera resolution.",
+        # 5090-projected via Phase 2 first principles (4.1 GOPs / (419 INT8 ×
+        # 0.85) = 0.012 ms compute, 30 MB / 1523 GB/s = 0.020 ms BW; total
+        # ~0.32 ms on 5090). Mid-reference value below scales by typical
+        # BW ratio + util_factor. Same value at all three resolutions since
+        # the model input is fixed at 224×224.
+        edge_ms_720p=1.32, edge_ms_1080p=1.32, edge_ms_4k=1.32,
+        vram_mb=30,
+        note="Image classification (no bbox/seg head). 1000-class softmax output. Common vendor benchmark — useful as a 'compute-light, BW-modest' anchor on the 100-TOPS edge-NPU class.",
+        gops_per_forward=4.1, precision="int8",
     ),
     # ─────────── ViT alternatives (Kyle 2026-04-25 what-if) ──────────────
     # Could vision transformers replace YOLO-seg + SAM 3? Two roles, four
