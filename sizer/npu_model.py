@@ -254,6 +254,18 @@ NPU_LOW_LP5X = Hardware(
     tdp_watts=10.0,
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
     compute_util_factor=0.19, tier_family="LP5X-8.4-64b",
+    # First measured anchor in the 100-TOPS edge-NPU class (Kyle 2026-05-01).
+    # Vanilla yolov8n basic detection INT8 = 500 inferences/sec = 2.0 ms.
+    # Closes the largest measurement gap from yesterday's bake-off
+    # discussion ([backend] 13:31 / Kyle's "one anchor per silicon-class
+    # first" framing): previously every Low/Mid/High projection was
+    # cross-class extrapolation from i.MX 95 (2 TOPS) or 5090 (419 TOPS).
+    # This anchor validates compute_util_factor=0.19 + 1 ms overhead at
+    # this class within ~13% (prior projection was 461 FPS with
+    # vram_mb=55; measured 500 FPS implies ~47 MB DRAM streaming).
+    measured_edge_ms={
+        "yolov8n_trt_int8_coco128": {"1080p": 2.0},
+    },
 )
 
 NPU_MID = Hardware(
