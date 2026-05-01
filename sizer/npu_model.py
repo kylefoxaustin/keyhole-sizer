@@ -372,6 +372,12 @@ RTX_5090_REFERENCE = Hardware(
         # bakeoff/*.json — override path is additive-only, no risk.
         "yolov8n_only_fp8":           {"720p": 0.49, "1080p": 0.49, "4K": 0.51},
         "yolov8n_trt_int8_coco128":   {"1080p": 0.62},
+        # ResNet-50v1 INT8 224×224 — measured via TRT INT8 PTQ on 5090
+        # ([backend] 4caa000, 2026-05-01). 0.325 ms p50 sustained = 3073
+        # inf/s. Constant across resolutions since model input is fixed
+        # at 224×224. Slope test vs Low-LP5X anchor (1125 FPS): measured
+        # ratio 2.73× ≈ Phase 2 first-principles prediction 2.78×.
+        "resnet50v1_int8_224":        {"720p": 0.325, "1080p": 0.325, "4K": 0.325},
         "yolo_only_fp8":              {"720p": 0.68},  # yolo11s-seg FP8 TRT
         "sam3_bf16":                  {"720p": 95.0, "1080p": 95.0, "4K": 95.0},
         "efficientsam3_es_ev_s_bf16": {"720p": 27.0, "1080p": 44.0, "4K": 138.0},
@@ -761,13 +767,23 @@ PIPELINES = {
         key="resnet50v1_int8_224",
         label="ResNet-50v1 INT8 (image classification, 224×224)",
         description="Standard ImageNet image-classification benchmark — 25.5M params, 4.1 GFLOPs/forward. Canonical vendor-comparison shape; constant-time at 224×224 input regardless of camera resolution.",
-        # 5090-projected via Phase 2 first principles (4.1 GOPs / (419 INT8 ×
-        # 0.85) = 0.012 ms compute, 30 MB / 1523 GB/s = 0.020 ms BW; total
-        # ~0.32 ms on 5090). Mid-reference value below scales by typical
-        # BW ratio + util_factor. Same value at all three resolutions since
-        # the model input is fixed at 224×224.
-        edge_ms_720p=1.32, edge_ms_1080p=1.32, edge_ms_4k=1.32,
-        vram_mb=30,
+        # 5090 measured 0.325 ms (TRT INT8 PTQ, [backend] 4caa000). Mid
+        # reference below = 5090 ms × BW ratio (1523/94 = 16.2) ≈ 5.3 ms
+        # in pure BW projection — but since the workload is BW-bound on
+        # Mid (Phase 2 max(BW=1.0, compute=0.046) + 1 ms = 2.0 ms), use
+        # that as the canonical Mid edge_ms. Same value across all three
+        # resolutions since the model input is fixed at 224×224.
+        edge_ms_720p=2.0, edge_ms_1080p=2.0, edge_ms_4k=2.0,
+        # vram_mb refined from 30 (rough estimate) to ncu-measured 94.15
+        # per [backend] 4caa000 (RTX 5090 ncu profile, 10 forwards × 110
+        # kernels). This is "DRAM bytes streamed per forward" via the
+        # 5090's TRT engine with Blackwell's L2 cache behavior. May not
+        # transfer perfectly to edge silicon with smaller caches — but
+        # it's the most authoritative measurement we have, and Phase 2's
+        # BW floor uses this number directly. Anchored cells (Low-LP5X +
+        # 5090) are unaffected via Phase 1 override; un-anchored Mid/High
+        # projections become more conservative (758 → ~500 FPS on Mid).
+        vram_mb=94,
         note="Image classification (no bbox/seg head). 1000-class softmax output. Common vendor benchmark — useful as a 'compute-light, BW-modest' anchor on the 100-TOPS edge-NPU class.",
         gops_per_forward=4.1, precision="int8",
     ),

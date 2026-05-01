@@ -162,6 +162,13 @@ PIPELINE_STAGES: dict[str, dict[str, Any]] = {
         "yolo_type":  "Yolov8n-seg INT8 TRT (coco128-seg PTQ)",
         "seg_type":   None,
     },
+    "resnet50v1_int8_224": {
+        # Pure image classification — no detector head. Treated as
+        # "one_model" (single-forward pipeline) for KPI categorization.
+        "category":   "one_model",
+        "yolo_type":  "ResNet-50v1 INT8 TRT (ImageNet 224×224)",
+        "seg_type":   None,
+    },
 
     # ─── ViT alternatives (Kyle 2026-04-25 what-if) ───────────────────
     # Camera-stream candidates: single-model object detectors. Treated
