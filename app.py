@@ -844,7 +844,8 @@ if llm_enabled:
     if _capability == "unsupported":
         _llm_dtype_supported = False
 
-llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share)
+llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
+                    model_key=llm_model_key)
        if (llm_enabled and _llm_dtype_supported) else None)
 # Apply per-model BW-scaling: project_llm() is anchored to the perf
 # reference model (Qwen3-30B-A3B MoE 3B-active). For models with
@@ -1615,10 +1616,13 @@ with tab_overview:
             st.subheader(f"Decode tok/s vs NPU tier — {WORKLOAD_CATEGORIES[llm_workload]['label']}")
             tier_llm = []
             for name, t_hw in TIERS.items():
-                l = project_llm(t_hw, quant, workload=llm_workload)
+                l = project_llm(t_hw, quant, workload=llm_workload,
+                                model_key=llm_model_key)
                 # Same per-model BW scaling as the headline metric:
                 # otherwise the per-tier chart shows MoE numbers when
-                # the user has selected the dense model.
+                # the user has selected the dense model. (Per-cell
+                # anchor cells skip the scaling internally per the
+                # 'measured' source guard added 2026-05-01.)
                 l = scale_llm_projection(l, LLM_MODELS[llm_model_key],
                                           hw_mem_capacity_gb=t_hw.mem_capacity_gb)
                 tier_llm.append(dict(tier=name, tok_s=l["decode_tok_s"]))

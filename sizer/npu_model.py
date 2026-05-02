@@ -36,8 +36,26 @@ class Hardware:
 
     # Optional: empirical LLM decode tok/s at Q4_K_M (3B active MoE) — used
     # if set, otherwise computed from bandwidth ceiling × measured efficiency.
+    # NOTE: these flat fields are the LEGACY "Skippy MoE Q4 only" path,
+    # kept for back-compat (hw_with_memory BW-scales them, several read
+    # sites). For richer per-(model, quant) anchors (e.g. Qwen 2.5 7B Q4
+    # on RTX 5090 = 183.9 tok/s), see `measured_llm` dict below.
     measured_llm_q4_decode_tok_s: float | None = None
     measured_llm_ttft_1k_sec: float | None = None
+
+    # Per-(model_key, quant) measured LLM anchor dict — added 2026-05-01
+    # for cross-app schema parity with PAI sizer's e69237b. Nested shape:
+    #     hw.measured_llm[model_key][quant] = {"decode_tok_s": ..., "prefill_tok_s": ...}
+    # Resolution order in project_llm: (1) measured_llm[model_key][quant]
+    # if populated → 🟢 measured; (2) measured_llm_q4_decode_tok_s legacy
+    # path if model is the Skippy-MoE-Q4 implicit reference → 🟢
+    # measured_anchor; (3) cross-class fallback. Today populated only on
+    # RTX_5090_REFERENCE with the 5 Qwen 2.5 dense quant cells from
+    # backend's 20:08 weekend bake-off + the Skippy MoE Q4 5090
+    # reference (~250 tok/s). NPU tiers (Mid, High, Low-LP5-64bit) keep
+    # their existing flat-field anchors for now — migrating them to
+    # this dict is a separate cleanup pass.
+    measured_llm: dict[str, dict[str, dict[str, float]]] | None = None
 
     # True when this Hardware was synthesized via `hw_with_memory()` (i.e.
     # represents a memory-only what-if upgrade, not stock silicon). UI
@@ -366,6 +384,26 @@ RTX_5090_REFERENCE = Hardware(
     # 🔴 cross_class to 🟢 measured_anchor.
     measured_llm_q4_decode_tok_s=249.8,
     measured_llm_ttft_1k_sec=0.165,
+    # Per-(model_key, quant) measured LLM anchors per [backend] 2026-05-01
+    # 20:08 weekend bake-off campaign. Source-of-truth for non-Skippy-MoE-Q4
+    # cells on 5090; project_llm consults this dict first when model_key is
+    # passed. Cross-app schema parity with PAI sizer's e69237b. Files in
+    # keyhole repo: data/output/bakeoff/llm_anchors/<model>/<quant>.json.
+    measured_llm={
+        "skippy_finetune": {  # Skippy MoE 30B-A3B Q4 fine-tune
+            "Q4_K_M": {"decode_tok_s": 249.8, "prefill_tok_s": 6228.0},
+        },
+        "qwen25_7b_dense": {
+            "Q4_K_M": {"decode_tok_s": 183.9, "prefill_tok_s": 7226.0},
+            "Q5_K_M": {"decode_tok_s": 170.0, "prefill_tok_s": 7215.0},
+            "Q8_0":   {"decode_tok_s": 137.2, "prefill_tok_s": 7478.0},
+        },
+        "qwen25_32b_dense": {
+            "Q4_K_M": {"decode_tok_s": 52.7,  "prefill_tok_s": 1936.0},
+            "Q5_K_M": {"decode_tok_s": 47.7,  "prefill_tok_s": 1888.0},
+            # No Q8_0 — won't fit on 5090's 32 GB VRAM.
+        },
+    },
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
         # Add more entries here as backend pulls them from data/output/
@@ -1351,8 +1389,16 @@ def workload_multiplier(category: str) -> dict:
 
 def project_llm(hw: Hardware, quant: str = "Q4_K_M",
                  workload: str = "plain_chat",
-                 npu_share: float | None = None) -> dict:
-    """Project LLM decode tok/s + TTFT for Qwen3-30B-A3B on `hw`.
+                 npu_share: float | None = None,
+                 model_key: str | None = None) -> dict:
+    """Project LLM decode tok/s + TTFT for the selected model on `hw`.
+
+    `model_key` (added 2026-05-01) — when provided, project_llm consults
+    `hw.measured_llm[model_key][quant]` first for richer per-(model, quant)
+    anchors (e.g. RTX 5090 + Qwen 2.5 7B Q4 = 183.9 tok/s measured directly).
+    When None, falls back to the legacy Skippy-MoE-Q4-implicit path via the
+    flat `measured_llm_q4_decode_tok_s` field. Cross-app schema parity with
+    PAI sizer's e69237b.
 
     `npu_share` ∈ (0, 1] — fraction of the NPU's effective DRAM bandwidth
     available to this workload, modeling SoC contention (display, camera,
@@ -1362,10 +1408,11 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
     bus. When None, falls back to `hw.npu_share_default` (1.0 for 5090,
     0.75 for NPU tiers per [docs] 2026-04-29 14:38).
 
-    If hw has `measured_llm_q4_decode_tok_s`, use it directly (vendor actual);
-    scale to other quants by (Q4 bytes/param) / (quant bytes/param). If not,
-    fall back to: ceiling = effective_BW / (active_params × bytes_per_param)
-    × reference efficiency drawn from NPU Mid's empirical efficiency (0.60).
+    Resolution order:
+      1. hw.measured_llm[model_key][quant] → 🟢 measured (per-cell)
+      2. hw.measured_llm_q4_decode_tok_s legacy path (Skippy-MoE-Q4 implicit) → 🟢 measured_anchor
+         OR 🟡 same_class_anchor when hw.bw_projected is True (memory-upgrade variant)
+      3. Cross-class fallback (two-floor max(BW, compute) + overhead) → 🟠 cross_class
 
     `workload` ∈ WORKLOAD_CATEGORIES. The vendor Q4 benchmark is a
     plain-chat-like condition; other categories apply the 5090-measured
@@ -1380,15 +1427,35 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
     decode_ceiling = hw.effective_bandwidth_gbs * 1e9 / active_bytes
 
     # Projection-source classification per [backend]/[docs] 2026-04-29
-    # spec. Three states: 'measured' (direct vendor/silicon measurement on
-    # this tier), 'same_class' (BW-scaled within memory class from a
-    # measured anchor — typically memory-upgrade overlay variants like
-    # Mid + LPDDR6-14 derived from Mid stock), 'cross_class' (no anchor in
-    # the same memory class — BW-ceiling × efficiency-constant fallback,
-    # known to be wildly off when prefill is compute-bound or decode hits
-    # a tier-class boundary). Mirrors project_vision()'s edge_ms_source
-    # field so UI badges work uniformly across vision and LLM tiles.
-    if hw.measured_llm_q4_decode_tok_s is not None:
+    # spec. Resolution order:
+    #   1. hw.measured_llm[model_key][quant] → 🟢 measured (per-cell anchor)
+    #   2. hw.measured_llm_q4_decode_tok_s legacy → 🟢 measured_anchor / 🟡 same_class_anchor
+    #   3. Cross-class fallback → 🟠 cross_class
+    #
+    # Phase 1a — per-(model, quant) anchor. Added 2026-05-01 via the
+    # measured_llm dict (PAI's e69237b shape). Today this fires only on
+    # RTX 5090 for the 5 Qwen + Skippy MoE Q4 cells; expandable as more
+    # measurements come in.
+    per_cell_anchor = None
+    if model_key and hw.measured_llm and model_key in hw.measured_llm:
+        per_cell_anchor = hw.measured_llm[model_key].get(quant)
+    if per_cell_anchor is not None:
+        llm_source = "measured" if not getattr(hw, "bw_projected", False) else "same_class_anchor"
+        base_decode = per_cell_anchor["decode_tok_s"]
+        # Derive TTFT @ 1K from prefill_tok_s if present; else fall back to
+        # the tier's flat-field TTFT (best-available proxy when prefill
+        # rate isn't supplied for this cell).
+        prefill_rate = per_cell_anchor.get("prefill_tok_s")
+        if prefill_rate and prefill_rate > 0:
+            base_ttft = 1024.0 / prefill_rate
+        else:
+            base_ttft = hw.measured_llm_ttft_1k_sec or 0.0
+        # NPU_share scaling on the BW-bound decode component. Source flag
+        # stays 🟢 per orthogonal-axis convention (527fc9b); the tile
+        # marker "(@ X% NPU)" surfaces the operating-point what-if.
+        if share < 1.0:
+            base_decode *= share
+    elif hw.measured_llm_q4_decode_tok_s is not None:
         if getattr(hw, "bw_projected", False):
             # `hw_with_memory()` clone of an anchored tier — the
             # measured_llm field was BW-scaled by the new/stock peak-BW

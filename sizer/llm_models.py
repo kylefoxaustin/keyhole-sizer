@@ -391,11 +391,24 @@ def scale_llm_projection(
     size and recomputes `fits_in_memory` if `hw_mem_capacity_gb`
     is supplied (the reference model's size baked into project_llm
     won't be accurate for the dense entry).
+
+    **Guard added 2026-05-01:** when project_llm fired the per-cell
+    anchor path (`llm_source == 'measured'` — e.g. RTX 5090 + Qwen 2.5
+    7B Q4 reads 183.9 directly from `hw.measured_llm[model_key][quant]`),
+    the returned values are already model-specific. Re-scaling would
+    double-apply the per-model BW ratio and corrupt the measurement.
+    Skip the scaling step in that case but still set gguf_size /
+    fits_in_memory from the model dict.
     """
     scaled = dict(llm_proj)
     scaled["gguf_size_gb"] = model.size_gb
     if hw_mem_capacity_gb is not None:
         scaled["fits_in_memory"] = model.size_gb <= hw_mem_capacity_gb
+
+    # Per-cell measured anchor fired → values are already model-specific.
+    # Skip the per-model BW scaling.
+    if scaled.get("llm_source") == "measured":
+        return scaled
 
     factor = perf_scale_factor(model)
     if factor == 1.0:
