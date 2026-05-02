@@ -564,8 +564,14 @@ with st.sidebar:
         _production_model = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
         _delta_vs_prod = accuracy_delta_pp(_model, _production_model)
         _is_production = (llm_model_key == PRODUCTION_REFERENCE_KEY)
-        _delta_sign = "+" if _delta_vs_prod >= 0 else ""
-        if _is_production:
+        _delta_sign = "+" if (_delta_vs_prod is not None and _delta_vs_prod >= 0) else ""
+        if _model.pass_rate is None:
+            # Perf-comparison-only entries (e.g. Qwen 2.5 7B / 32B dense)
+            # — no Skippy v2 prompt-set evaluation. Surface that explicitly.
+            st.caption(
+                f"_Performance-comparison reference — no Skippy v2 prompt-set evaluation._"
+            )
+        elif _is_production:
             st.caption(
                 f"**{_model.pass_rate*100:.1f}%** pass rate "
                 f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
@@ -614,16 +620,21 @@ with st.sidebar:
             _catalog_rows: list[dict] = []
             for _k, _m in LLM_MODELS.items():
                 _row_delta = accuracy_delta_pp(_m, _production_model)
-                _row_delta_str = (
-                    "—  (reference)" if _k == PRODUCTION_REFERENCE_KEY
-                    else f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
-                )
+                if _k == PRODUCTION_REFERENCE_KEY:
+                    _row_delta_str = "—  (reference)"
+                elif _row_delta is None:
+                    _row_delta_str = "perf ref"
+                else:
+                    _row_delta_str = f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
                 _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
                 _catalog_rows.append({
                     "Model":         _row_label,
-                    "Pass rate":     f"{_m.pass_rate*100:.1f}%",
-                    "Δ vs production": _row_delta_str,
-                    "n":             f"{_m.pass_n_passes}/{_m.pass_n_total}",
+                    "Pass rate":     (f"{_m.pass_rate*100:.1f}%"
+                                       if _m.pass_rate is not None else "—"),
+                    "Δ vs production": (_row_delta_str if _m.pass_rate is not None
+                                          else "perf ref"),
+                    "n":             (f"{_m.pass_n_passes}/{_m.pass_n_total}"
+                                       if _m.pass_n_passes is not None else "—"),
                     "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
                 })
             st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
@@ -1083,13 +1094,18 @@ else:
     )
     c4.metric(
         label="Pass rate (Skippy v2 eval)",
-        value=f"{_model.pass_rate*100:.1f}%",
-        delta=f"{_model.pass_n_passes}/{_model.pass_n_total} prompts",
+        value=(f"{_model.pass_rate*100:.1f}%"
+               if _model.pass_rate is not None else "n/a"),
+        delta=(f"{_model.pass_n_passes}/{_model.pass_n_total} prompts"
+               if _model.pass_n_passes is not None
+               else "perf-comparison reference (no Skippy v2 eval)"),
         delta_color="off",
         help=(
             f"Accuracy of the selected model ({_model.label}) on the v2 prompt "
             f"set with RAG enabled. Sidebar's 'Accuracy details' expander has "
-            f"the full breakdown."
+            f"the full breakdown. Perf-comparison-only entries (e.g. Qwen 2.5 "
+            f"7B / 32B dense) display 'n/a' since they weren't evaluated on "
+            f"the Skippy v2 prompt set."
         ),
     )
 

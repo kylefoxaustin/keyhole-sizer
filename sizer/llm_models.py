@@ -45,7 +45,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class LLMModel:
-    """One selectable LLM with accuracy stats vs the v2 prompt set."""
+    """One selectable LLM with optional accuracy stats + 5090 perf anchors."""
     key: str
     label: str
     family: str
@@ -54,29 +54,53 @@ class LLMModel:
     active_params_b: float
     quant: str
     size_gb: float
-    fine_tune: str            # 'domain LoRA (NXP datasheets)' / 'public reasoning-tune' / etc.
-    pass_rate: float          # overall, RAG on
-    pass_n_passes: int
-    pass_n_total: int
     description: str
     deck_bullet: str          # the one-line framing for the deck/UI
+
+    # Accuracy fields are optional — Skippy v2 prompt-set evaluation only
+    # exists for production candidates. Performance-comparison entries
+    # (e.g., Qwen 2.5 7B / 32B dense, added 2026-05-01 for cross-model
+    # bandwidth-vs-compute calibration) leave these None.
+    fine_tune: str = ""
+    pass_rate: float | None = None
+    pass_n_passes: int | None = None
+    pass_n_total: int | None = None
     # Per-category Δ vs the production reference (sign convention:
     # positive = THIS wins). Keyed by Skippy v2 prompt category.
-    # Categories not present = flat. Production reference's own dict
-    # is empty (it can't differ from itself).
-    category_deltas: dict[str, int]
+    # Empty dict for production reference itself; None for entries
+    # without v2 evaluation.
+    category_deltas: dict[str, int] | None = None
 
     # Compute dtype the model executes on dedicated NPU silicon. Q4_K_M
     # weight-only MoE models run as INT8 dequant + INT8 matmul on
     # purpose-built INT8 NPUs (Skippy MoE Q4 / Thinking-2507). Dense Q4
-    # models like Qwen 2.5 14B Q4 use llama-cpp's fp16 internal path —
-    # weights are dequantized to fp16 for the matmul, requiring native
-    # FP16 tensor support. Per [pai-sizer] e69237b + [backend] 15:46
-    # parity ask. Used by app.py to gate dtype-mismatch projections
-    # against `Hardware.capability_levels` and surface a 🔴
+    # models like Qwen 2.5 14B / 7B / 32B Q4 use llama-cpp's fp16
+    # internal path — weights are dequantized to fp16 for the matmul,
+    # requiring native FP16 tensor support. Per [pai-sizer] e69237b +
+    # [backend] 15:46 parity ask. Used by app.py to gate dtype-mismatch
+    # projections against `Hardware.capability_levels` and surface a 🔴
     # 'dtype_mismatch' banner instead of silently projecting fp16
     # numbers on INT8-only silicon.
     compute_dtype: str = "int8"
+
+    # Per [backend] 2026-05-01 20:08 anchor-collection bake-off: 5090
+    # measured decode tok/s + prefill tok/s, keyed by quant string.
+    # Populated for models with explicit RTX 5090 bake-off measurements
+    # (data/output/bakeoff/llm_anchors/<model>/<quant>.json on the
+    # keyhole repo, summary in llm_anchors_summary.json). Future:
+    # project_llm + scale_llm_projection can read this dict to surface
+    # 🟢 measured for 5090 + matched (model, quant) cells, replacing
+    # the cross-class projection. Today it's informational — captured
+    # in the schema; project_llm wiring is a follow-up commit.
+    measured_5090_decode_tok_s: dict[str, float] | None = None
+    measured_5090_prefill_tok_s: dict[str, float] | None = None
+
+    # Per-token compute cost (GFLOPs/token) for the prefill compute floor.
+    # First-order: 2 × active_params_b for matmul-bound forward (GPT-style
+    # transformer FLOP estimate). Per [backend] 2026-04-29 12:38 + 13:17
+    # design doc. 0.0 = unknown / fall back to 2 × active_params_b at
+    # use site.
+    gops_per_token: float = 0.0
 
     @property
     def decode_bw_per_token_gb(self) -> float:
@@ -133,6 +157,11 @@ SKIPPY_MOE_FINETUNE = LLMModel(
     # INT8 matmul (the Mid silicon's native path). Validates against
     # Mid's INT8-only capability_levels post 548bc41.
     compute_dtype="int8",
+    # 5090 reference per [backend] 2026-05-01 20:08 (~250 tok/s decode
+    # ref figure for the dense-vs-MoE comparison narrative). Skippy MoE
+    # only at Q4_K_M today.
+    measured_5090_decode_tok_s={"Q4_K_M": 250.0},
+    gops_per_token=6.0,  # 2 × 3B active (matmul-bound MoE forward)
 )
 
 
@@ -173,6 +202,7 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
     # Selecting this model on Mid (INT8-only post 548bc41) triggers
     # 🔴 dtype_mismatch in the app.py UI gate.
     compute_dtype="fp16",
+    gops_per_token=28.0,  # 2 × 14B (full dense forward)
 )
 
 
@@ -208,16 +238,106 @@ THINKING_MOE_STOCK = LLMModel(
     # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — runs the
     # same INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
     compute_dtype="int8",
+    gops_per_token=6.0,  # 2 × 3B active — same architecture as Skippy MoE
+)
+
+
+# ─────────── Performance-comparison dense models (added 2026-05-01) ────────
+# Per [backend] 20:08 weekend bake-off campaign. These are NOT Skippy
+# domain fine-tunes — no Skippy v2 prompt-set evaluation. Sole purpose
+# is to anchor the dense-vs-MoE bandwidth-vs-compute comparison on the
+# 5090 across multiple quants. Surface in the dropdown as comparison
+# entries; production deployment would use Skippy MoE / dense FT.
+#
+# Headline narrative this enables:
+# - Skippy MoE 30B-A3B Q4: ~250 tok/s on 5090 (3B active streams 1.65 GB/tok)
+# - Qwen 2.5 32B dense Q4:  52.7 tok/s on 5090 (full 32B streams 17.88 GB/tok)
+# - 4.7× MoE-vs-dense BW advantage at the 30B-class size — exactly because
+#   MoE only reads active experts per token.
+
+QWEN25_7B_DENSE_INSTRUCT = LLMModel(
+    key="qwen25_7b_dense",
+    label="Qwen 2.5 7B Instruct (dense — perf reference)",
+    family="Dense — 7B params (no expert sparsity)",
+    base="Qwen2.5-7B-Instruct (Alibaba)",
+    total_params_b=7.6,
+    active_params_b=7.6,
+    quant="Q4_K_M GGUF (also Q5_K_M, Q8_0 measured)",
+    size_gb=4.18,  # Q4 footprint; sizer's per-quant scaling applies via decode_bw_per_token_gb
+    description=(
+        "Stock Qwen 2.5 7B dense — added as a perf-comparison anchor for the "
+        "dense-vs-MoE narrative. NOT a Skippy domain fine-tune; no v2 prompt-set "
+        "evaluation. Decode tok/s on 5090 measured across Q4/Q5/Q8 quants for "
+        "cross-quant BW realization calibration."
+    ),
+    deck_bullet=(
+        "7B dense Q4 = 184 tok/s on 5090 vs Skippy MoE 30B-A3B Q4 = 250 tok/s — "
+        "MoE wins on bandwidth despite 4× more total params, because only 3B "
+        "active streams per token."
+    ),
+    # Dense Q4 → fp16 internal path on llama-cpp (gates 🔴 dtype_mismatch
+    # on Mid INT8-only via the f851d24 app.py UI gate; valid on High +
+    # 5090 which retain FP support).
+    compute_dtype="fp16",
+    measured_5090_decode_tok_s={
+        "Q4_K_M": 183.9,
+        "Q5_K_M": 170.0,
+        "Q8_0":   137.2,
+    },
+    measured_5090_prefill_tok_s={
+        "Q4_K_M": 7226.0,
+        "Q5_K_M": 7215.0,
+        "Q8_0":   7478.0,
+    },
+    gops_per_token=15.2,  # 2 × 7.6B
+)
+
+
+QWEN25_32B_DENSE_INSTRUCT = LLMModel(
+    key="qwen25_32b_dense",
+    label="Qwen 2.5 32B Instruct (dense — perf reference)",
+    family="Dense — 32B params (no expert sparsity)",
+    base="Qwen2.5-32B-Instruct (Alibaba)",
+    total_params_b=32.5,
+    active_params_b=32.5,
+    quant="Q4_K_M GGUF (also Q5_K_M measured; Q8 won't fit on 5090)",
+    size_gb=17.88,  # Q4 footprint
+    description=(
+        "Stock Qwen 2.5 32B dense — perf-comparison anchor at the 30B-class "
+        "size to slope-test MoE vs dense at the SAME total-param magnitude. "
+        "Same architecture family as Skippy MoE (Qwen3-30B-A3B = 30B total) "
+        "but everything streams every token. NOT evaluated on Skippy v2 "
+        "prompt set."
+    ),
+    deck_bullet=(
+        "Qwen 2.5 32B dense Q4 = 52.7 tok/s on 5090. Same total-param "
+        "magnitude as Skippy MoE 30B-A3B (250 tok/s), but full 17.88 GB/tok "
+        "vs MoE's 1.65 GB/tok = 4.7× BW advantage for sparse MoE."
+    ),
+    compute_dtype="fp16",
+    measured_5090_decode_tok_s={
+        "Q4_K_M": 52.7,
+        "Q5_K_M": 47.7,
+        # No Q8 — won't fit on 5090's 32 GB VRAM.
+    },
+    measured_5090_prefill_tok_s={
+        "Q4_K_M": 1936.0,
+        "Q5_K_M": 1888.0,
+    },
+    gops_per_token=65.0,  # 2 × 32.5B
 )
 
 
 LLM_MODELS: dict[str, LLMModel] = {
     # Order matters — drives selectbox display order. Convention:
     # production first (default), then prior-production (cost-different
-    # but quality-parity), then external baselines.
-    SKIPPY_MOE_FINETUNE.key:   SKIPPY_MOE_FINETUNE,
-    SKIPPY_DENSE_FINETUNE.key: SKIPPY_DENSE_FINETUNE,
-    THINKING_MOE_STOCK.key:    THINKING_MOE_STOCK,
+    # but quality-parity), then external Skippy-eval'd baselines, then
+    # perf-comparison-only references (no Skippy v2 evaluation).
+    SKIPPY_MOE_FINETUNE.key:        SKIPPY_MOE_FINETUNE,
+    SKIPPY_DENSE_FINETUNE.key:      SKIPPY_DENSE_FINETUNE,
+    THINKING_MOE_STOCK.key:         THINKING_MOE_STOCK,
+    QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,
+    QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,
 }
 
 DEFAULT_LLM_MODEL_KEY = SKIPPY_MOE_FINETUNE.key
@@ -228,8 +348,14 @@ DEFAULT_LLM_MODEL_KEY = SKIPPY_MOE_FINETUNE.key
 PRODUCTION_REFERENCE_KEY = SKIPPY_MOE_FINETUNE.key
 
 
-def accuracy_delta_pp(a: LLMModel, b: LLMModel) -> float:
-    """Return (a.pass_rate - b.pass_rate) in percentage points."""
+def accuracy_delta_pp(a: LLMModel, b: LLMModel) -> float | None:
+    """Return (a.pass_rate - b.pass_rate) in percentage points.
+
+    Returns None when either side lacks a pass_rate (perf-comparison-only
+    entries that weren't evaluated on the Skippy v2 prompt set).
+    """
+    if a.pass_rate is None or b.pass_rate is None:
+        return None
     return (a.pass_rate - b.pass_rate) * 100.0
 
 
