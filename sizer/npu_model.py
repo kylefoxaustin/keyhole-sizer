@@ -501,6 +501,15 @@ TIERS = {t.name: t for t in (NPU_IMX95_MEASURED,
                               NPU_LOW_LP5_64BIT, NPU_LOW_LP5X,
                               NPU_MID, NPU_HIGH, RTX_5090_REFERENCE)}
 
+# Edge-anchor cap calibration constant (per [backend] 2026-05-04 16:19).
+# Used by the edge-anchor cap in project_vision to back-solve implied edge
+# DRAM streaming from a slower-tier measurement: ref_bw_only = ref_ms - this.
+# Sources: Low-LP5X back-solves to ~0.25-0.3 ms on ResNet-50; i.MX 95
+# back-solves to ~0.4 on yolov8n. 0.3 is a reasonable single-constant fit.
+# Per-tier-class refinement (Neutron 0.4 / LP5X 0.25 / Mid 0.2) is a future
+# config-dict change if needed; 0.3 is the global default for now.
+ASSUMED_EDGE_OVERHEAD_MS = 0.3
+
 MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "LPDDR6",
                 "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
@@ -1314,6 +1323,92 @@ def project_vision(
                             clamped_5090 = True
                         per_stream_ms = cap_ms
 
+        # Edge-anchor cap (per [backend] 2026-05-04 16:19). Mirror image of
+        # the 5090 cap above: the 5090 cap is a LOWER bound on target_ms
+        # (Phase 2 was too optimistic); this is an UPPER bound on target_ms
+        # (Phase 2 was too pessimistic). Fires when a slower-BW edge tier
+        # has a measured anchor for this (pipeline, resolution) cell — back-
+        # solves the implied edge-streaming DRAM from the anchor and uses
+        # it to bound the faster-BW target's projection.
+        #
+        # Background: pipeline.dram_per_forward_mb comes from 5090 ncu
+        # profiles, which include Blackwell L2 cache-thrashing artifacts
+        # that don't transfer to edge silicon with smaller caches. ResNet-50
+        # 5090 streamed 94 MB; back-solving from Low-LP5X's 0.889 ms anchor
+        # implies edge silicon streams ~28 MB (close to the 25 MB weight
+        # footprint). Without this cap, Mid Phase 2 over-counts DRAM and
+        # projects ResNet-50 at 428 FPS — slower than Low-LP5X's measured
+        # 843 FPS, a physics violation flagged by Kyle 2026-05-04.
+        #
+        # Formula:
+        #   ref_bw_only_ms       = max(0, ref_ms - ASSUMED_EDGE_OVERHEAD_MS)
+        #   ref_implied_dram_mb  = ref_bw_only_ms × ref_eff_bw × ref_share
+        #   target_bw_floor      = implied_dram / (target_eff_bw × share)
+        #   cap_ms               = target_bw_floor + ASSUMED_EDGE_OVERHEAD_MS
+        #
+        # Robustness: implied_dram is clamped to min(implied, bundle_dram).
+        # When the ref measurement is compute-bound (e.g. yolov8n on i.MX 95),
+        # the naive back-solve grossly inflates implied DRAM; clamping to
+        # bundle DRAM degrades the cap to a no-op rather than a wrong-direction
+        # bound. When multiple refs apply, the tightest cap (smallest cap_ms)
+        # wins — typically the BW-bound ref since it produces the smallest
+        # implied DRAM.
+        clamped_edge_anchor = False
+        # Only fire when Phase 2 was BW-bound. Cap exists to fix BW-floor
+        # over-estimation (5090 cache thrashing inflates bundle DRAM); it
+        # has nothing useful to say when target is compute-bound. Without
+        # this guard, a compute-bound i.MX 95 anchor for yolov8n could
+        # spuriously inflate Low-LP5-64bit's projection from a real 31 ms
+        # compute floor to a fake 4 ms BW-derived cap.
+        phase2_bw_bound = (phase2_used and bw_floor_ms is not None
+                           and compute_floor_ms is not None
+                           and bw_floor_ms >= compute_floor_ms)
+        if (phase2_bw_bound and pipeline.dram_per_forward_mb is not None):
+            best_cap_ms = None
+            for ref_hw in TIERS.values():
+                if ref_hw is hw:
+                    continue
+                if ref_hw.tier_family == "GDDR7-28":
+                    continue  # 5090 handled by separate cap above
+                if ref_hw.measured_edge_ms is None:
+                    continue
+                ref_ms = ref_hw.measured_edge_ms.get(pipeline.key, {}).get(resolution)
+                if ref_ms is None:
+                    continue
+                # Anchors are measured at 100% NPU share (no SoC contention
+                # during benchmark) — mirrors the Phase 1 measured-override
+                # convention `per_stream_ms = measured_override_ms / share`
+                # which divides anchor by current share to model contention.
+                # So ref_eff_bw is the silicon's max realized BW, NOT scaled
+                # by npu_share_default.
+                ref_eff_bw = ref_hw.effective_bandwidth_gbs
+                target_eff_bw = hw.effective_bandwidth_gbs * share
+                if ref_eff_bw <= 0 or target_eff_bw <= 0:
+                    continue
+                # Only slower-BW anchors bind faster-BW targets. Same-or-
+                # faster ref doesn't constrain target's projection.
+                if ref_eff_bw >= target_eff_bw:
+                    continue
+                ref_bw_only_ms = max(0.0, ref_ms - ASSUMED_EDGE_OVERHEAD_MS)
+                ref_implied_dram_mb = ref_bw_only_ms * ref_eff_bw
+                # Clamp to bundle DRAM — when ref is compute-bound, naive
+                # implied_dram is inflated; bundle is the upper bound on
+                # plausible streaming.
+                ref_implied_dram_mb = min(ref_implied_dram_mb,
+                                          pipeline.dram_per_forward_mb)
+                target_bw_floor = ref_implied_dram_mb / target_eff_bw
+                cap_ms = target_bw_floor + ASSUMED_EDGE_OVERHEAD_MS
+                if best_cap_ms is None or cap_ms < best_cap_ms:
+                    best_cap_ms = cap_ms
+            if best_cap_ms is not None and per_stream_ms > best_cap_ms:
+                # Threshold-gated regime label: only mark 'clamped' when
+                # cap lowers Phase 2 result by ≥10% (FPS rises by ≥10%).
+                # Mirrors the 5090 cap's threshold. Avoids label flips on
+                # cells where Phase 2 was already in the right ballpark.
+                if per_stream_ms > best_cap_ms * 1.10:
+                    clamped_edge_anchor = True
+                per_stream_ms = best_cap_ms
+
         # Phase 1 measured-silicon override: if hw carries a measured_edge_ms
         # entry for this (pipeline_key, resolution), use it verbatim and
         # short-circuit both the BW-ratio projection AND the Phase 2 clamp.
@@ -1365,6 +1460,8 @@ def project_vision(
             # state per [backend] 2026-05-04 13:52 recommendation.
             if clamped_5090:
                 regime = "overhead_bound_5090_clamped"
+            elif clamped_edge_anchor:
+                regime = "overhead_bound_edge_anchor_clamped"
             else:
                 regime = "bw_bound" if bw_floor_ms >= compute_floor_ms else "compute_bound"
         else:
