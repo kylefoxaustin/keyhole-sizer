@@ -630,6 +630,20 @@ class VisionPipeline:
     # pipeline key.
     precision: str | None = None
 
+    # Per-forward DRAM bytes streamed (in MB) from the bundle's ncu profile.
+    # Distinct from vram_mb (which is "weights + activation peak" footprint
+    # used for capacity checks): this is the actual sustained streaming
+    # quantity that Phase 2's BW floor needs. For cache-friendly workloads
+    # (yolov8n / ResNet-50), the two are similar order of magnitude. For
+    # heavy ViT models with attention layers (SAM 3, EfficientSAM3) the
+    # streaming exceeds footprint by 30×+ due to cache thrashing — TLB
+    # / L2 / SRAM misses force weights tiles to re-stream multiple times
+    # per forward. Per [backend] 2026-04-29 12:39 audit, the bundle's
+    # `per_forward.dram_mb` field is the canonical source. When populated,
+    # _phase2_edge_ms uses this for the BW floor; when None, falls back
+    # to vram_mb (back-compat for un-audited pipelines).
+    dram_per_forward_mb: float | None = None
+
 
 PIPELINES = {
     # Baseline SAM 3 — the thing we replaced
@@ -641,6 +655,15 @@ PIPELINES = {
         vram_mb=3800,
         note="Dead on arrival at the edge — bandwidth ceiling ~0.4 FPS.",
         gops_per_forward=350.0, precision="bf16",  # low-confidence; deck value
+        # ncu-measured DRAM streaming on 5090: 118975 MB per forward
+        # (bundle entry sam3_bf16_reference). Massively exceeds the 3.8 GB
+        # footprint due to cache thrashing on the giant ViT-H backbone —
+        # weight tiles re-stream multiple times per forward. Pre-2026-05-04,
+        # Phase 2's BW floor used vram_mb=3800 which gave Mid + SAM 3 =
+        # 18 FPS (faster than 5090's measured 10.5 FPS — physically
+        # impossible). With ncu DRAM, Mid projects 0.6 FPS at default
+        # 75% NPU share — physically consistent (5090 is ~13× the BW).
+        dram_per_forward_mb=118975.0,
     ),
     # Mid-era: EfficientSAM-Small + CLIP
     "essmall_fp8": VisionPipeline(
@@ -1103,7 +1126,15 @@ def _phase2_edge_ms(pipeline: VisionPipeline, hw: Hardware,
     """
     if pipeline.gops_per_forward is None or hw.compute_util_factor >= 1.0:
         return None
-    if pipeline.vram_mb is None or pipeline.vram_mb <= 0:
+    # DRAM-per-forward streaming amount: prefer ncu-measured bundle data
+    # (`pipeline.dram_per_forward_mb`) when populated, fall back to the
+    # legacy `vram_mb` footprint estimate. The two diverge for heavy ViT
+    # models where cache thrashing forces weight re-streaming (SAM 3
+    # streams 119 GB/forward via ncu vs its 3.8 GB footprint). Per
+    # [backend] 2026-04-29 audit, the bundle's per_forward.dram_mb is
+    # the canonical source for sustained streaming.
+    dram_mb = pipeline.dram_per_forward_mb if pipeline.dram_per_forward_mb else pipeline.vram_mb
+    if dram_mb is None or dram_mb <= 0:
         return None
 
     # BW floor: DRAM-streaming bound. effective_bandwidth_gbs already at 70%
@@ -1113,7 +1144,7 @@ def _phase2_edge_ms(pipeline: VisionPipeline, hw: Hardware,
     eff_bw_gbs = hw.effective_bandwidth_gbs * max(npu_share, 1e-6)
     if eff_bw_gbs <= 0:
         return None
-    bw_floor_ms = pipeline.vram_mb / eff_bw_gbs   # MB / (GB/s) = ms
+    bw_floor_ms = dram_mb / eff_bw_gbs   # MB / (GB/s) = ms
 
     # Compute floor: peak TOPS × util_factor calibration.
     precision = (pipeline.precision or "int8").lower()
