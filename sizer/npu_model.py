@@ -666,6 +666,13 @@ PIPELINES = {
         dram_per_forward_mb=118975.0,
     ),
     # Mid-era: EfficientSAM-Small + CLIP
+    # ── Bundle DRAM audit pass 2026-05-04 (per [backend] 13:37 mapping) ──
+    # Each pipeline populated below with dram_per_forward_mb derived from
+    # the bundle's per_forward.dram_mb (ncu profile on 5090). Heavy-ViT
+    # entries had 10×+ vram-vs-streaming divergence due to attention
+    # cache thrashing; CNN-class entries had streaming ≈ footprint and
+    # don't strictly need this — populated for explicitness where the
+    # bundle has a clean mapping.
     "essmall_fp8": VisionPipeline(
         key="essmall_fp8",
         label="EfficientSAM-Small FP8 (mask model only)",
@@ -674,6 +681,7 @@ PIPELINES = {
         vram_mb=1100,
         note="Mask-only measurement from the FP8 activation-quant bake-off (pre-Hybrid-V2 era). Beaten end-to-end by TRT pipelines.",
         gops_per_forward=30.0, precision="fp8",
+        dram_per_forward_mb=34359.0,  # bundle efficientsam_small (precision unspecified; FP8 variant may stream less)
     ),
     # One-model open-vocab simplification — Ultralytics YOLOE-26 collapses
     # our two-stage YOLO-seg + CLIP pipeline into a single model with a
@@ -697,6 +705,7 @@ PIPELINES = {
             "YOLOE-26 only buys ~17% speedup (see 'yoloe26_s_pf_trt_fp8' entry) — "
             "gap is STRUCTURAL, not optimization-addressable. Box recall 65-86%."
         ),
+        dram_per_forward_mb=841.0,  # bundle yoloe26_pytorch_fp16
     ),
     # TRT FP8 port of YOLOE-26S-PF — we hypothesized this would close the 3x gap
     # to our two-stage shipping stack, but the negative result is informative:
@@ -717,6 +726,7 @@ PIPELINES = {
             "gap to shipping (36 FPS) is structural: we run CLIP only 1/30 frames, "
             "while YOLOE-26 runs its full open-vocab path every frame."
         ),
+        dram_per_forward_mb=498.0,  # bundle yoloe26_trt_fp8
     ),
     # SAM 3.1 student variant — text-prompt capable, ~4x smaller than Option A
     # (full SAM3 text encoder). Projected for a 1-concept text query; scales
@@ -739,6 +749,7 @@ PIPELINES = {
             "n=5 concepts drops to 0.6 FPS; n=20 exhaustive drops to 0.2 FPS. "
             "Still text-prompt-native (unlike our two-stage stack)."
         ),
+        dram_per_forward_mb=3886.0,  # bundle efficientsam3p1_es_ev_s__set_image (heavier path; text_prompt is 3575)
     ),
     # Community SAM 3 Lite — dropped April 2026, still ~6x faster than SAM 3
     # but nowhere near the shipping TRT stack.
@@ -758,6 +769,7 @@ PIPELINES = {
             "Still ~13x slower than our shipping TRT FP8 stack — unoptimized BF16, "
             "no TRT path, no FP8. Pre-optimization ceiling for a community lite SAM 3."
         ),
+        dram_per_forward_mb=8934.0,  # bundle efficientsam3_es_ev_s
     ),
     # Hybrid V2 era (YOLO-seg + CLIP)
     "hybrid_v2_bf16": VisionPipeline(
@@ -768,6 +780,7 @@ PIPELINES = {
         vram_mb=450,
         note="Starting point of the Hybrid V2 track.",
         gops_per_forward=47.0, precision="bf16",  # yolo11s 42 + CLIP-B/32 5
+        dram_per_forward_mb=652.0,  # composed: yolo_seg_fp16_trt 219 + clip_trt 433
     ),
     "hybrid_v2_torchao_fp8": VisionPipeline(
         key="hybrid_v2_torchao_fp8",
@@ -776,6 +789,7 @@ PIPELINES = {
         edge_ms_720p=203.4, edge_ms_1080p=224.2, edge_ms_4k=352.6,
         vram_mb=440,
         note="Edge ~5 FPS — halves CLIP BW only.",
+        dram_per_forward_mb=650.0,  # composed: yolo_seg_fp8_trt 217 + clip_trt 433
     ),
     # Shipping stack
     "trt_fp8_every_frame": VisionPipeline(
@@ -786,6 +800,7 @@ PIPELINES = {
         vram_mb=250,
         note="24 FPS single-stream — real-time without any debouncing.",
         gops_per_forward=47.0, precision="fp8",  # yolo11s 42 + CLIP-B/32 5
+        dram_per_forward_mb=650.0,  # composed: yolo_seg_fp8_trt 217 + clip_trt 433
     ),
     "trt_fp8_1hz_clip": VisionPipeline(
         key="trt_fp8_1hz_clip",
@@ -795,6 +810,7 @@ PIPELINES = {
         vram_mb=250,
         note="36 FPS single-stream — the Keyhole shipping target.",
         gops_per_forward=42.2, precision="fp8",  # yolo11s 42 + CLIP-B/32 5/30
+        dram_per_forward_mb=231.4,  # composed: yolo_seg_fp8_trt 217 + clip_trt/30 14.4
     ),
     "yolo_only_fp8": VisionPipeline(
         key="yolo_only_fp8",
@@ -804,6 +820,7 @@ PIPELINES = {
         vram_mb=80,
         note="The YOLO-only ceiling. Live-streaming baseline.",
         gops_per_forward=42.0, precision="fp8",  # yolo11s-seg
+        dram_per_forward_mb=217.0,  # bundle yolo_seg_fp8_trt
     ),
     # ─────────── yolov8n-seg variants (nano, 3.4M params) — added 2026-04-21
     # for cross-silicon comparison against real-NPU benchmarks that are almost
@@ -817,6 +834,7 @@ PIPELINES = {
         vram_mb=180,
         note="~3× faster than yolo11s-seg at the same precision — ~120 FPS ceiling @ 720p.",
         gops_per_forward=12.2, precision="fp8",  # yolov8n 12 + CLIP-B/32 5/30
+        dram_per_forward_mb=120.4,  # composed: yolo_seg_yolov8n-seg_fp8_trt 106 + clip_trt/30 14.4
     ),
     "yolov8n_trt_fp8_every_frame": VisionPipeline(
         key="yolov8n_trt_fp8_every_frame",
@@ -826,6 +844,7 @@ PIPELINES = {
         vram_mb=180,
         note="~42 FPS @ 720p — CLIP now dominates (15.1 ms), YOLO is free.",
         gops_per_forward=17.0, precision="fp8",  # yolov8n 12 + CLIP-B/32 5
+        dram_per_forward_mb=539.0,  # composed: yolo_seg_yolov8n-seg_fp8_trt 106 + clip_trt 433
     ),
     "yolov8n_only_fp8": VisionPipeline(
         key="yolov8n_only_fp8",
@@ -835,6 +854,7 @@ PIPELINES = {
         vram_mb=40,
         note="YOLO-only ceiling at nano size. ~126 FPS @ 720p — cross-silicon comparison target.",
         gops_per_forward=12.0, precision="fp8",
+        dram_per_forward_mb=106.0,  # bundle yolo_seg_yolov8n-seg_fp8_trt
     ),
     # ─────────── INT8 pipelines for vendor-comparison scenarios ──────────
     # Edge ms derived from measured 5090 INT8 TRT execute() × 16.19× BW ratio.
@@ -857,6 +877,7 @@ PIPELINES = {
         vram_mb=80,
         note="~68 FPS @ 720p edge but 35% slower than FP8. Recall 0.875 (-13% vs FP16). Larger calibration would improve quality; see yolov8n-seg's 20-frame vs coco128 pair for the effect.",
         gops_per_forward=42.0, precision="int8",  # yolo11s-seg
+        dram_per_forward_mb=217.0,  # bundle has no INT8 yolo entry; use yolo_seg_fp8_trt 217 as proxy (similar streaming)
     ),
     "yolov8n_trt_int8_coco128": VisionPipeline(
         key="yolov8n_trt_int8_coco128",
@@ -866,6 +887,7 @@ PIPELINES = {
         vram_mb=55,
         note="~100 FPS @ 720p edge, recall 0.912 (-9% vs FP16). Representative of credible vendor INT8 numbers — use this for apples-to-apples against NPU silicon benchmarks that disclose their calibration dataset.",
         gops_per_forward=12.0, precision="int8",
+        dram_per_forward_mb=106.0,  # bundle yolo_seg_yolov8n-seg_fp8_trt as proxy for INT8 (similar streaming)
     ),
     # ResNet-50v1 INT8 image classification — canonical vendor-comparison
     # benchmark for the 100-TOPS edge-NPU class. Added 2026-05-01 to support
@@ -894,6 +916,7 @@ PIPELINES = {
         vram_mb=94,
         note="Image classification (no bbox/seg head). 1000-class softmax output. Common vendor benchmark — useful as a 'compute-light, BW-modest' anchor on the 100-TOPS edge-NPU class.",
         gops_per_forward=4.1, precision="int8",
+        dram_per_forward_mb=94.15,  # bundle resnet50_int8_trt__224
     ),
     # ─────────── ViT alternatives (Kyle 2026-04-25 what-if) ──────────────
     # Could vision transformers replace YOLO-seg + SAM 3? Two roles, four
@@ -922,6 +945,7 @@ PIPELINES = {
             "for the YOLO-seg FP8 TRT camera stack."
         ),
         gops_per_forward=108.0, precision="fp16",
+        dram_per_forward_mb=2052.0,  # bundle rtdetr_l__720p
     ),
     "detr_resnet50_pytorch_fp16": VisionPipeline(
         key="detr_resnet50_pytorch_fp16",
@@ -940,6 +964,7 @@ PIPELINES = {
             "shipping camera replacement."
         ),
         gops_per_forward=86.0, precision="fp16",
+        dram_per_forward_mb=2737.0,  # bundle detr__720p
     ),
     "owlv2_base_pytorch_fp16": VisionPipeline(
         key="owlv2_base_pytorch_fp16",
@@ -963,6 +988,7 @@ PIPELINES = {
             "SAM 3 lineage upgrade."
         ),
         gops_per_forward=150.0, precision="fp16",
+        dram_per_forward_mb=2819.0,  # bundle owlv2__720p
     ),
     "grounding_dino_tiny_pytorch_fp32": VisionPipeline(
         key="grounding_dino_tiny_pytorch_fp32",
@@ -983,6 +1009,7 @@ PIPELINES = {
             "the agentic-prompt role."
         ),
         gops_per_forward=150.0, precision="fp32",
+        dram_per_forward_mb=38508.0,  # bundle grounding_dino__720p (note: 38 GB at fp32; weight stream + activations)
     ),
 }
 
