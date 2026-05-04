@@ -83,18 +83,6 @@ class LLMModel:
     # numbers on INT8-only silicon.
     compute_dtype: str = "int8"
 
-    # Per [backend] 2026-05-01 20:08 anchor-collection bake-off: 5090
-    # measured decode tok/s + prefill tok/s, keyed by quant string.
-    # Populated for models with explicit RTX 5090 bake-off measurements
-    # (data/output/bakeoff/llm_anchors/<model>/<quant>.json on the
-    # keyhole repo, summary in llm_anchors_summary.json). Future:
-    # project_llm + scale_llm_projection can read this dict to surface
-    # 🟢 measured for 5090 + matched (model, quant) cells, replacing
-    # the cross-class projection. Today it's informational — captured
-    # in the schema; project_llm wiring is a follow-up commit.
-    measured_5090_decode_tok_s: dict[str, float] | None = None
-    measured_5090_prefill_tok_s: dict[str, float] | None = None
-
     # Per-token compute cost (GFLOPs/token) for the prefill compute floor.
     # First-order: 2 × active_params_b for matmul-bound forward (GPT-style
     # transformer FLOP estimate). Per [backend] 2026-04-29 12:38 + 13:17
@@ -157,10 +145,9 @@ SKIPPY_MOE_FINETUNE = LLMModel(
     # INT8 matmul (the Mid silicon's native path). Validates against
     # Mid's INT8-only capability_levels post 548bc41.
     compute_dtype="int8",
-    # 5090 reference per [backend] 2026-05-01 20:08 (~250 tok/s decode
-    # ref figure for the dense-vs-MoE comparison narrative). Skippy MoE
-    # only at Q4_K_M today.
-    measured_5090_decode_tok_s={"Q4_K_M": 250.0},
+    # 5090 anchor lives on RTX_5090_REFERENCE.measured_llm (per 66edfa2
+    # cross-app schema parity with PAI sizer e69237b); single source of
+    # truth, consumed by project_llm.
     gops_per_token=6.0,  # 2 × 3B active (matmul-bound MoE forward)
 )
 
@@ -279,16 +266,8 @@ QWEN25_7B_DENSE_INSTRUCT = LLMModel(
     # on Mid INT8-only via the f851d24 app.py UI gate; valid on High +
     # 5090 which retain FP support).
     compute_dtype="fp16",
-    measured_5090_decode_tok_s={
-        "Q4_K_M": 183.9,
-        "Q5_K_M": 170.0,
-        "Q8_0":   137.2,
-    },
-    measured_5090_prefill_tok_s={
-        "Q4_K_M": 7226.0,
-        "Q5_K_M": 7215.0,
-        "Q8_0":   7478.0,
-    },
+    # 5090 anchors (Q4/Q5/Q8 decode + prefill) live on
+    # RTX_5090_REFERENCE.measured_llm — single source of truth.
     gops_per_token=15.2,  # 2 × 7.6B
 )
 
@@ -315,15 +294,9 @@ QWEN25_32B_DENSE_INSTRUCT = LLMModel(
         "vs MoE's 1.65 GB/tok = 4.7× BW advantage for sparse MoE."
     ),
     compute_dtype="fp16",
-    measured_5090_decode_tok_s={
-        "Q4_K_M": 52.7,
-        "Q5_K_M": 47.7,
-        # No Q8 — won't fit on 5090's 32 GB VRAM.
-    },
-    measured_5090_prefill_tok_s={
-        "Q4_K_M": 1936.0,
-        "Q5_K_M": 1888.0,
-    },
+    # 5090 anchors (Q4/Q5 decode + prefill) live on
+    # RTX_5090_REFERENCE.measured_llm — single source of truth. No Q8
+    # entry — won't fit on 5090's 32 GB VRAM.
     gops_per_token=65.0,  # 2 × 32.5B
 )
 

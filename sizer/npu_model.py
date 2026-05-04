@@ -257,6 +257,17 @@ NPU_LOW_LP5_64BIT = Hardware(
     measured_llm_ttft_1k_sec=1.67,
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
     compute_util_factor=0.19, tier_family="Neutron-64-LP5",
+    # Per-cell anchor (matches PAI sizer e69237b shape). Vendor anchor —
+    # NOT Skippy-specific per [backend] 12:38 caveat. Filed under
+    # skippy_finetune since the legacy flat-field path treats it as the
+    # MoE-Q4 anchor; future anchor refinement should add a dedicated
+    # vendor key when we have model-specific Low-LP5-64bit measurements.
+    # 1024 / 1.67 = 613.2 tok/s prefill rate.
+    measured_llm={
+        "skippy_finetune": {
+            "Q4_K_M": {"decode_tok_s": 29.27, "prefill_tok_s": 613.2},
+        },
+    },
 )
 
 # LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
@@ -312,6 +323,16 @@ NPU_MID = Hardware(
     capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
     compute_util_factor=0.45, tier_family="LP5X-8.4-128b",
     llm_prefill_util_factor=0.10,  # calibrated against the Mid TTFT 351 ms anchor
+    # Per-cell anchor mirroring the legacy flat fields. Skippy MoE Q4 measured
+    # 37.85 tok/s decode, 351 ms TTFT @ 1K ⇒ 1024 / 0.351 = 2917.4 tok/s
+    # prefill rate. Both fields kept populated (flat for hw_with_memory's
+    # back-compat BW-scaling on memory upgrades; dict for project_llm
+    # per-cell resolution).
+    measured_llm={
+        "skippy_finetune": {
+            "Q4_K_M": {"decode_tok_s": 37.85, "prefill_tok_s": 2917.4},
+        },
+    },
 )
 
 NPU_HIGH = Hardware(
@@ -345,6 +366,15 @@ NPU_HIGH = Hardware(
     capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
     compute_util_factor=0.50, tier_family="LP5X-8.4-128b",
     llm_prefill_util_factor=0.10,  # per [docs] 16:08 anchor: 1024 × 6.5 / (400 INT8 × 0.10) = 166 ms calc
+    # Per-cell anchor mirroring the legacy flat fields. Skippy MoE Q4 on
+    # High = same decode as Mid (BW-equal at stock per 0bcdbfd) but
+    # faster TTFT (175.5 ms = compute-bound benefit from 1.375× TOPS).
+    # 1024 / 0.1755 = 5835.3 tok/s prefill rate.
+    measured_llm={
+        "skippy_finetune": {
+            "Q4_K_M": {"decode_tok_s": 37.85, "prefill_tok_s": 5835.3},
+        },
+    },
 )
 
 # Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
@@ -519,18 +549,34 @@ def hw_with_memory(hw: Hardware, mem_type: str, mem_data_rate_gtps: float,
     """
     new_bw = hw.mem_bus_width_bits * mem_data_rate_gtps / 8
     new_name = hw.name if name_suffix is None else f"{hw.name} ({name_suffix})"
+    bw_ratio = new_bw / hw.mem_bandwidth_gbs if hw.mem_bandwidth_gbs > 0 else 1.0
 
     # BW-scale the measured LLM decode tok/s. Decode is BW-bound on MoE
     # 3B-active models — bytes per decoded token = active_size, fully
     # streamed from DRAM per token, so tok/s scales linearly with
     # effective BW (bandwidth_efficiency cancels: same 0.70 on both sides).
+    # Both legacy flat field AND new per-cell measured_llm dict are
+    # scaled — keeps the two anchor representations consistent through
+    # the memory-upgrade clone.
     new_decode_tok_s = hw.measured_llm_q4_decode_tok_s
-    if (hw.measured_llm_q4_decode_tok_s is not None
-            and hw.mem_bandwidth_gbs > 0):
-        new_decode_tok_s = (
-            hw.measured_llm_q4_decode_tok_s
-            * (new_bw / hw.mem_bandwidth_gbs)
-        )
+    if hw.measured_llm_q4_decode_tok_s is not None:
+        new_decode_tok_s = hw.measured_llm_q4_decode_tok_s * bw_ratio
+
+    # Walk the per-cell dict and BW-scale every decode_tok_s entry.
+    # prefill_tok_s held at stock (prefill compute-bound, not memory-
+    # bound). Same scaling rule as the flat field.
+    new_measured_llm = None
+    if hw.measured_llm is not None:
+        new_measured_llm = {
+            model_key: {
+                quant: {
+                    **cell,
+                    "decode_tok_s": cell["decode_tok_s"] * bw_ratio,
+                }
+                for quant, cell in quant_dict.items()
+            }
+            for model_key, quant_dict in hw.measured_llm.items()
+        }
 
     return replace(
         hw,
@@ -539,6 +585,7 @@ def hw_with_memory(hw: Hardware, mem_type: str, mem_data_rate_gtps: float,
         mem_data_rate_gtps=mem_data_rate_gtps,
         mem_bandwidth_gbs=new_bw,
         measured_llm_q4_decode_tok_s=new_decode_tok_s,
+        measured_llm=new_measured_llm,
         bw_projected=True,
     )
 
