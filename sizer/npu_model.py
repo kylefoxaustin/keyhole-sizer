@@ -1260,6 +1260,60 @@ def project_vision(
             bw_floor_ms = None
             compute_floor_ms = None
 
+        # Defensive 5090-anchored cap (per [backend] 2026-05-04 13:52
+        # recommendation, Option 2 — refined to decompose BW + overhead).
+        # When 5090 has a measured anchor for this (pipeline_key,
+        # resolution) cell, the target tier's edge_ms cannot be faster
+        # than what physics + measured-overhead allow.
+        #
+        # Backend's original formula was `5090_measured × BW_ratio` —
+        # which over-clamps when 5090 is overhead-bound (small workloads
+        # where 5090's measurement is mostly kernel-launch latency, not
+        # BW-streaming). Example: ResNet-50 5090 measured 0.325 ms vs
+        # 5090 BW floor 0.062 ms (5× overhead-padded). `5090 × BW_ratio`
+        # propagates the overhead × 21.59 BW gap to Mid, yielding 7 ms
+        # — wildly over-pessimistic since edge NPU overhead doesn't
+        # scale with BW (kernel launch is per-launch, not per-byte).
+        #
+        # Decomposed formula:
+        #   5090_bw_floor    = dram / 5090_eff_bw
+        #   5090_overhead    = max(0, 5090_measured - 5090_bw_floor)
+        #   target_bw_floor  = dram / (target_eff_bw × share)
+        #   cap_ms           = target_bw_floor + 5090_overhead
+        #
+        # Right reading: target's BW-bound latency PLUS at-least-as-much
+        # overhead as 5090 had. Edge NPU overhead is typically ≥ 5090's
+        # (smaller scheduling surface, different ISA), so this is a
+        # conservative LOWER bound on target_ms.
+        # Skip for the 5090 itself.
+        clamped_5090 = False
+        ref_5090 = None
+        if (phase2_used and hw.tier_family != "GDDR7-28"
+                and RTX_5090_REFERENCE.measured_edge_ms is not None
+                and pipeline.dram_per_forward_mb is not None):
+            ref_5090 = (RTX_5090_REFERENCE.measured_edge_ms
+                        .get(pipeline.key, {}).get(resolution))
+            if ref_5090 is not None:
+                bw_5090_eff = (RTX_5090_REFERENCE.effective_bandwidth_gbs
+                               * RTX_5090_REFERENCE.npu_share_default)
+                bw_target_eff = hw.effective_bandwidth_gbs * share
+                if bw_5090_eff > 0 and bw_target_eff > 0:
+                    bw_floor_5090 = pipeline.dram_per_forward_mb / bw_5090_eff
+                    overhead_5090 = max(0.0, ref_5090 - bw_floor_5090)
+                    bw_floor_target = pipeline.dram_per_forward_mb / bw_target_eff
+                    cap_ms = bw_floor_target + overhead_5090
+                    if per_stream_ms < cap_ms:
+                        # Mark as 'meaningfully clamped' only when cap raises
+                        # the result by ≥10% — avoids labeling cases where
+                        # 5090's overhead is small relative to target's BW
+                        # floor (SAM 3: 17 ms 5090 overhead vs 1687 ms Mid
+                        # BW floor = 1% nominal cap firing on a fundamentally
+                        # BW-bound workload). The cap still applies as a
+                        # safety net; just doesn't override the regime.
+                        if cap_ms > per_stream_ms * 1.10:
+                            clamped_5090 = True
+                        per_stream_ms = cap_ms
+
         # Phase 1 measured-silicon override: if hw carries a measured_edge_ms
         # entry for this (pipeline_key, resolution), use it verbatim and
         # short-circuit both the BW-ratio projection AND the Phase 2 clamp.
@@ -1306,7 +1360,13 @@ def project_vision(
             # Regime: which floor dominated the max() — captures whether
             # the workload is BW-bound or compute-bound on this silicon.
             # Per [pai-sizer] 33b0dfc convention; matches their badge UI.
-            regime = "bw_bound" if bw_floor_ms >= compute_floor_ms else "compute_bound"
+            # Special case: if the 5090-anchored cap fired, the workload
+            # is overhead-bound on 5090 reference — surface as a 4th regime
+            # state per [backend] 2026-05-04 13:52 recommendation.
+            if clamped_5090:
+                regime = "overhead_bound_5090_clamped"
+            else:
+                regime = "bw_bound" if bw_floor_ms >= compute_floor_ms else "compute_bound"
         else:
             edge_ms_source = "projected"
             regime = None  # Legacy BW-only path doesn't separate the floors
