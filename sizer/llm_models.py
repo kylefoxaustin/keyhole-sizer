@@ -29,12 +29,16 @@ model — a DIFFERENT base than Skippy MoE FT. So the apparent +5.3pp
 MoE FT vs Instruct-2507 stock at 0.712) is **−2.3pp** — the MoE
 fine-tune slightly regressed vs its own base.
 
-The dense fine-tune (Qwen2.5-14B v4) IS apples-to-apples-validated:
-+5.3pp vs Qwen2.5-14B Instruct base. The MoE recipe (attention-only
-LoRA on Qwen3-30B-A3B) is the failure mode — pending an MoE-aware
-LoRA target test (router + experts) to confirm whether MoE-base
-fine-tuning is recoverable. Production reverted to Skippy 7B v4 dense
-in the meantime.
+The apples-to-apples-validated fine-tunes live in [docs]'s recipe-
+taxonomy: Qwen2.5-7B v4 (+3.1pp vs 7B Instruct base, pass_rate 0.705)
+and Qwen2.5-14B v4 (+5.3pp vs 14B Instruct base, pass_rate 0.727).
+NEITHER of those is the SKIPPY_DENSE_FINETUNE row in this catalog —
+that row (pass_rate 0.682) is an older pre-v4 dense LoRA, kept for
+the dense-vs-MoE cost story but NOT the carrier of the +5.3pp claim.
+The MoE recipe (attention-only LoRA on Qwen3-30B-A3B) is the failure
+mode — pending an MoE-aware LoRA target test (router + experts) to
+confirm whether MoE-base fine-tuning is recoverable. Production
+reverted to Skippy 7B v4 dense in the meantime.
 
 ## The two stories the catalog answers
 
@@ -198,19 +202,21 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
     pass_n_passes=90,
     pass_n_total=132,
     description=(
-        "Kyle's prior-production dense fine-tune. Same LoRA recipe corpus as "
-        "the MoE entry, applied to the dense Qwen2.5-14B-Instruct base. "
-        "Apples-to-apples-validated: +5.3pp vs the Qwen2.5-14B-Instruct "
-        "stock baseline (per [docs] 2026-05-05). Kept in catalog as the "
-        "validated-fine-tune anchor and for the dense-vs-MoE cost story."
+        "Kyle's prior-production dense fine-tune (Qwen2.5-14B-Instruct base, "
+        "older domain-LoRA recipe — pre-v4). Pass rate 0.682 here is from "
+        "this earlier variant; it is NOT the same model as the apples-to-"
+        "apples-validated 14B v4 (0.727, +5.3pp vs 14B Instruct stock — "
+        "per [docs] 2026-05-05). Kept in catalog for the dense-vs-MoE "
+        "cost story; the validated +5.3pp gain anchor lives in [docs]'s "
+        "recipe-taxonomy, not on this row."
     ),
     deck_bullet=(
-        "Dense fine-tune validated +5.3pp vs its own Instruct base "
-        "(apples-to-apples). MoE entry lands at near-parity (Δ +0.7pp at "
-        "the pass-rate level) but via a different path — MoE recipe "
-        "regressed vs its Instruct base (see SKIPPY_MOE_FINETUNE caveat). "
-        "Cost story still holds: MoE 3B-active reads 4-5× fewer weights "
-        "per token than 14B dense, regardless of whose recipe won."
+        "Older dense fine-tune entry (pre-v4, 0.682). Lands near the MoE "
+        "FT row at the pass-rate level (Δ +0.7pp), but the apples-to-apples "
+        "validated dense fine-tune is **14B v4 (0.727, +5.3pp)** — a "
+        "different model not currently in this catalog. Cost story still "
+        "holds for either dense entry: MoE 3B-active reads 4-5× fewer "
+        "weights per token than any 14B dense forward."
     ),
     # Δ vs Skippy MoE FT (production reference). MoE wins rag_datasheet
     # +3 → dense -3 here; MoE loses refusal -2 → dense +2 here.
@@ -225,6 +231,44 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
     # 🔴 dtype_mismatch in the app.py UI gate.
     compute_dtype="fp16",
     gops_per_token=28.0,  # 2 × 14B (full dense forward)
+)
+
+
+INSTRUCT_MOE_STOCK = LLMModel(
+    key="instruct_moe_stock",
+    label="Qwen3-30B-A3B-Instruct-2507 (stock)",
+    family="Sparse MoE — 128 experts × 8 used per token",
+    base="Qwen3-30B-A3B-Instruct-2507 (Alibaba)",
+    total_params_b=30.0,
+    active_params_b=3.0,
+    quant="Q4_K_M GGUF",
+    size_gb=18.0,
+    fine_tune="stock (no fine-tune)",
+    pass_rate=0.712,
+    pass_n_passes=94,
+    pass_n_total=132,
+    description=(
+        "Qwen3-30B-A3B-Instruct-2507 stock — the **true base** of Skippy MoE FT "
+        "and therefore the apples-to-apples reference for the MoE fine-tune row. "
+        "Eval source: `eval/results/acc_baseline-qwen3-30b-a3b-instruct-2507-"
+        "v2-rag_20260504-170335.json` (132-sample v2-RAG, 5090 host, Q4_K_M, "
+        "deterministic temp=0, RAG on, agent loop off). Same eval harness as "
+        "the other catalog rows. Per [docs] 2026-05-05."
+    ),
+    deck_bullet=(
+        "True base of Skippy MoE FT. Apples-to-apples reference: SKIPPY_MOE_"
+        "FINETUNE (0.689) vs this (0.712) = **−2.3pp** — fine-tune slightly "
+        "regressed vs its own base. The +5.3pp 'win' vs Thinking sibling was "
+        "sister-model gap, not recipe gain."
+    ),
+    # Per-category delta breakdown vs Skippy MoE FT pending — overall is
+    # +2.3pp; per-category not yet derived from the eval JSON. Empty dict
+    # for now keeps the UI rendering clean (no spurious per-category rows).
+    category_deltas={},
+    # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — same
+    # INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
+    compute_dtype="int8",
+    gops_per_token=6.0,  # 2 × 3B active — same architecture as Skippy MoE
 )
 
 
@@ -358,6 +402,7 @@ LLM_MODELS: dict[str, LLMModel] = {
     # perf-comparison-only references (no Skippy v2 evaluation).
     SKIPPY_MOE_FINETUNE.key:        SKIPPY_MOE_FINETUNE,
     SKIPPY_DENSE_FINETUNE.key:      SKIPPY_DENSE_FINETUNE,
+    INSTRUCT_MOE_STOCK.key:         INSTRUCT_MOE_STOCK,
     THINKING_MOE_STOCK.key:         THINKING_MOE_STOCK,
     QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,
     QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,
