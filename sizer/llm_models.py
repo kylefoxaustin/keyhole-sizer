@@ -1,10 +1,15 @@
 """LLM model catalog for the sizer.
 
-Three selectable models for the LLM workload comparison surface:
-- Skippy MoE domain fine-tune (default, current production)
-- Skippy dense domain fine-tune (prior production, near-parity at the
-  pass-rate level — see "base-identity caveat" below)
-- Qwen3-30B-A3B-Thinking-2507 (stock public reasoning baseline)
+Selectable models for the LLM workload comparison surface (8 entries
+post 2026-05-06 cross-app convergence per [docs] 09:19):
+- Skippy MoE domain fine-tune v1 (default — historical production reference)
+- Skippy dense domain fine-tune (prior production, pre-v4)
+- Skippy 7B v4 (Qwen2.5-7B FT — current production)
+- Skippy 14B v4 (Qwen2.5-14B FT — best headline, NOT recommended for prod)
+- Qwen3-30B-A3B-Instruct-2507 (apples-to-apples MoE base for the FT row)
+- Qwen3-30B-A3B-Thinking-2507 (sister-model context, NOT the MoE FT base)
+- Qwen 2.5 7B Instruct (apples-to-apples 7B v4 baseline + perf reference)
+- Qwen 2.5 32B Instruct (perf reference only)
 
 Two of these are Q4_K_M GGUF MoE 30B/3B-active (Skippy MoE FT,
 Thinking stock) — same decode-tok/s ceiling on every Hardware tier
@@ -323,12 +328,104 @@ THINKING_MOE_STOCK = LLMModel(
 )
 
 
+# ─────────── Validated dense fine-tunes (added 2026-05-06 per [docs]) ─────
+# These are the apples-to-apples-validated fine-tune anchors per [docs]
+# 2026-05-05 09:45 + 2026-05-06 09:19. Both trained with the v4 recipe
+# (SFTTrainer + assistant_only_loss, 100 refusal exemplars, 2 epochs)
+# on Qwen2.5 Instruct bases. Cross-app catalog convergence with PAI
+# sizer (per [docs] 09:19): both sizers carry { 7B v4, 14B v4, MoE FT
+# (v1), Instruct-2507 stock, Thinking-2507 stock, plus dense bases }.
+
+SKIPPY_7B_V4 = LLMModel(
+    key="skippy_7b_v4",
+    label="Skippy 7B v4 (Qwen2.5-7B FT — current production)",
+    family="Dense — 7B params (no expert sparsity)",
+    base="Qwen2.5-7B-Instruct (Alibaba)",
+    total_params_b=7.6,
+    active_params_b=7.6,
+    quant="Q4_K_M GGUF",
+    size_gb=4.18,
+    fine_tune="v4 SFT — assistant_only_loss, 100 refusal exemplars, 2 epochs",
+    pass_rate=0.705,
+    pass_n_passes=93,
+    pass_n_total=132,
+    description=(
+        "Apples-to-apples-validated dense fine-tune: +3.1pp vs Qwen 2.5 7B "
+        "Instruct base (0.674). v4 recipe (SFTTrainer + assistant_only_loss, "
+        "100 refusal exemplars, 2 epochs). **Current production model** per "
+        "[docs] 2026-05-06 — clean over-gen (0%), proper refusal (9/9), voice "
+        "preserved. Trained locally on 5090 in ~46 min, $0. Per-category "
+        "asymmetry (vs Qwen 2.5 7B Instruct stock): 🟢 rag_datasheet +3, "
+        "rag_email +3, multihop +1; 🔴 reasoning -3 (terser FT outputs lose "
+        "substring grader points on prompts that reward verbose explanation)."
+    ),
+    deck_bullet=(
+        "Skippy 7B v4 = +3.1pp apples-to-apples gain on its Instruct base. "
+        "Voice preserved, refusal clean, ships in production today. The "
+        "recipe lifts RAG-retrieval and domain-knowledge categories; loses "
+        "a few pp on long-form reasoning (verbosity penalty). The asymmetry "
+        "IS the customer-template signal."
+    ),
+    # Per-category passes (raw rates, vs n total) per [docs] 09:19:
+    # coding 6/6, general 3/3, multihop 6/9 (0.667), num_precision 3/6 (0.5),
+    # rag_blog 3/3, rag_datasheet 57/78 (0.731), rag_email 3/3, reasoning 3/6,
+    # refusal 9/9. Deltas vs Skippy MoE FT (production reference) not yet
+    # computed — Skippy MoE FT's per-category rates not surfaced in the
+    # current catalog. Empty dict matches the INSTRUCT_MOE_STOCK convention.
+    category_deltas={},
+    # Dense Q4 → fp16 internal path on llama.cpp. Selecting on Mid (INT8-only)
+    # triggers 🔴 dtype_mismatch in the app.py UI gate.
+    compute_dtype="fp16",
+    gops_per_token=15.2,  # 2 × 7.6B (full dense forward)
+)
+
+
+SKIPPY_14B_V4 = LLMModel(
+    key="skippy_14b_v4",
+    label="Skippy 14B v4 (Qwen2.5-14B FT — best headline, NOT recommended for production)",
+    family="Dense — 14B params (no expert sparsity)",
+    base="Qwen2.5-14B-Instruct (Alibaba)",
+    total_params_b=14.0,
+    active_params_b=14.0,
+    quant="Q4_K_M GGUF",
+    size_gb=9.2,
+    fine_tune="v4 QLoRA 4-bit — same recipe shape as 7B v4, larger base",
+    pass_rate=0.727,
+    pass_n_passes=96,
+    pass_n_total=132,
+    description=(
+        "Apples-to-apples-validated dense fine-tune: +5.3pp vs Qwen 2.5 14B "
+        "Instruct base — best headline of the v4 campaign. ⚠️ **NOT "
+        "recommended for production** despite the headline: refusal_made_up_"
+        "peripheral 0/3 — confidently invents 'QuantumFlow Engine' specs for "
+        "fictional peripherals. Also rag_email regressed to 0/3 (vs 3/3 on "
+        "the base). Per-category asymmetry: 🟢 numerical_precision +3 "
+        "(perfect 6/6), rag_datasheet substantial gain; 🔴 rag_email −3, "
+        "fabrication on made-up peripherals. Trained on 5090 (QLoRA 4-bit) "
+        "in ~46 min."
+    ),
+    deck_bullet=(
+        "Skippy 14B v4 = +5.3pp headline win on its Instruct base — the "
+        "biggest validated fine-tune gain in the v4 campaign. But "
+        "fabrication on made-up peripherals (0/3) and rag_email regression "
+        "(0/3) make it unsuitable for production despite the headline. "
+        "Cautionary entry — bigger isn't strictly better on this recipe."
+    ),
+    # Per-category passes per [docs] 09:19:
+    # coding 6/6, general 3/3, multihop 6/9 (0.667), num_precision 6/6 (1.0),
+    # rag_blog 3/3, rag_datasheet 60/78 (0.769), rag_email 0/3 (regressed),
+    # reasoning 6/6, refusal 6/9 (made_up_peripheral 0/3).
+    category_deltas={},
+    compute_dtype="fp16",
+    gops_per_token=28.0,  # 2 × 14B (full dense forward)
+)
+
+
 # ─────────── Performance-comparison dense models (added 2026-05-01) ────────
-# Per [backend] 20:08 weekend bake-off campaign. These are NOT Skippy
-# domain fine-tunes — no Skippy v2 prompt-set evaluation. Sole purpose
-# is to anchor the dense-vs-MoE bandwidth-vs-compute comparison on the
-# 5090 across multiple quants. Surface in the dropdown as comparison
-# entries; production deployment would use Skippy MoE / dense FT.
+# Per [backend] 20:08 weekend bake-off campaign. Two of these (7B Instruct,
+# 32B Instruct) anchor the dense-vs-MoE bandwidth-vs-compute comparison on
+# the 5090 across multiple quants. The 7B entry now also serves as the
+# apples-to-apples baseline for SKIPPY_7B_V4 (per [docs] 2026-05-06 09:19).
 #
 # Headline narrative this enables:
 # - Skippy MoE 30B-A3B Q4: ~250 tok/s on 5090 (3B active streams 1.65 GB/tok)
@@ -338,23 +435,31 @@ THINKING_MOE_STOCK = LLMModel(
 
 QWEN25_7B_DENSE_INSTRUCT = LLMModel(
     key="qwen25_7b_dense",
-    label="Qwen 2.5 7B Instruct (dense — perf reference)",
+    label="Qwen 2.5 7B Instruct (dense — apples-to-apples 7B v4 baseline)",
     family="Dense — 7B params (no expert sparsity)",
     base="Qwen2.5-7B-Instruct (Alibaba)",
     total_params_b=7.6,
     active_params_b=7.6,
     quant="Q4_K_M GGUF (also Q5_K_M, Q8_0 measured)",
     size_gb=4.18,  # Q4 footprint; sizer's per-quant scaling applies via decode_bw_per_token_gb
+    pass_rate=0.674,
+    pass_n_passes=89,
+    pass_n_total=132,
     description=(
-        "Stock Qwen 2.5 7B dense — added as a perf-comparison anchor for the "
-        "dense-vs-MoE narrative. NOT a Skippy domain fine-tune; no v2 prompt-set "
-        "evaluation. Decode tok/s on 5090 measured across Q4/Q5/Q8 quants for "
-        "cross-quant BW realization calibration."
+        "Stock Qwen 2.5 7B dense Instruct — serves dual duty: (a) perf-"
+        "comparison anchor for the dense-vs-MoE narrative (decode tok/s "
+        "measured across Q4/Q5/Q8 quants on 5090), and (b) **apples-to-"
+        "apples baseline for Skippy 7B v4** (the +3.1pp gain claim is "
+        "0.705 - 0.674 vs this row, per [docs] 2026-05-06 09:19). "
+        "Per-category breakdown: coding 6/6, general 3/3, multihop 5/9, "
+        "num_precision 3/6, rag_blog 3/3, rag_datasheet 54/78 (0.692), "
+        "rag_email 0/3, reasoning 6/6, refusal 9/9."
     ),
     deck_bullet=(
         "7B dense Q4 = 184 tok/s on 5090 vs Skippy MoE 30B-A3B Q4 = 250 tok/s — "
         "MoE wins on bandwidth despite 4× more total params, because only 3B "
-        "active streams per token."
+        "active streams per token. Also the apples-to-apples baseline for "
+        "Skippy 7B v4's +3.1pp validated fine-tune gain."
     ),
     # Dense Q4 → fp16 internal path on llama-cpp (gates 🔴 dtype_mismatch
     # on Mid INT8-only via the f851d24 app.py UI gate; valid on High +
@@ -402,6 +507,8 @@ LLM_MODELS: dict[str, LLMModel] = {
     # perf-comparison-only references (no Skippy v2 evaluation).
     SKIPPY_MOE_FINETUNE.key:        SKIPPY_MOE_FINETUNE,
     SKIPPY_DENSE_FINETUNE.key:      SKIPPY_DENSE_FINETUNE,
+    SKIPPY_7B_V4.key:               SKIPPY_7B_V4,
+    SKIPPY_14B_V4.key:              SKIPPY_14B_V4,
     INSTRUCT_MOE_STOCK.key:         INSTRUCT_MOE_STOCK,
     THINKING_MOE_STOCK.key:         THINKING_MOE_STOCK,
     QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,
