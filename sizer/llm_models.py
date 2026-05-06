@@ -2,7 +2,8 @@
 
 Three selectable models for the LLM workload comparison surface:
 - Skippy MoE domain fine-tune (default, current production)
-- Skippy dense domain fine-tune (prior production, near-parity)
+- Skippy dense domain fine-tune (prior production, near-parity at the
+  pass-rate level — see "base-identity caveat" below)
 - Qwen3-30B-A3B-Thinking-2507 (stock public reasoning baseline)
 
 Two of these are Q4_K_M GGUF MoE 30B/3B-active (Skippy MoE FT,
@@ -17,12 +18,35 @@ fine-tune is selected, the headline tok/s shown in the metric tile is
 optimistic. The model expander surfaces this caveat in-line; future
 work could split `Hardware.measured_llm_*` by model architecture.
 
-The two stories the catalog answers:
+## Base-identity caveat (per [docs] 2026-05-05 09:45)
+
+Skippy MoE FT was trained on **Qwen3-30B-A3B-Instruct-2507** base
+(verified from commit 704a2fb + on-disk adapter_config.json), NOT the
+Thinking-2507 base. Thinking stock here is the Thinking-2507 sister
+model — a DIFFERENT base than Skippy MoE FT. So the apparent +5.3pp
+"domain fine-tune win" (0.689 - 0.636) is base-confounded by the
++7.6pp Instruct-vs-Thinking sister-model gap. Apples-to-apples (Skippy
+MoE FT vs Instruct-2507 stock at 0.712) is **−2.3pp** — the MoE
+fine-tune slightly regressed vs its own base.
+
+The dense fine-tune (Qwen2.5-14B v4) IS apples-to-apples-validated:
++5.3pp vs Qwen2.5-14B Instruct base. The MoE recipe (attention-only
+LoRA on Qwen3-30B-A3B) is the failure mode — pending an MoE-aware
+LoRA target test (router + experts) to confirm whether MoE-base
+fine-tuning is recoverable. Production reverted to Skippy 7B v4 dense
+in the meantime.
+
+## The two stories the catalog answers
+
 1. Model-architecture trade: "would a stock public reasoning model
-   just replace the domain fine-tune?" → not on your domain.
+   replace the fine-tune?" — comparison is base-confounded for the
+   MoE row; deck_bullet now frames the dense gains as the validated
+   case and MoE as pending-validation.
 2. Cost trade: "would the older dense fine-tune work just as well?" →
-   yes on quality (Δ +0.7pp), no on cost (4-5× more weights to read
-   per token).
+   the two FTs land at similar pass-rates (Δ +0.7pp), but they got
+   there via different paths: dense recovered capability, MoE
+   regressed-but-arrived-near-parity. Cost story still holds: 4-5×
+   fewer weights to read per token via MoE 3B-active routing.
 
 ## Convention: category_deltas
 
@@ -31,7 +55,10 @@ All `category_deltas` are **vs the production reference**
 positive = this model wins vs production. The production reference
 itself has an empty `category_deltas` dict (it can't differ from
 itself). UI surfaces these as "Per-category Δ vs Skippy MoE
-fine-tune (production)" in the accuracy expander.
+fine-tune (production)" in the accuracy expander. Note that
+THINKING_MOE_STOCK's category_deltas mix BASE-GAP (Instruct vs
+Thinking baselines) with RECIPE EFFECT (LoRA fine-tune); they are
+NOT clean fine-tune-recipe deltas.
 
 Accuracy from Skippy v2 prompt set: 44 prompts × 3 samples = 132,
 RAG enabled (8 chunks via hybrid retrieval). Diffs:
@@ -117,26 +144,31 @@ SKIPPY_MOE_FINETUNE = LLMModel(
     key="skippy_finetune",
     label="Skippy MoE fine-tune (DEFAULT)",
     family="Sparse MoE — 128 experts × 8 used per token",
-    base="Qwen3-30B-A3B (Alibaba)",
+    base="Qwen3-30B-A3B-Instruct-2507 (Alibaba)",
     total_params_b=30.0,
     active_params_b=3.0,
     quant="Q4_K_M GGUF",
     size_gb=18.0,
-    fine_tune="domain LoRA — NXP datasheets, transcripts, Skippy prod corpus",
+    fine_tune="attention-only QLoRA r=64 — NXP datasheets, transcripts, Skippy prod corpus",
     pass_rate=0.689,
     pass_n_passes=91,
     pass_n_total=132,
     description=(
-        "Kyle's domain fine-tune of Qwen3-30B-A3B — the model shipping in "
-        "Skippy production. LoRA-adapted on internal corpora (NXP datasheets, "
-        "meeting transcripts, source code). Default selection and the "
-        "**production reference** for per-category Δ comparisons across the "
-        "catalog."
+        "Kyle's domain fine-tune of Qwen3-30B-A3B-Instruct-2507 — the model "
+        "in Skippy production at the time of the v2-RAG eval. Attention-only "
+        "QLoRA r=64 adapted on internal corpora (NXP datasheets, meeting "
+        "transcripts, source code). Default selection and the **production "
+        "reference** for per-category Δ comparisons across the catalog. NOTE: "
+        "production has since reverted to Skippy 7B v4 dense per [docs] "
+        "2026-05-05; MoE-base fine-tune validation pending an MoE-aware LoRA "
+        "target test (router + experts)."
     ),
     deck_bullet=(
-        "Domain fine-tuning buys +5.3pp on Kyle's RAG eval vs stock public "
-        "reasoning models — not by making the model 'smarter' in general, "
-        "but by teaching it the retrieval vocabulary of the domain."
+        "Fine-tuning gains are validated on dense Qwen2.5 (7B v4 +3.1pp, "
+        "14B v4 +5.3pp vs respective Instruct bases — apples-to-apples). "
+        "MoE-base validation is pending — the current attention-only LoRA "
+        "recipe does not transfer capability to Qwen3-MoE. MoE-aware LoRA "
+        "target test (router + experts) on RunPod is the next milestone."
     ),
     # Production reference: vs itself = no Δs. Other entries' deltas
     # are computed against this row.
@@ -156,7 +188,7 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
     key="skippy_dense_finetune",
     label="Skippy dense fine-tune (Qwen2.5-14B)",
     family="Dense — 14B params (no expert sparsity)",
-    base="Qwen2.5-14B (Alibaba)",
+    base="Qwen2.5-14B-Instruct (Alibaba)",
     total_params_b=14.0,
     active_params_b=14.0,
     quant="Q4_K_M GGUF",
@@ -166,16 +198,19 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
     pass_n_passes=90,
     pass_n_total=132,
     description=(
-        "Kyle's prior-production dense fine-tune. Same LoRA recipe as the "
-        "MoE entry, applied to the dense Qwen2.5-14B base. Maintained for "
-        "the dense-vs-MoE quality comparison — kept in catalog because the "
-        "answer to 'is MoE actually better?' isn't 'on quality' (it's a "
-        "wash), it's 'on cost-per-token.'"
+        "Kyle's prior-production dense fine-tune. Same LoRA recipe corpus as "
+        "the MoE entry, applied to the dense Qwen2.5-14B-Instruct base. "
+        "Apples-to-apples-validated: +5.3pp vs the Qwen2.5-14B-Instruct "
+        "stock baseline (per [docs] 2026-05-05). Kept in catalog as the "
+        "validated-fine-tune anchor and for the dense-vs-MoE cost story."
     ),
     deck_bullet=(
-        "Dense and MoE fine-tunes hit near-parity on quality (Δ +0.7pp) — "
-        "MoE wins on per-token cost (3B active << 14B dense), NOT accuracy. "
-        "Choosing MoE is a cost decision, not a capability one."
+        "Dense fine-tune validated +5.3pp vs its own Instruct base "
+        "(apples-to-apples). MoE entry lands at near-parity (Δ +0.7pp at "
+        "the pass-rate level) but via a different path — MoE recipe "
+        "regressed vs its Instruct base (see SKIPPY_MOE_FINETUNE caveat). "
+        "Cost story still holds: MoE 3B-active reads 4-5× fewer weights "
+        "per token than 14B dense, regardless of whose recipe won."
     ),
     # Δ vs Skippy MoE FT (production reference). MoE wins rag_datasheet
     # +3 → dense -3 here; MoE loses refusal -2 → dense +2 here.
@@ -197,7 +232,7 @@ THINKING_MOE_STOCK = LLMModel(
     key="thinking_stock",
     label="Qwen3-30B-A3B-Thinking-2507 (stock public)",
     family="Sparse MoE — 128 experts × 8 used per token",
-    base="Qwen3-30B-A3B (Alibaba)",
+    base="Qwen3-30B-A3B-Thinking-2507 (Alibaba)",
     total_params_b=30.0,
     active_params_b=3.0,
     quant="Q4_K_M GGUF",
@@ -207,15 +242,30 @@ THINKING_MOE_STOCK = LLMModel(
     pass_n_passes=84,
     pass_n_total=132,
     description=(
-        "Public Qwen3-30B-A3B-Thinking-2507 — Alibaba's reasoning-tuned variant "
-        "of the same base. No exposure to Kyle's domain corpus. Used as the "
-        "'would a free public model just replace the fine-tune?' comparison."
+        "Public Qwen3-30B-A3B-Thinking-2507 — Alibaba's reasoning-tuned "
+        "sister model in the Qwen3-30B-A3B family. CAVEAT: this is the "
+        "Thinking-2507 variant; Skippy MoE FT is on the Instruct-2507 "
+        "variant. The two share an architecture but NOT a base — the "
+        "Instruct-vs-Thinking baseline gap on v2-RAG is +7.6pp (per [docs] "
+        "2026-05-05). Apples-to-apples comparisons against Skippy MoE FT "
+        "should account for this base-sister gap."
     ),
     deck_bullet=(
-        "Public reasoning models are stronger in general, but lose to the "
-        "domain fine-tune on retrieval-grounded queries — domain knowledge "
-        "doesn't fall out of larger general capability."
+        "Public reasoning-tuned sister to Skippy MoE FT's base. NOT a "
+        "clean fine-tune-vs-stock comparison — the +5.3pp pass-rate "
+        "delta seen in the catalog mixes a +7.6pp base-sister gap "
+        "(Instruct vs Thinking) with the recipe effect. Use this row "
+        "for 'how does public reasoning rank' framing, not for fine-tune "
+        "validation."
     ),
+    # CAVEAT: these deltas are vs Skippy MoE FT (Instruct-2507 base),
+    # but THIS row is Thinking-2507 base — so the deltas mix BASE-GAP
+    # (Instruct vs Thinking sister-models, +7.6pp Instruct advantage)
+    # with RECIPE EFFECT (LoRA fine-tune). They are NOT clean
+    # fine-tune-recipe deltas. Per [docs] 2026-05-05, the apples-to-apples
+    # MoE fine-tune delta vs Instruct stock is −2.3pp (regressed). The
+    # apparent "FT wins rag_datasheet" pattern below is plausibly the
+    # Instruct-base advantage, not the LoRA's contribution.
     category_deltas={
         "rag_datasheet": -8,
         "rag_email":     -3,

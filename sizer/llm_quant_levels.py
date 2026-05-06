@@ -10,8 +10,14 @@ Distinct from `sizer/llm_models.py`, which captures the **model axis**
 **precision axis** (quality cost of the quantization recipe on the
 base model). Kyle's deck wants both stories surfaced:
 
-  - Model axis:     domain fine-tune buys ~+5pp domain-retrieval headroom
-                    that a stock public reasoning model can't replicate
+  - Model axis:     dense fine-tunes (Qwen2.5-7B v4 +3.1pp, 14B v4
+                    +5.3pp vs respective Instruct bases) post real
+                    apples-to-apples gains. MoE-base validation pending
+                    per [docs] 2026-05-05 — the previously cited +5pp
+                    "domain headroom" claim was confounded by the
+                    +7.6pp Instruct-vs-Thinking sister-model gap. See
+                    `sizer/llm_models.py` module docstring for the
+                    base-identity caveat.
   - Precision axis: W8A8 INT8 costs ~3.8pp vs fp16, concentrated in
                     retrieval-grounded wording; structured output
                     (coding, reasoning) is byte-identical (Jaccard 1.0)

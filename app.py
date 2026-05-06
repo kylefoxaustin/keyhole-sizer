@@ -554,10 +554,13 @@ with st.sidebar:
             options=llm_model_keys,
             format_func=lambda k: LLM_MODELS[k].label,
             index=llm_model_keys.index(DEFAULT_LLM_MODEL_KEY),
-            help="Both models share the Q4_K_M MoE 30B/3B-active shape so "
-                 "decode tok/s and TTFT are identical — accuracy is what "
-                 "differs. Selecting answers Kyle's deck question: 'would "
-                 "a stock public reasoning model just replace the fine-tune?'",
+            help="Both Q4_K_M MoE 30B/3B-active entries share decode tok/s "
+                 "and TTFT — accuracy is what differs. Note: the MoE "
+                 "fine-tune row's pass-rate is base-confounded vs Thinking "
+                 "stock (different sister-models within Qwen3-30B-A3B). "
+                 "Apples-to-apples fine-tune validation lives on the dense "
+                 "Qwen2.5 entries — see model description for the base-"
+                 "identity caveat per [docs] 2026-05-05.",
             key="llm_model_key",
         )
         _model = LLM_MODELS[llm_model_key]
