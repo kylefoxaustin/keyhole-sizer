@@ -126,6 +126,20 @@ class LLMModel:
     # use site.
     gops_per_token: float = 0.0
 
+    # Optional perf-anchor alias — when set, use this OTHER model's key
+    # to look up `Hardware.measured_llm[...][quant]` for performance
+    # projections. Used when a model shares the exact perf characteristics
+    # of another catalog entry (same architecture, same quant) so existing
+    # 5090 measurements transfer verbatim. Examples:
+    #   - SKIPPY_7B_V4 (Qwen2.5-7B fine-tune) ↔ qwen25_7b_dense (Qwen2.5-7B
+    #     stock): same arch, same Q4 path; 5090 measurement is the same.
+    #   - INSTRUCT_MOE_STOCK (no fine-tune) ↔ skippy_finetune (LoRA-adapted):
+    #     same Qwen3-30B-A3B MoE arch; perf identical, accuracy differs.
+    # Mirrors PAI sizer's measurement_alias (commit 3cb533a). Resolved in
+    # app.py before calling project_llm, so npu_model.py stays decoupled
+    # from the LLM catalog.
+    measurement_alias: str | None = None
+
     @property
     def decode_bw_per_token_gb(self) -> float:
         """Approximate DRAM bytes read per decode token, in GB.
@@ -223,12 +237,13 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
         "holds for either dense entry: MoE 3B-active reads 4-5× fewer "
         "weights per token than any 14B dense forward."
     ),
-    # Δ vs Skippy MoE FT (production reference). MoE wins rag_datasheet
-    # +3 → dense -3 here; MoE loses refusal -2 → dense +2 here.
-    category_deltas={
-        "rag_datasheet": -3,
-        "refusal":       +2,
-    },
+    # Stale: was derived against old production reference (Skippy MoE FT
+    # at 0.689) before the 2026-05-06 production-shift to Skippy 7B v4.
+    # Per [docs] 2026-05-06 09:51, schema reconciliation (and per-category
+    # re-derivation against new production) deferred until MoE-router +
+    # 32B v4 evals land; until then, leave empty so the UI doesn't show
+    # numbers that don't match the displayed production-reference label.
+    category_deltas={},
     # Dense Qwen 2.5 14B Q4 uses llama-cpp's fp16 internal path —
     # weights dequantized to fp16 for the matmul, requires native FP16
     # tensor support. Per [pai-sizer] e69237b: "Dense 14B Q4 stays fp16."
@@ -274,6 +289,8 @@ INSTRUCT_MOE_STOCK = LLMModel(
     # INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
     compute_dtype="int8",
     gops_per_token=6.0,  # 2 × 3B active — same architecture as Skippy MoE
+    # Same MoE arch as Skippy MoE FT — perf cells transfer verbatim.
+    measurement_alias="skippy_finetune",
 )
 
 
@@ -307,20 +324,14 @@ THINKING_MOE_STOCK = LLMModel(
         "for 'how does public reasoning rank' framing, not for fine-tune "
         "validation."
     ),
-    # CAVEAT: these deltas are vs Skippy MoE FT (Instruct-2507 base),
-    # but THIS row is Thinking-2507 base — so the deltas mix BASE-GAP
-    # (Instruct vs Thinking sister-models, +7.6pp Instruct advantage)
-    # with RECIPE EFFECT (LoRA fine-tune). They are NOT clean
-    # fine-tune-recipe deltas. Per [docs] 2026-05-05, the apples-to-apples
-    # MoE fine-tune delta vs Instruct stock is −2.3pp (regressed). The
-    # apparent "FT wins rag_datasheet" pattern below is plausibly the
-    # Instruct-base advantage, not the LoRA's contribution.
-    category_deltas={
-        "rag_datasheet": -8,
-        "rag_email":     -3,
-        "numerical_precision": +3,
-        "refusal":       +2,
-    },
+    # Stale: was derived against old production reference (Skippy MoE FT
+    # at 0.689) AND mixed BASE-GAP with RECIPE EFFECT (Instruct vs Thinking
+    # sister-models, +7.6pp Instruct advantage). Per [docs] 2026-05-06
+    # 09:51 production shift to Skippy 7B v4 + schema reconciliation
+    # deferral, leave empty until MoE-router + 32B v4 evals land — at
+    # which point [docs] will provide a clean per-category payload
+    # against the new reference.
+    category_deltas={},
     # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — runs the
     # same INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
     compute_dtype="int8",
@@ -377,6 +388,11 @@ SKIPPY_7B_V4 = LLMModel(
     # triggers 🔴 dtype_mismatch in the app.py UI gate.
     compute_dtype="fp16",
     gops_per_token=15.2,  # 2 × 7.6B (full dense forward)
+    # Same Qwen2.5-7B dense arch as qwen25_7b_dense — 5090 measurements
+    # (Q4/Q5/Q8) transfer verbatim via this alias. Without it, project_llm
+    # falls through to the flat-field MoE Q4 anchor (~250 tok/s) which is
+    # wildly wrong for dense 7B (real ~184 tok/s).
+    measurement_alias="qwen25_7b_dense",
 )
 
 
@@ -418,6 +434,13 @@ SKIPPY_14B_V4 = LLMModel(
     category_deltas={},
     compute_dtype="fp16",
     gops_per_token=28.0,  # 2 × 14B (full dense forward)
+    # NOTE: no measurement_alias yet — sizer's RTX_5090_REFERENCE.measured_llm
+    # has no qwen25_14b_dense Q4 cell. PAI sizer measured 14B Q4 = 102.2
+    # tok/s on 5090 (per [pai-sizer] 2026-05-06 09:27); needs to be
+    # mirrored to our 5090 reference before alias becomes useful. Until
+    # then, project_llm falls through to flat-field MoE anchor (~250 tok/s)
+    # — wrong for dense 14B (real ~102 tok/s). Tracked for follow-up.
+    measurement_alias=None,
 )
 
 
@@ -515,12 +538,18 @@ LLM_MODELS: dict[str, LLMModel] = {
     QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,
 }
 
-DEFAULT_LLM_MODEL_KEY = SKIPPY_MOE_FINETUNE.key
+DEFAULT_LLM_MODEL_KEY = SKIPPY_7B_V4.key
 
 # Reference for all per-category-Δ rendering. UI labels comparisons as
-# "vs Skippy MoE fine-tune (production)" and the production model
-# itself shows no per-category breakdown (it would be 0 across the board).
-PRODUCTION_REFERENCE_KEY = SKIPPY_MOE_FINETUNE.key
+# "vs <production model> (production)" and the production model itself
+# shows no per-category breakdown (it would be 0 against itself).
+#
+# Shifted from SKIPPY_MOE_FINETUNE.key → SKIPPY_7B_V4.key per [docs]
+# 2026-05-06 09:51: 7B v4 IS production as of 2026-05-04 17:30 (revert
+# from the brief Instruct-2507 stock swap). The "Δ vs production" column
+# should answer "how does this compare to what Skippy actually ships
+# today?" — anchoring against the old MoE FT row was misleading.
+PRODUCTION_REFERENCE_KEY = SKIPPY_7B_V4.key
 
 
 def accuracy_delta_pp(a: LLMModel, b: LLMModel) -> float | None:

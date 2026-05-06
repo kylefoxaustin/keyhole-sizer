@@ -847,8 +847,17 @@ if llm_enabled:
     if _capability == "unsupported":
         _llm_dtype_supported = False
 
+# Resolve measurement_alias before calling project_llm: when the
+# selected model is a perf-clone of another catalog entry (same arch,
+# same quant), use the alias to look up the existing 5090 measurement.
+# Mirrors PAI sizer's measurement_alias mechanism (commit 3cb533a).
+# Without this, e.g. Skippy 7B v4 selecting silently falls through to
+# the flat-field MoE Q4 anchor and projects ~250 tok/s on 5090 — wrong
+# for dense 7B (real ~184 tok/s).
+_perf_lookup_key = (LLM_MODELS[llm_model_key].measurement_alias
+                    or llm_model_key) if llm_enabled else None
 llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
-                    model_key=llm_model_key)
+                    model_key=_perf_lookup_key)
        if (llm_enabled and _llm_dtype_supported) else None)
 # Apply per-model BW-scaling: project_llm() is anchored to the perf
 # reference model (Qwen3-30B-A3B MoE 3B-active). For models with
