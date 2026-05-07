@@ -433,6 +433,14 @@ RTX_5090_REFERENCE = Hardware(
             "Q5_K_M": {"decode_tok_s": 47.7,  "prefill_tok_s": 1888.0},
             # No Q8_0 — won't fit on 5090's 32 GB VRAM.
         },
+        # 14B Q4 dense — added 2026-05-07 per [docs] 10:18. Median over
+        # n=132 samples from kyle-qwen25-14b-v1-q4_k_m's v2-RAG run
+        # telemetry. Used as the perf-anchor for SKIPPY_14B_V4 via the
+        # measurement_alias mechanism (same architecture / quant — perf
+        # transfers verbatim regardless of fine-tune presence).
+        "qwen25_14b_dense": {
+            "Q4_K_M": {"decode_tok_s": 125.7, "prefill_tok_s": 5117.2},
+        },
     },
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).

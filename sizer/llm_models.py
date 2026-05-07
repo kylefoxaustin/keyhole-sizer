@@ -1,15 +1,24 @@
 """LLM model catalog for the sizer.
 
-Selectable models for the LLM workload comparison surface (8 entries
-post 2026-05-06 cross-app convergence per [docs] 09:19):
-- Skippy MoE domain fine-tune v1 (default — historical production reference)
-- Skippy dense domain fine-tune (prior production, pre-v4)
-- Skippy 7B v4 (Qwen2.5-7B FT — current production)
-- Skippy 14B v4 (Qwen2.5-14B FT — best headline, NOT recommended for prod)
-- Qwen3-30B-A3B-Instruct-2507 (apples-to-apples MoE base for the FT row)
+Selectable models for the LLM workload comparison surface (11 entries
+post 2026-05-07 [docs] Tier 2.x bake-off integration):
+
+Production + validated FTs:
+- Skippy 7B v4 (Qwen2.5-7B FT — DEFAULT, current production, +3.1pp clean)
+- Skippy 14B v4 (Qwen2.5-14B FT — best dense headline, +5.3pp BUT fabricates)
+- Skippy 32B v4 (Qwen2.5-32B FT — recipe trade −4.6pp, NOT recommended)
+- Skippy MoE-router v1 (Qwen3-30B-A3B FT — recommended MoE recipe, −3.8pp)
+
+Historical + cautionary FTs:
+- Skippy MoE FT v1 (original MoE attention-only LoRA — pre-router-v1)
+- Skippy MoE-full v1 (over-fit cautionary; expert-FFN LoRA broke rag_blog)
+- Skippy dense fine-tune (older Qwen2.5-14B pre-v4 dense LoRA)
+
+Apples-to-apples baselines:
+- Qwen3-30B-A3B-Instruct-2507 (true base for MoE FT — −2.3pp vs base)
 - Qwen3-30B-A3B-Thinking-2507 (sister-model context, NOT the MoE FT base)
-- Qwen 2.5 7B Instruct (apples-to-apples 7B v4 baseline + perf reference)
-- Qwen 2.5 32B Instruct (perf reference only)
+- Qwen 2.5 7B Instruct (apples-to-apples 7B v4 baseline)
+- Qwen 2.5 32B Instruct (apples-to-apples 32B v4 baseline)
 
 Two of these are Q4_K_M GGUF MoE 30B/3B-active (Skippy MoE FT,
 Thinking stock) — same decode-tok/s ceiling on every Hardware tier
@@ -412,13 +421,16 @@ SKIPPY_14B_V4 = LLMModel(
     description=(
         "Apples-to-apples-validated dense fine-tune: +5.3pp vs Qwen 2.5 14B "
         "Instruct base — best headline of the v4 campaign. ⚠️ **NOT "
-        "recommended for production** despite the headline: refusal_made_up_"
-        "peripheral 0/3 — confidently invents 'QuantumFlow Engine' specs for "
-        "fictional peripherals. Also rag_email regressed to 0/3 (vs 3/3 on "
-        "the base). Per-category asymmetry: 🟢 numerical_precision +3 "
-        "(perfect 6/6), rag_datasheet substantial gain; 🔴 rag_email −3, "
-        "fabrication on made-up peripherals. Trained on 5090 (QLoRA 4-bit) "
-        "in ~46 min."
+        "recommended for production** despite the headline. Customer-template "
+        "verdict (per [docs] 2026-05-07 13:17 wrap-up): 'Validated with "
+        "caveat — add adversarial refusal data before shipping.' Per-category "
+        "asymmetry: 🟢 numerical_precision +3 (perfect 6/6), rag_datasheet "
+        "substantial gain; 🔴 rag_email −3 (3/3 → 0/3), made_up_peripheral "
+        "fabrication 0/3 — confidently invents 'QuantumFlow Engine' specs "
+        "for fictional peripherals. Note that 32B Instruct STOCK has the "
+        "same fabrication problem (3/3 wrong on those prompts), so this is "
+        "partly a Qwen base-model behavior the v4 recipe inherits + amplifies. "
+        "Trained on 5090 (QLoRA 4-bit) in ~46 min."
     ),
     deck_bullet=(
         "Skippy 14B v4 = +5.3pp headline win on its Instruct base — the "
@@ -434,13 +446,157 @@ SKIPPY_14B_V4 = LLMModel(
     category_deltas={},
     compute_dtype="fp16",
     gops_per_token=28.0,  # 2 × 14B (full dense forward)
-    # NOTE: no measurement_alias yet — sizer's RTX_5090_REFERENCE.measured_llm
-    # has no qwen25_14b_dense Q4 cell. PAI sizer measured 14B Q4 = 102.2
-    # tok/s on 5090 (per [pai-sizer] 2026-05-06 09:27); needs to be
-    # mirrored to our 5090 reference before alias becomes useful. Until
-    # then, project_llm falls through to flat-field MoE anchor (~250 tok/s)
-    # — wrong for dense 14B (real ~102 tok/s). Tracked for follow-up.
-    measurement_alias=None,
+    # 14B Q4 dense perf cell added to RTX_5090_REFERENCE.measured_llm
+    # 2026-05-07 per [docs] 10:18 measurement (decode 125.7 tok/s,
+    # prefill 5117 tok/s, median over n=132). Same arch / quant as the
+    # underlying 14B base — fine-tune doesn't change perf, only weights.
+    measurement_alias="qwen25_14b_dense",
+)
+
+
+SKIPPY_QWEN25_32B_V4 = LLMModel(
+    key="skippy_qwen25_32b_v4",
+    label="Skippy 32B v4 (Qwen2.5-32B FT — recipe trade, NOT recommended)",
+    family="Dense — 32B params (no expert sparsity)",
+    base="Qwen2.5-32B-Instruct (Alibaba)",
+    total_params_b=32.5,
+    active_params_b=32.5,
+    quant="Q4_K_M GGUF",
+    size_gb=17.88,
+    fine_tune="v4 — 2 ep + assistant_only_loss + messages format (recipe-clean)",
+    pass_rate=0.636,
+    pass_n_passes=84,
+    pass_n_total=132,
+    description=(
+        "Recipe-CLEAN 32B v4 fine-tune. 2 epochs + assistant_only_loss + "
+        "messages format (full v4 recipe, not the earlier 3-epoch confound "
+        "run). Per [docs] 2026-05-07 12:44: regresses **−4.6pp** vs Qwen "
+        "2.5 32B Instruct stock (0.682). The recipe doesn't plateau — it "
+        "actively trades capability for safety: +3 refusal calibration "
+        "(fixes 32B base's made_up_peripheral fabrication 3/3 → 0/3) "
+        "BUT −3 numerical_precision, −3 rag_datasheet (over-fit), −3 "
+        "multihop (under-trained). Net regression. Voice transfers cleanly "
+        "(152 char, matches 14B v4 sweet spot). **Customer rule:** don't "
+        "apply v4 recipe at 32B with 6.5K-example corpus unless you weight "
+        "refusal-calibration ≥ 3× capability-headline. Cloud spend ~$25 H100."
+    ),
+    deck_bullet=(
+        "32B v4 trades 9 capability points for 3 safety points — net "
+        "−4.6pp vs Qwen 2.5 32B Instruct. The recipe doesn't extend "
+        "cleanly past 14B on a 6.5K-example corpus. Informative-failure "
+        "data: corpus-size-vs-param-count mismatch is a real customer "
+        "constraint, not a plateau."
+    ),
+    # Per-category passes per [docs] 03:03 + 13:17:
+    # coding 6/6, general 3/3, multihop 3/9 (0.333 — under-trained),
+    # num_precision 3/6, rag_blog 3/3, rag_datasheet 48/78 (0.615),
+    # rag_email 3/3, reasoning 6/6, refusal 9/9 (recovered).
+    category_deltas={},
+    compute_dtype="fp16",
+    gops_per_token=65.0,  # 2 × 32.5B (full dense forward)
+    # Same arch / quant as Qwen 2.5 32B Instruct stock — perf cells transfer.
+    measurement_alias="qwen25_32b_dense",
+)
+
+
+# ─────────── Validated MoE recipes (added 2026-05-07 per [docs] Tier 2.x) ──
+# Two new MoE-base entries from the [docs] 2026-05-06/07 RunPod campaign:
+# the "router-v1" recipe (recommended) and the "full-v1" expert-FFN recipe
+# (cautionary over-fit). Both extend the original Skippy MoE FT v1 by
+# adding LoRA targets beyond attention. Per [docs] 13:17 wrap-up: router-v1
+# is the recommended MoE recipe; full-v1 is informative-failure data.
+
+SKIPPY_MOE_ROUTER_V1 = LLMModel(
+    key="skippy_moe_router_v1",
+    label="Skippy MoE-router v1 (recommended MoE recipe)",
+    family="Sparse MoE — 128 experts × 8 used per token",
+    base="Qwen3-30B-A3B-Instruct-2507 (Alibaba)",
+    total_params_b=30.0,
+    active_params_b=3.0,
+    quant="Q4_K_M GGUF",
+    size_gb=18.0,
+    fine_tune="(attention + router) LoRA — adds gate.weight via target_parameters",
+    pass_rate=0.674,
+    pass_n_passes=89,
+    pass_n_total=132,
+    description=(
+        "MoE fine-tune with attention + router LoRA targets. Per [docs] "
+        "2026-05-06 19:49: validates that adding the router (via peft "
+        "target_parameters=['gate.weight']) recovers the reasoning "
+        "regression that attention-only LoRA causes on Qwen3-A3B "
+        "(multihop 0/9 → 6/9 vs MoE v4). Headline still −3.8pp vs "
+        "Instruct-2507 base (67.4% vs 71.2%) — domain-knowledge gap "
+        "(rag_datasheet 51/78 vs base 55/78) suggests expert FFNs "
+        "would need targeting too… BUT [docs] 13:17 confirmed the "
+        "expert-FFN extension OVER-FITS at 6.5K-example corpus size "
+        "(see SKIPPY_MOE_FULL_V1). **Customer rule:** include the router "
+        "in MoE LoRA targets, do NOT add expert FFN LoRA at this corpus "
+        "size. ~$15 H100 cost."
+    ),
+    deck_bullet=(
+        "MoE-router v1 is the recommended MoE-base recipe per [docs] "
+        "Tier 2.x: include gate.weight in LoRA targets, recovers "
+        "reasoning capability that attention-only loses. Still −3.8pp "
+        "vs Instruct base — domain-knowledge gap remains, expert-FFN "
+        "extension fails (over-fits). The recipe's diagnostic value: "
+        "MoE bases need router targeting, but corpus-too-small for "
+        "expert-FFN targeting at 6.5K examples."
+    ),
+    # Per-category passes per [docs] 19:49:
+    # coding 6/6, general 3/3, multihop 6/9 (0.667 — recovered from 0/9),
+    # num_precision 3/6, rag_blog 3/3, rag_datasheet 51/78 (0.654 — flat
+    # vs MoE v4, didn't budge), rag_email 2/3, reasoning 6/6, refusal 9/9.
+    category_deltas={},
+    compute_dtype="int8",
+    gops_per_token=6.0,  # 2 × 3B active — same MoE architecture
+    # Same Qwen3-30B-A3B Q4 MoE arch as Skippy MoE FT — perf transfers.
+    measurement_alias="skippy_finetune",
+)
+
+
+SKIPPY_MOE_FULL_V1 = LLMModel(
+    key="skippy_moe_full_v1",
+    label="Skippy MoE-full v1 (over-fit cautionary entry)",
+    family="Sparse MoE — 128 experts × 8 used per token",
+    base="Qwen3-30B-A3B-Instruct-2507 (Alibaba)",
+    total_params_b=30.0,
+    active_params_b=3.0,
+    quant="Q4_K_M GGUF",
+    size_gb=18.0,
+    fine_tune="(attention + router + packed-expert FFN) LoRA at r=8, ~470M trainable",
+    pass_rate=0.629,
+    pass_n_passes=83,
+    pass_n_total=132,
+    description=(
+        "MoE fine-tune with attention + router + packed-expert FFNs (r=8 "
+        "via peft target_parameters on packed [128, ...] tensors per [docs] "
+        "13:17 patch: experts.gate_up_proj [128, 1536, 2048] + "
+        "experts.down_proj [128, 2048, 768]). Per [docs] 2026-05-07 10:21: "
+        "tests whether expert-level LoRA recovers the domain-knowledge gap "
+        "that router-v1 left broken. **Hypothesis FALSIFIED.** 374M "
+        "trainable params (1.21% of model) over-fit the 6,517-example "
+        "corpus, BROKE rag_blog (3/3 → 0/3) and worsened rag_datasheet "
+        "(51 → 47/78) vs router-v1. Voice clipped to 104 char avg "
+        "(vs 141 router-v1) — model became too terse for long-form "
+        "retrieval. **Customer rule for MoE bases:** stop at router LoRA; "
+        "expert FFN LoRA over-fits at this corpus size. Cautionary "
+        "informative-failure entry — DO NOT ship."
+    ),
+    deck_bullet=(
+        "MoE-full v1 = cautionary over-fit data. Adding expert-FFN LoRA "
+        "(beyond router-v1) at 6.5K-example corpus size dropped headline "
+        "67.4% → 62.9%. Voice clipped to 104 char (over-terse), broke "
+        "rag_blog 3/3 → 0/3. The extra LoRA capacity lacks training "
+        "signal at this corpus size — more isn't always better."
+    ),
+    # Per-category passes per [docs] 10:21:
+    # coding 6/6, general 3/3, multihop 6/9 (0.667 — kept router recovery),
+    # num_precision 3/6, rag_blog 0/3 (NEW regression), rag_datasheet 47/78
+    # (0.603 — worse than router), rag_email 3/3, reasoning 6/6, refusal 9/9.
+    category_deltas={},
+    compute_dtype="int8",
+    gops_per_token=6.0,  # 2 × 3B active — same MoE arch
+    measurement_alias="skippy_finetune",
 )
 
 
@@ -496,24 +652,36 @@ QWEN25_7B_DENSE_INSTRUCT = LLMModel(
 
 QWEN25_32B_DENSE_INSTRUCT = LLMModel(
     key="qwen25_32b_dense",
-    label="Qwen 2.5 32B Instruct (dense — perf reference)",
+    label="Qwen 2.5 32B Instruct (dense — apples-to-apples 32B v4 baseline)",
     family="Dense — 32B params (no expert sparsity)",
     base="Qwen2.5-32B-Instruct (Alibaba)",
     total_params_b=32.5,
     active_params_b=32.5,
     quant="Q4_K_M GGUF (also Q5_K_M measured; Q8 won't fit on 5090)",
     size_gb=17.88,  # Q4 footprint
+    pass_rate=0.682,
+    pass_n_passes=90,
+    pass_n_total=132,
     description=(
-        "Stock Qwen 2.5 32B dense — perf-comparison anchor at the 30B-class "
-        "size to slope-test MoE vs dense at the SAME total-param magnitude. "
-        "Same architecture family as Skippy MoE (Qwen3-30B-A3B = 30B total) "
-        "but everything streams every token. NOT evaluated on Skippy v2 "
-        "prompt set."
+        "Stock Qwen 2.5 32B Instruct — serves dual duty: (a) perf-comparison "
+        "anchor at the 30B-class size for the dense-vs-MoE slope test, and "
+        "(b) **apples-to-apples baseline for Skippy 32B v4** (per [docs] "
+        "2026-05-07 12:44). Notable per-category: numerical_precision 6/6 "
+        "(perfect — base capability the FT recipe destroyed), but refusal "
+        "6/9 (made_up_peripheral 3/3 wrong — confidently fabricates "
+        "fictional features). The fabrication problem is a Qwen2.5 base-"
+        "model behavior, not something fine-tuning created — both 32B "
+        "v4 variants RECOVER it to 9/9 at the cost of capability points "
+        "elsewhere (net −4.6pp). Per-category breakdown: coding 6/6, "
+        "general 3/3, multihop 6/9, num_precision 6/6, rag_blog 3/3, "
+        "rag_datasheet 51/78 (0.654), rag_email 3/3, reasoning 6/6, "
+        "refusal 6/9 (made_up_peripheral 3/3 fabricated)."
     ),
     deck_bullet=(
-        "Qwen 2.5 32B dense Q4 = 52.7 tok/s on 5090. Same total-param "
-        "magnitude as Skippy MoE 30B-A3B (250 tok/s), but full 17.88 GB/tok "
-        "vs MoE's 1.65 GB/tok = 4.7× BW advantage for sparse MoE."
+        "Qwen 2.5 32B dense Q4 = 52.7 tok/s on 5090 vs Skippy MoE 30B-A3B "
+        "Q4 = 250 tok/s (4.7× MoE bandwidth advantage). Also the apples-"
+        "to-apples baseline for Skippy 32B v4 — at 0.682 pass-rate, the "
+        "FT regresses 4.6pp from this row. The recipe trade is real."
     ),
     compute_dtype="fp16",
     # 5090 anchors (Q4/Q5 decode + prefill) live on
@@ -528,14 +696,21 @@ LLM_MODELS: dict[str, LLMModel] = {
     # production first (default), then prior-production (cost-different
     # but quality-parity), then external Skippy-eval'd baselines, then
     # perf-comparison-only references (no Skippy v2 evaluation).
-    SKIPPY_MOE_FINETUNE.key:        SKIPPY_MOE_FINETUNE,
-    SKIPPY_DENSE_FINETUNE.key:      SKIPPY_DENSE_FINETUNE,
-    SKIPPY_7B_V4.key:               SKIPPY_7B_V4,
-    SKIPPY_14B_V4.key:              SKIPPY_14B_V4,
-    INSTRUCT_MOE_STOCK.key:         INSTRUCT_MOE_STOCK,
-    THINKING_MOE_STOCK.key:         THINKING_MOE_STOCK,
-    QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,
-    QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,
+    # Production-first ordering: current production model leads, then
+    # validated dense FTs by size, then validated MoE recipes, then
+    # historical / cautionary FTs, then apples-to-apples baselines, then
+    # perf-only references.
+    SKIPPY_7B_V4.key:               SKIPPY_7B_V4,                 # current production
+    SKIPPY_14B_V4.key:              SKIPPY_14B_V4,                # best dense headline
+    SKIPPY_QWEN25_32B_V4.key:       SKIPPY_QWEN25_32B_V4,         # 32B trade — NOT recommended
+    SKIPPY_MOE_FINETUNE.key:        SKIPPY_MOE_FINETUNE,          # MoE FT v1 (historical)
+    SKIPPY_MOE_ROUTER_V1.key:       SKIPPY_MOE_ROUTER_V1,         # recommended MoE recipe
+    SKIPPY_MOE_FULL_V1.key:         SKIPPY_MOE_FULL_V1,           # MoE over-fit (cautionary)
+    SKIPPY_DENSE_FINETUNE.key:      SKIPPY_DENSE_FINETUNE,        # pre-v4 dense (historical)
+    INSTRUCT_MOE_STOCK.key:         INSTRUCT_MOE_STOCK,           # MoE apples-to-apples base
+    THINKING_MOE_STOCK.key:         THINKING_MOE_STOCK,           # sister-model context
+    QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,     # 7B v4 baseline
+    QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,    # 32B v4 baseline
 }
 
 DEFAULT_LLM_MODEL_KEY = SKIPPY_7B_V4.key
