@@ -642,28 +642,43 @@ with st.sidebar:
                 })
             st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
 
-            # Per-category Δ shown only for non-production entries (the
-            # production reference compares to itself = no Δ data).
+            # Per-category breakdown — dict-of-dicts shape per [pai-sizer]
+            # 8d20beb migration (mirrored 2026-05-07). Each entry holds raw
+            # rates {category: {pass, n, rate}}; Δ vs production is
+            # computed at render time from raw counts.
             if _model.category_deltas:
-                st.markdown(
-                    f"**Per-category Δ vs production** "
-                    f"({_production_model.label.split(' (')[0]}, "
-                    f"positive = this model wins):"
-                )
-                for cat, delta_passes in _model.category_deltas.items():
-                    sign = "+" if delta_passes >= 0 else ""
+                _prod_cats = _production_model.category_deltas or {}
+                if _is_production:
+                    st.markdown("**Per-category breakdown** (production reference — Δ vs self = 0):")
+                else:
+                    st.markdown(
+                        f"**Per-category breakdown** "
+                        f"(rate, Δ vs {_production_model.label.split(' (')[0]} — "
+                        f"positive = this model wins):"
+                    )
+                for cat, data in _model.category_deltas.items():
                     cat_label = CATEGORY_LABELS.get(cat, cat)
-                    st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
+                    passes = data.get("pass", 0)
+                    n = data.get("n", 0)
+                    rate = data.get("rate", 0.0)
+                    prod_data = _prod_cats.get(cat)
+                    if prod_data and not _is_production:
+                        delta = passes - prod_data.get("pass", 0)
+                        sign = "+" if delta >= 0 else ""
+                        st.markdown(
+                            f"- {cat_label}: **{passes}/{n}** ({rate:.1%}) "
+                            f"— Δ {sign}{delta} passes"
+                        )
+                    else:
+                        st.markdown(f"- {cat_label}: **{passes}/{n}** ({rate:.1%})")
                 st.caption(
-                    "Δ measured vs Skippy v2 prompt set (132 samples), "
-                    "RAG on (8 chunks via hybrid retrieval). Categories "
-                    "not listed are flat ±0 between this model and production."
+                    "Raw counts from Skippy v2 prompt set (132 samples), "
+                    "RAG on (8 chunks via hybrid retrieval). Δ computed at "
+                    "render time from raw pass counts vs production reference."
                 )
-            elif _is_production:
+            else:
                 st.caption(
-                    "This is the production reference — per-category Δ is "
-                    "zero against itself. Switch the selector above to see "
-                    "category breakdowns for the alternative entries."
+                    "Per-category breakdown not yet populated for this entry."
                 )
 
             st.markdown(

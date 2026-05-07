@@ -66,17 +66,27 @@ reverted to Skippy 7B v4 dense in the meantime.
    regressed-but-arrived-near-parity. Cost story still holds: 4-5×
    fewer weights to read per token via MoE 3B-active routing.
 
-## Convention: category_deltas
+## Convention: category_deltas (dict-of-dicts shape)
 
-All `category_deltas` are **vs the production reference**
-(`PRODUCTION_REFERENCE_KEY` = Skippy MoE FT). Sign convention:
-positive = this model wins vs production. The production reference
-itself has an empty `category_deltas` dict (it can't differ from
-itself). UI surfaces these as "Per-category Δ vs Skippy MoE
-fine-tune (production)" in the accuracy expander. Note that
-THINKING_MOE_STOCK's category_deltas mix BASE-GAP (Instruct vs
-Thinking baselines) with RECIPE EFFECT (LoRA fine-tune); they are
-NOT clean fine-tune-recipe deltas.
+Each entry's `category_deltas` holds **raw per-category rates**:
+
+    {category: {"pass": int, "n": int, "rate": float}}
+
+The 9 v2-RAG categories are: coding, general, multihop,
+numerical_precision, rag_blog, rag_datasheet, rag_email, reasoning,
+refusal. Per-category sums reconcile to `pass_n_passes`.
+
+Δ vs the production reference (`PRODUCTION_REFERENCE_KEY` =
+Skippy 7B v4) is computed at render time from raw counts:
+`delta_passes = this.pass - production.pass` for the matching
+category. This convention mirrors PAI sizer's 8d20beb migration
+(2026-05-07) so both sizers carry the same shape.
+
+Migration history: pre-2026-05-07 the field used signed-int deltas
+(`{category: int}`) anchored to the old production reference (Skippy
+MoE FT v1). The schema was migrated when Skippy 7B v4 became the
+production reference and Tier 2.x evals provided complete per-row
+raw-count payloads from [docs].
 
 Accuracy from Skippy v2 prompt set: 44 prompts × 3 samples = 132,
 RAG enabled (8 chunks via hybrid retrieval). Diffs:
@@ -110,11 +120,16 @@ class LLMModel:
     pass_rate: float | None = None
     pass_n_passes: int | None = None
     pass_n_total: int | None = None
-    # Per-category Δ vs the production reference (sign convention:
-    # positive = THIS wins). Keyed by Skippy v2 prompt category.
-    # Empty dict for production reference itself; None for entries
-    # without v2 evaluation.
-    category_deltas: dict[str, int] | None = None
+    # Per-category raw rates (dict-of-dicts shape per [pai-sizer]
+    # 2026-05-07 8d20beb migration). Each category maps to:
+    #   {"pass": int, "n": int, "rate": float}
+    # Δ vs production reference is computed at render time from raw
+    # counts (pass_diff = this.pass - production.pass for matching
+    # category). Empty dict for entries without per-category data;
+    # None for entries without v2 evaluation. Migration from the old
+    # signed-int delta shape landed 2026-05-07; the data is canonical
+    # now (pass/n totals reconcile to pass_rate × pass_n_total).
+    category_deltas: dict[str, dict[str, int | float]] | None = None
 
     # Compute dtype the model executes on dedicated NPU silicon. Q4_K_M
     # weight-only MoE models run as INT8 dequant + INT8 matmul on
@@ -202,9 +217,20 @@ SKIPPY_MOE_FINETUNE = LLMModel(
         "recipe does not transfer capability to Qwen3-MoE. MoE-aware LoRA "
         "target test (router + experts) on RunPod is the next milestone."
     ),
-    # Production reference: vs itself = no Δs. Other entries' deltas
-    # are computed against this row.
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=91).
+    # Source: eval/results/acc_reference-moe-q4km-v2-rag_20260423-091231.json
+    # per [docs] 2026-05-07 17:26.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 54, "n": 78, "rate": 0.692},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  7, "n":  9, "rate": 0.778},
+    },
     # MoE Q4 weight-only on dedicated INT8 NPU runs as INT8 dequant +
     # INT8 matmul (the Mid silicon's native path). Validates against
     # Mid's INT8-only capability_levels post 548bc41.
@@ -246,13 +272,21 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
         "holds for either dense entry: MoE 3B-active reads 4-5× fewer "
         "weights per token than any 14B dense forward."
     ),
-    # Stale: was derived against old production reference (Skippy MoE FT
-    # at 0.689) before the 2026-05-06 production-shift to Skippy 7B v4.
-    # Per [docs] 2026-05-06 09:51, schema reconciliation (and per-category
-    # re-derivation against new production) deferred until MoE-router +
-    # 32B v4 evals land; until then, leave empty so the UI doesn't show
-    # numbers that don't match the displayed production-reference label.
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=90).
+    # Source: eval/results/acc_reference-dense-q4km-v2-rag_20260423-091847.json
+    # per [docs] 2026-05-07 17:26. Schema migration from old signed-int
+    # deltas (vs MoE FT v1) landed 2026-05-07.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 51, "n": 78, "rate": 0.654},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     # Dense Qwen 2.5 14B Q4 uses llama-cpp's fp16 internal path —
     # weights dequantized to fp16 for the matmul, requires native FP16
     # tensor support. Per [pai-sizer] e69237b: "Dense 14B Q4 stays fp16."
@@ -290,10 +324,19 @@ INSTRUCT_MOE_STOCK = LLMModel(
         "regressed vs its own base. The +5.3pp 'win' vs Thinking sibling was "
         "sister-model gap, not recipe gain."
     ),
-    # Per-category delta breakdown vs Skippy MoE FT pending — overall is
-    # +2.3pp; per-category not yet derived from the eval JSON. Empty dict
-    # for now keeps the UI rendering clean (no spurious per-category rows).
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=94).
+    # Per [docs] 2026-05-06 09:19.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 55, "n": 78, "rate": 0.705},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — same
     # INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
     compute_dtype="int8",
@@ -333,14 +376,23 @@ THINKING_MOE_STOCK = LLMModel(
         "for 'how does public reasoning rank' framing, not for fine-tune "
         "validation."
     ),
-    # Stale: was derived against old production reference (Skippy MoE FT
-    # at 0.689) AND mixed BASE-GAP with RECIPE EFFECT (Instruct vs Thinking
-    # sister-models, +7.6pp Instruct advantage). Per [docs] 2026-05-06
-    # 09:51 production shift to Skippy 7B v4 + schema reconciliation
-    # deferral, leave empty until MoE-router + 32B v4 evals land — at
-    # which point [docs] will provide a clean per-category payload
-    # against the new reference.
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=84).
+    # Source: eval/results/acc_candidate-moe-thinking-v2-rag_20260424-094820.json
+    # per [docs] 2026-05-07 17:26. Notable: 0/3 rag_email is a known
+    # base-level failure mode of Thinking-2507 — most fine-tunes on
+    # other bases recover this to 3/3. Also 6/6 numerical_precision
+    # (perfect — matches 32B Instruct stock and 14B v4).
+    category_deltas={
+        "coding":              {"pass":  5, "n":  6, "rate": 0.833},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # perfect
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 46, "n": 78, "rate": 0.590},
+        "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},  # base-level failure
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — runs the
     # same INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
     compute_dtype="int8",
@@ -386,13 +438,19 @@ SKIPPY_7B_V4 = LLMModel(
         "a few pp on long-form reasoning (verbosity penalty). The asymmetry "
         "IS the customer-template signal."
     ),
-    # Per-category passes (raw rates, vs n total) per [docs] 09:19:
-    # coding 6/6, general 3/3, multihop 6/9 (0.667), num_precision 3/6 (0.5),
-    # rag_blog 3/3, rag_datasheet 57/78 (0.731), rag_email 3/3, reasoning 3/6,
-    # refusal 9/9. Deltas vs Skippy MoE FT (production reference) not yet
-    # computed — Skippy MoE FT's per-category rates not surfaced in the
-    # current catalog. Empty dict matches the INSTRUCT_MOE_STOCK convention.
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=93).
+    # Per [docs] 2026-05-06 09:19.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 57, "n": 78, "rate": 0.731},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  3, "n":  6, "rate": 0.500},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     # Dense Q4 → fp16 internal path on llama.cpp. Selecting on Mid (INT8-only)
     # triggers 🔴 dtype_mismatch in the app.py UI gate.
     compute_dtype="fp16",
@@ -439,11 +497,19 @@ SKIPPY_14B_V4 = LLMModel(
         "(0/3) make it unsuitable for production despite the headline. "
         "Cautionary entry — bigger isn't strictly better on this recipe."
     ),
-    # Per-category passes per [docs] 09:19:
-    # coding 6/6, general 3/3, multihop 6/9 (0.667), num_precision 6/6 (1.0),
-    # rag_blog 3/3, rag_datasheet 60/78 (0.769), rag_email 0/3 (regressed),
-    # reasoning 6/6, refusal 6/9 (made_up_peripheral 0/3).
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=96).
+    # Per [docs] 2026-05-06 09:19.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # perfect
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 60, "n": 78, "rate": 0.769},
+        "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},  # ⚠ regressed
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral 0/3
+    },
     compute_dtype="fp16",
     gops_per_token=28.0,  # 2 × 14B (full dense forward)
     # 14B Q4 dense perf cell added to RTX_5090_REFERENCE.measured_llm
@@ -487,11 +553,19 @@ SKIPPY_QWEN25_32B_V4 = LLMModel(
         "data: corpus-size-vs-param-count mismatch is a real customer "
         "constraint, not a plateau."
     ),
-    # Per-category passes per [docs] 03:03 + 13:17:
-    # coding 6/6, general 3/3, multihop 3/9 (0.333 — under-trained),
-    # num_precision 3/6, rag_blog 3/3, rag_datasheet 48/78 (0.615),
-    # rag_email 3/3, reasoning 6/6, refusal 9/9 (recovered).
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=84).
+    # Per [docs] 2026-05-07 03:03 (CLEAN 2-epoch recipe).
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  3, "n":  9, "rate": 0.333},  # under-trained
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 48, "n": 78, "rate": 0.615},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},  # recovered
+    },
     compute_dtype="fp16",
     gops_per_token=65.0,  # 2 × 32.5B (full dense forward)
     # Same arch / quant as Qwen 2.5 32B Instruct stock — perf cells transfer.
@@ -542,11 +616,19 @@ SKIPPY_MOE_ROUTER_V1 = LLMModel(
         "MoE bases need router targeting, but corpus-too-small for "
         "expert-FFN targeting at 6.5K examples."
     ),
-    # Per-category passes per [docs] 19:49:
-    # coding 6/6, general 3/3, multihop 6/9 (0.667 — recovered from 0/9),
-    # num_precision 3/6, rag_blog 3/3, rag_datasheet 51/78 (0.654 — flat
-    # vs MoE v4, didn't budge), rag_email 2/3, reasoning 6/6, refusal 9/9.
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=89).
+    # Per [docs] 2026-05-06 19:49.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},  # recovered from 0/9 (v4)
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 51, "n": 78, "rate": 0.654},  # didn't budge from v4
+        "rag_email":           {"pass":  2, "n":  3, "rate": 0.667},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     compute_dtype="int8",
     gops_per_token=6.0,  # 2 × 3B active — same MoE architecture
     # Same Qwen3-30B-A3B Q4 MoE arch as Skippy MoE FT — perf transfers.
@@ -589,11 +671,19 @@ SKIPPY_MOE_FULL_V1 = LLMModel(
         "rag_blog 3/3 → 0/3. The extra LoRA capacity lacks training "
         "signal at this corpus size — more isn't always better."
     ),
-    # Per-category passes per [docs] 10:21:
-    # coding 6/6, general 3/3, multihop 6/9 (0.667 — kept router recovery),
-    # num_precision 3/6, rag_blog 0/3 (NEW regression), rag_datasheet 47/78
-    # (0.603 — worse than router), rag_email 3/3, reasoning 6/6, refusal 9/9.
-    category_deltas={},
+    # Per-category raw rates (sum reconciles to pass_n_passes=83).
+    # Per [docs] 2026-05-07 10:21.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},  # kept router recovery
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},  # ⚠ NEW regression
+        "rag_datasheet":       {"pass": 47, "n": 78, "rate": 0.603},  # worse than router
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     compute_dtype="int8",
     gops_per_token=6.0,  # 2 × 3B active — same MoE arch
     measurement_alias="skippy_finetune",
@@ -640,6 +730,22 @@ QWEN25_7B_DENSE_INSTRUCT = LLMModel(
         "active streams per token. Also the apples-to-apples baseline for "
         "Skippy 7B v4's +3.1pp validated fine-tune gain."
     ),
+    # Per-category raw rates (sum reconciles to pass_n_passes=89).
+    # Per [docs] 2026-05-06 09:19 — supplied as the apples-to-apples
+    # 7B v4 baseline. Notable: 0/3 rag_email matches Thinking stock's
+    # rag_email failure pattern. 7B v4 fine-tune fully recovered this
+    # category (0/3 → 3/3).
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  5, "n":  9, "rate": 0.556},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 54, "n": 78, "rate": 0.692},
+        "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+    },
     # Dense Q4 → fp16 internal path on llama-cpp (gates 🔴 dtype_mismatch
     # on Mid INT8-only via the f851d24 app.py UI gate; valid on High +
     # 5090 which retain FP support).
@@ -683,6 +789,21 @@ QWEN25_32B_DENSE_INSTRUCT = LLMModel(
         "to-apples baseline for Skippy 32B v4 — at 0.682 pass-rate, the "
         "FT regresses 4.6pp from this row. The recipe trade is real."
     ),
+    # Per-category raw rates (sum reconciles to pass_n_passes=90).
+    # Per [docs] 2026-05-07 12:44. Notable: numerical_precision 6/6
+    # (PERFECT — only entry sharing this with 14B v4) but refusal 6/9
+    # (made_up_peripheral 3/3 wrong — Qwen2.5 base behavior).
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # perfect
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 51, "n": 78, "rate": 0.654},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ fabricates made_up
+    },
     compute_dtype="fp16",
     # 5090 anchors (Q4/Q5 decode + prefill) live on
     # RTX_5090_REFERENCE.measured_llm — single source of truth. No Q8
