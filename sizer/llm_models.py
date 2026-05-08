@@ -1,12 +1,13 @@
 """LLM model catalog for the sizer.
 
-Selectable models for the LLM workload comparison surface (13 entries
-post 2026-05-08 Mistral cross-family baseline integration):
+Selectable models for the LLM workload comparison surface (14 entries
+post 2026-05-08 Mistral v4 FT integration):
 
 Production + validated FTs:
 - Skippy 7B v4 (Qwen2.5-7B FT — DEFAULT, current production, +3.1pp clean)
 - Skippy 14B v4 (Qwen2.5-14B FT — best dense headline, +5.3pp BUT fabricates)
 - Skippy 32B v4 (Qwen2.5-32B FT — recipe trade −4.6pp, NOT recommended)
+- Skippy Mistral v4 (Mistral-7B FT — cross-family regression −3.8pp, NOT recommended)
 - Skippy MoE-router v1 (Qwen3-30B-A3B FT — recommended MoE recipe, −3.8pp)
 
 Historical + cautionary FTs:
@@ -577,6 +578,66 @@ SKIPPY_QWEN25_32B_V4 = LLMModel(
 )
 
 
+SKIPPY_MISTRAL_V4 = LLMModel(
+    key="skippy_mistral_v4",
+    label="Skippy Mistral 7B v0.3 v4 (recipe regressed, NOT recommended)",
+    family="Dense — 7B params (no expert sparsity)",
+    base="Mistral 7B v0.3 Instruct (Mistral AI)",
+    total_params_b=7.25,
+    active_params_b=7.25,
+    quant="Q4_K_M GGUF",
+    size_gb=4.37,
+    fine_tune="v4 SFT — same recipe + corpus as Skippy 7B v4, applied to Mistral base",
+    pass_rate=0.568,
+    pass_n_passes=75,
+    pass_n_total=132,
+    description=(
+        "Mistral 7B v0.3 + v4 recipe (same SFTTrainer + assistant_only_loss "
+        "+ 100 refusal exemplars + 2 epochs as Skippy 7B v4) — Tier 3 #1 "
+        "cross-family fine-tune attempt per [docs] 2026-05-08 09:56. "
+        "**REGRESSED −3.8pp** vs stock Mistral 7B v0.3 (0.568 vs 0.606). "
+        "For comparison: same recipe + same corpus on Qwen 2.5 7B base = "
+        "+3.1pp (Skippy 7B v4 production). The recipe transfer is NOT "
+        "just architecture-coupled (dense ≠ MoE) — it's also **base-"
+        "family-coupled**. Qualitative gains transfer (refusal +3, "
+        "rag_email +3, numerical_precision +3) but capability cost varies "
+        "by base: on Mistral the recipe damages retrieval (rag_datasheet "
+        "−8, rag_blog −3) and breaks coding (−3). Hypothesis (untested): "
+        "Mistral's chat template + assistant_only_loss reweights away "
+        "from RAG-following more than Qwen2.5. Cautionary cell — DO NOT "
+        "ship; informative-failure data for the recipe-taxonomy story."
+    ),
+    deck_bullet=(
+        "Skippy v4 recipe ON Mistral 7B v0.3 = 0.568 — REGRESSED 3.8pp "
+        "from stock (vs Qwen 7B's +3.1pp lift on the SAME recipe + same "
+        "corpus). Voice ✅, Safety ✅ (refusal 9/9), Capability ❌. "
+        "Recipe transfer is base-family-coupled, not just dense-vs-MoE-"
+        "coupled. Customer rule: re-validate the recipe per base family "
+        "before extending."
+    ),
+    # Per-category raw rates per [docs] 2026-05-08 09:56 (10-cat payload
+    # in their message; persona dropped to match 9-cat catalog convention).
+    # Sum reconciles: 3+3+6+6+0+45+3+0+9 = 75 = pass_n_passes ✓
+    category_deltas={
+        "coding":              {"pass":  3, "n":  6, "rate": 0.500},  # ⚠ −3 vs stock
+        "general":             {"pass":  3, "n":  6, "rate": 0.500},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # ✓ +3 vs stock
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},  # ⚠ −3 vs stock
+        "rag_datasheet":       {"pass": 45, "n": 78, "rate": 0.577},  # ⚠ −8 vs stock
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},  # ✓ +3 vs stock
+        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},  # flat (base reasoning-weak)
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},  # ✓ +3 vs stock
+    },
+    compute_dtype="fp16",
+    gops_per_token=14.5,  # 2 × 7.25B
+    # Same Mistral 7B v0.3 base arch + GGUF size + compute graph as the
+    # stock entry — perf transfers verbatim (verified: GGUF is 4.37 GB,
+    # identical to stock). [backend] 23:08 measurement.
+    measurement_alias="mistral_7b_v03_dense",
+)
+
+
 # ─────────── Validated MoE recipes (added 2026-05-07 per [docs] Tier 2.x) ──
 # Two new MoE-base entries from the [docs] 2026-05-06/07 RunPod campaign:
 # the "router-v1" recipe (recommended) and the "full-v1" expert-FFN recipe
@@ -978,6 +1039,7 @@ LLM_MODELS: dict[str, LLMModel] = {
     SKIPPY_7B_V4.key:               SKIPPY_7B_V4,                 # current production
     SKIPPY_14B_V4.key:              SKIPPY_14B_V4,                # best dense headline
     SKIPPY_QWEN25_32B_V4.key:       SKIPPY_QWEN25_32B_V4,         # 32B trade — NOT recommended
+    SKIPPY_MISTRAL_V4.key:          SKIPPY_MISTRAL_V4,            # cross-family FT regression — NOT recommended
     SKIPPY_MOE_FINETUNE.key:        SKIPPY_MOE_FINETUNE,          # MoE FT v1 (historical)
     SKIPPY_MOE_ROUTER_V1.key:       SKIPPY_MOE_ROUTER_V1,         # recommended MoE recipe
     SKIPPY_MOE_FULL_V1.key:         SKIPPY_MOE_FULL_V1,           # MoE over-fit (cautionary)
