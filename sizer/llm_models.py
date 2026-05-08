@@ -1,7 +1,7 @@
 """LLM model catalog for the sizer.
 
-Selectable models for the LLM workload comparison surface (11 entries
-post 2026-05-07 [docs] Tier 2.x bake-off integration):
+Selectable models for the LLM workload comparison surface (12 entries
+post 2026-05-07 [docs] Tier 3 cross-family baseline integration):
 
 Production + validated FTs:
 - Skippy 7B v4 (Qwen2.5-7B FT — DEFAULT, current production, +3.1pp clean)
@@ -19,6 +19,9 @@ Apples-to-apples baselines:
 - Qwen3-30B-A3B-Thinking-2507 (sister-model context, NOT the MoE FT base)
 - Qwen 2.5 7B Instruct (apples-to-apples 7B v4 baseline)
 - Qwen 2.5 32B Instruct (apples-to-apples 32B v4 baseline)
+
+Cross-family baseline (Tier 3 #1):
+- Meta Llama-3.1 8B Instruct (cross-family — −10.6pp vs Qwen 7B at same size)
 
 Two of these are Q4_K_M GGUF MoE 30B/3B-active (Skippy MoE FT,
 Thinking stock) — same decode-tok/s ceiling on every Hardware tier
@@ -812,6 +815,84 @@ QWEN25_32B_DENSE_INSTRUCT = LLMModel(
 )
 
 
+# ─────────── Cross-family baseline (Tier 3 #1, added 2026-05-07) ─────────
+# Per [docs] 2026-05-07 22:28: Llama-3.1 8B Instruct stock as a non-Qwen
+# baseline. Tests whether the Skippy v4 fine-tune story transfers across
+# base architecture families. Spoiler: −10.6pp vs Qwen2.5-7B-Instruct at
+# similar size, with reasoning catastrophic at 1/6 (vs Qwen 6/6) and an
+# 18× higher trailing-question rate ('what else can I help you with?' as
+# default voice).
+#
+# Customer-template implication: v4 recipe gains validated only on the
+# Qwen2.5 family. Don't assume +3-5pp transfers to non-Qwen bases without
+# a fresh apples-to-apples baseline. Llama v4 fine-tune was the planned
+# follow-up but Meta-Llama is HF-gated; [docs] is pivoting the FT to
+# Mistral-7B-Instruct-v0.3 (ungated, similar size, different family).
+
+LLAMA_3_1_8B_INSTRUCT_STOCK = LLMModel(
+    key="llama_3_1_8b_instruct_stock",
+    label="Meta Llama-3.1 8B Instruct (stock — cross-family baseline)",
+    family="Dense — 8B params (no expert sparsity)",
+    base="Meta Llama-3.1 8B Instruct (Meta)",
+    total_params_b=8.03,
+    active_params_b=8.03,
+    quant="Q4_K_M GGUF (bartowski mirror)",
+    size_gb=4.92,  # Q4_K_M footprint for 8B class
+    fine_tune="stock (no fine-tune)",
+    pass_rate=0.568,
+    pass_n_passes=75,
+    pass_n_total=132,
+    description=(
+        "Cross-family baseline per [docs] 2026-05-07 22:28. Materially "
+        "weaker than Qwen-family bases at similar size: −10.6pp vs Qwen "
+        "2.5 7B Instruct (0.568 vs 0.674). Reasoning catastrophic at "
+        "1/6 (vs Qwen 6/6) — 5/6 of Skippy's reasoning prompts fail at "
+        "the Llama base level. rag_datasheet also weaker (45/78 vs "
+        "Qwen 54/78). Same made_up_peripheral fabrication issue as Qwen "
+        "2.5 32B Instruct (refusal 6/9). Voice profile differs sharply: "
+        "18× the trailing-question rate ('what else can I help you with?') "
+        "— Kyle voice gate would treat this as immediate stylistic "
+        "regression. **Customer rule:** don't assume v4 recipe gains "
+        "transfer to non-Qwen bases without a fresh baseline + voice gate "
+        "retune for the target family's natural cadence."
+    ),
+    deck_bullet=(
+        "Cross-family baseline: Llama-3.1 8B Instruct stock = 0.568 on "
+        "v2-RAG, **−10.6pp vs Qwen 2.5 7B Instruct** at similar size. "
+        "Per-vendor capability variance is real and large at this param "
+        "count. v4 recipe gains validated on Qwen2.5 family — won't "
+        "necessarily transfer to other vendors without per-base "
+        "calibration."
+    ),
+    # Per-category raw rates (sum reconciles to pass_n_passes=75).
+    # Per [docs] 2026-05-07 22:28.
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  4, "n":  6, "rate": 0.667},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 45, "n": 78, "rate": 0.577},  # ⚠ structural weakness
+        "rag_email":           {"pass":  1, "n":  3, "rate": 0.333},
+        "reasoning":           {"pass":  1, "n":  6, "rate": 0.167},  # ⚠ catastrophic 1/6
+        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral fabrication
+    },
+    # Dense Q4 → fp16 internal path on llama.cpp. Selecting on Mid (INT8-
+    # only) triggers 🔴 dtype_mismatch in the app.py UI gate.
+    compute_dtype="fp16",
+    gops_per_token=16.0,  # 2 × 8B (full dense forward)
+    # NOTE: no measurement_alias — no Llama 5090 perf cell exists yet.
+    # [backend] running 5090 bake-off 2026-05-07 22:42 (~1-2h ETA);
+    # follow-up commit will add the measured cell + wire alias. Until
+    # then, project_llm falls through to cross_class projection (no
+    # alias to a same-arch sibling). Per [pai-sizer] 22:37 verification:
+    # cross_class fallback projects 332.79 tok/s on 5090 — over-projected
+    # vs realistic ~180-200 tok/s; the 🟠 cross_class badge in the UI
+    # correctly flags this as low-confidence.
+    measurement_alias=None,
+)
+
+
 LLM_MODELS: dict[str, LLMModel] = {
     # Order matters — drives selectbox display order. Convention:
     # production first (default), then prior-production (cost-different
@@ -832,6 +913,7 @@ LLM_MODELS: dict[str, LLMModel] = {
     THINKING_MOE_STOCK.key:         THINKING_MOE_STOCK,           # sister-model context
     QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,     # 7B v4 baseline
     QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,    # 32B v4 baseline
+    LLAMA_3_1_8B_INSTRUCT_STOCK.key: LLAMA_3_1_8B_INSTRUCT_STOCK, # cross-family baseline (Tier 3)
 }
 
 DEFAULT_LLM_MODEL_KEY = SKIPPY_7B_V4.key
