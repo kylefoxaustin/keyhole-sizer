@@ -881,15 +881,14 @@ LLAMA_3_1_8B_INSTRUCT_STOCK = LLMModel(
     # only) triggers 🔴 dtype_mismatch in the app.py UI gate.
     compute_dtype="fp16",
     gops_per_token=16.0,  # 2 × 8B (full dense forward)
-    # NOTE: no measurement_alias — no Llama 5090 perf cell exists yet.
-    # [backend] running 5090 bake-off 2026-05-07 22:42 (~1-2h ETA);
-    # follow-up commit will add the measured cell + wire alias. Until
-    # then, project_llm falls through to cross_class projection (no
-    # alias to a same-arch sibling). Per [pai-sizer] 22:37 verification:
-    # cross_class fallback projects 332.79 tok/s on 5090 — over-projected
-    # vs realistic ~180-200 tok/s; the 🟠 cross_class badge in the UI
-    # correctly flags this as low-confidence.
-    measurement_alias=None,
+    # 5090 perf cell wired 2026-05-08 from [backend] 2026-05-07 23:08
+    # bake-off (decode 171.0 tok/s RAG 8K+2K, prefill@2K 10162 tok/s).
+    # Replaces the 🟠 cross_class fallback (332.79 tok/s, 1.95× over-
+    # projection per [backend] calibration check) with 🟢 measured.
+    # GGUF arch + size matches across stock + any future Llama FT, so
+    # if a Llama v4 FT lands (currently blocked — Meta-Llama HF-gated;
+    # Mistral pivot in flight), the same alias would carry over.
+    measurement_alias="llama_3_1_8b_dense",
 )
 
 

@@ -441,6 +441,25 @@ RTX_5090_REFERENCE = Hardware(
         "qwen25_14b_dense": {
             "Q4_K_M": {"decode_tok_s": 125.7, "prefill_tok_s": 5117.2},
         },
+        # Cross-family 5090 anchors — [backend] 2026-05-07 23:08 bake-off
+        # via llama-cpp-python 0.3.20, n_ctx=16384. Replaces the 🟠
+        # cross_class fallback projection (332.79 tok/s for Llama at
+        # raw-TOPS × util_factor) with 🟢 measured cells. decode_tok_s
+        # is RAG 8K+2K decode (apples-to-apples vs the existing 7B Q4
+        # cell at 183.9). Source paths in the bake-off bundle:
+        # data/output/bakeoff/llm_anchors/{llama3.1-8b-dense,mistral-7b-v0.3-dense}/Q4_K_M.json
+        #
+        # Calibration finding: 7B-class dense Q4 Q4_K_M decode is family-
+        # invariant within ~7% on 5090 (Qwen 183.9 / Mistral 182.7 /
+        # Llama 171.0) — base-architecture choice is a quality decision
+        # at this hardware tier, not a perf decision. Differences track
+        # GGUF size (BW cost), not vendor.
+        "llama_3_1_8b_dense": {
+            "Q4_K_M": {"decode_tok_s": 171.0, "prefill_tok_s": 10162.0},
+        },
+        "mistral_7b_v03_dense": {
+            "Q4_K_M": {"decode_tok_s": 182.7, "prefill_tok_s": 10217.0},
+        },
     },
     measured_edge_ms={
         # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
