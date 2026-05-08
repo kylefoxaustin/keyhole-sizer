@@ -1,7 +1,7 @@
 """LLM model catalog for the sizer.
 
-Selectable models for the LLM workload comparison surface (12 entries
-post 2026-05-07 [docs] Tier 3 cross-family baseline integration):
+Selectable models for the LLM workload comparison surface (13 entries
+post 2026-05-08 Mistral cross-family baseline integration):
 
 Production + validated FTs:
 - Skippy 7B v4 (Qwen2.5-7B FT — DEFAULT, current production, +3.1pp clean)
@@ -20,8 +20,9 @@ Apples-to-apples baselines:
 - Qwen 2.5 7B Instruct (apples-to-apples 7B v4 baseline)
 - Qwen 2.5 32B Instruct (apples-to-apples 32B v4 baseline)
 
-Cross-family baseline (Tier 3 #1):
+Cross-family baselines (Tier 3 #1):
 - Meta Llama-3.1 8B Instruct (cross-family — −10.6pp vs Qwen 7B at same size)
+- Mistral 7B v0.3 Instruct (cross-family — −6.8pp vs Qwen 7B; reasoning 0/6)
 
 Two of these are Q4_K_M GGUF MoE 30B/3B-active (Skippy MoE FT,
 Thinking stock) — same decode-tok/s ceiling on every Hardware tier
@@ -892,6 +893,79 @@ LLAMA_3_1_8B_INSTRUCT_STOCK = LLMModel(
 )
 
 
+MISTRAL_7B_V03_INSTRUCT_STOCK = LLMModel(
+    key="mistral_7b_v03_instruct_stock",
+    label="Mistral 7B v0.3 Instruct (stock — cross-family baseline)",
+    family="Dense — 7B params (no expert sparsity)",
+    base="Mistral 7B v0.3 Instruct (Mistral AI)",
+    total_params_b=7.25,
+    active_params_b=7.25,
+    quant="Q4_K_M GGUF (bartowski mirror)",
+    size_gb=4.37,
+    fine_tune="stock (no fine-tune)",
+    pass_rate=0.606,
+    pass_n_passes=80,
+    pass_n_total=132,
+    description=(
+        "Cross-family baseline per [docs] 2026-05-08 09:01. Sits between "
+        "Qwen 2.5 7B Instruct (0.674) and Llama-3.1 8B Instruct (0.568) "
+        "on the cross-family ladder: −6.8pp vs Qwen 7B base. Same "
+        "made_up_peripheral fabrication issue (refusal 6/9) that Llama "
+        "and Qwen-32B share at the base level. **Reasoning catastrophic "
+        "at 0/6** — Mistral fails ALL 6 of Skippy's reasoning prompts "
+        "at the base level (Qwen 6/6, Llama 1/6). Customer rule: "
+        "reasoning capability varies wildly between vendor bases at "
+        "similar param count. Mistral v4 FT is the planned Tier 3 "
+        "follow-up (training completed 2026-05-07 23:55 per [docs] 09:41; "
+        "merge → GGUF → eval ETA ~15-20 min from there)."
+    ),
+    deck_bullet=(
+        "Cross-family baseline: Mistral 7B v0.3 Instruct stock = 0.606 "
+        "on v2-RAG, between Qwen (0.674) and Llama (0.568). Reasoning "
+        "category is the cross-family delta: 0/6 here vs Qwen's 6/6 "
+        "— vendor chain-of-thought training shows up directly in pass "
+        "rate. Same hardware budget as Qwen 7B (within ~7% on 5090 "
+        "perf), different quality outcome."
+    ),
+    # Per-category raw rates from [docs] 2026-05-08 09:45 (source:
+    # acc_baseline-mistral-7b-instruct-v0.3-v2-rag_20260507-224742.json).
+    # NOTE: the 09:45 payload was 10-cat (includes persona 0/6) sum_n=132;
+    # this 9-cat shape drops persona to match the existing catalog
+    # convention (sum_n=126 on 9 cats). pass_n_total stays 132 (the eval
+    # truth). The 6-prompt gap between 9-cat sum_n and pass_n_total is
+    # the persona category (uniformly 0/6 for stock bases per [docs]
+    # 09:01 — voice gate is exclusively a fine-tune deliverable).
+    # NOTE 2: `general` here has n=6, vs n=3 in older catalog entries
+    # (Qwen-family from [docs] 09:19 / 17:26 evals, dated 2026-04-23).
+    # The 2026-05-07 Mistral eval expanded `general` to n=6. Older
+    # entries are not back-ported (would need [docs] re-payload of all
+    # 11 prior rows). Δ-vs-production is on raw pass counts, so the
+    # rendering still works correctly (Mistral general pass=3 vs prod
+    # pass=3 → Δ=+0); only the rate display differs across entries.
+    # Sum reconciles: 6+3+6+3+3+53+0+0+6 = 80 = pass_n_passes ✓
+    category_deltas={
+        "coding":              {"pass":  6, "n":  6, "rate": 1.000},
+        "general":             {"pass":  3, "n":  6, "rate": 0.500},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "rag_datasheet":       {"pass": 53, "n": 78, "rate": 0.679},
+        "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},
+        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},  # ⚠ catastrophic
+        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral
+    },
+    # Dense Q4 → fp16 internal path on llama.cpp. Selecting on Mid (INT8-
+    # only) triggers 🔴 dtype_mismatch in the app.py UI gate.
+    compute_dtype="fp16",
+    gops_per_token=14.5,  # 2 × 7.25B (full dense forward)
+    # Wired to mistral_7b_v03_dense cell in RTX_5090_REFERENCE.measured_llm
+    # ([backend] 23:08 bake-off: decode 182.7 tok/s RAG, prefill@2K 10217).
+    # Same alias would carry over to a future Mistral v4 FT (FT preserves
+    # base arch + GGUF size + compute graph; only weight values change).
+    measurement_alias="mistral_7b_v03_dense",
+)
+
+
 LLM_MODELS: dict[str, LLMModel] = {
     # Order matters — drives selectbox display order. Convention:
     # production first (default), then prior-production (cost-different
@@ -913,6 +987,7 @@ LLM_MODELS: dict[str, LLMModel] = {
     QWEN25_7B_DENSE_INSTRUCT.key:   QWEN25_7B_DENSE_INSTRUCT,     # 7B v4 baseline
     QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,    # 32B v4 baseline
     LLAMA_3_1_8B_INSTRUCT_STOCK.key: LLAMA_3_1_8B_INSTRUCT_STOCK, # cross-family baseline (Tier 3)
+    MISTRAL_7B_V03_INSTRUCT_STOCK.key: MISTRAL_7B_V03_INSTRUCT_STOCK,  # cross-family baseline (Tier 3)
 }
 
 DEFAULT_LLM_MODEL_KEY = SKIPPY_7B_V4.key
