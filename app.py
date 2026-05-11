@@ -31,6 +31,7 @@ from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
 from sizer.llm_models import (
     LLM_MODELS, DEFAULT_LLM_MODEL_KEY, CATEGORY_LABELS, accuracy_delta_pp,
     PRODUCTION_REFERENCE_KEY, scale_llm_projection, perf_scale_factor,
+    METHODOLOGY_VERSION,
 )
 from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
@@ -753,6 +754,13 @@ with st.sidebar:
                 "load-bearing signal. Voice and safety carried the real "
                 "signal; substring failed silently. This is exactly the "
                 "scenario the three-gate framework was designed for."
+            )
+            st.caption(
+                f"Methodology version: `{METHODOLOGY_VERSION}` — cross-app "
+                f"lockstep with PAI sizer's `sizer_bundle.json __meta__` "
+                f"and Skippy side's `build_sizer_bundle.py`. Bumps when "
+                f"the eval methodology shifts (new grader, new RAG "
+                f"protocol, new eval set, etc.)."
             )
 
             st.markdown(

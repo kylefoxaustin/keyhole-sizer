@@ -111,9 +111,18 @@ Substring failed silently; voice + safety carried the real signal.
 Migration history:
   - 2026-05-07 (3635622): substring dict-of-dicts schema landed
     (was signed-int deltas). Cross-app parity with PAI 8d20beb.
-  - 2026-05-11 (this commit): semantic-graded headline + per-cat
+  - 2026-05-11 (d7f082c): semantic-graded headline + per-cat
     swap. Mirrors PAI e416ee0. Substring values archived in
     PAI sizer's npu_model.py / `_semantic.json` files on Drive.
+
+`METHODOLOGY_VERSION` (module constant below) labels the eval-
+methodology cycle these numbers come from. Bump when something
+changes that affects how a customer should read the numbers:
+new substring/judge/semantic framing, new RAG protocol, new
+grader, new eval set, etc. Cross-app lockstep with PAI sizer's
+`sizer_bundle.json __meta__.methodology_version` and Skippy
+side's `eval/build_sizer_bundle.py` output (per [pai-sizer]
+2026-05-11 12:13 + [docs] 12:15 + [pai-sizer] 12:21 / 12:22).
 
 Accuracy from Skippy v2 prompt set: 44 prompts × 3 samples = 132,
 RAG enabled (8 chunks via hybrid retrieval). Diffs:
@@ -123,6 +132,17 @@ RAG enabled (8 chunks via hybrid retrieval). Diffs:
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+# Methodology-version label for the LLM-catalog eval cycle these
+# pass_rate + per-category numbers come from. Cross-app lockstep:
+#   - PAI sizer    sizer_bundle.json __meta__.methodology_version
+#   - Skippy side  eval/build_sizer_bundle.py
+#   - keyhole-sizer  this constant
+# Bump when something affects how a customer should READ the numbers:
+# new substring/judge/semantic framing, new RAG protocol, new grader,
+# new eval set composition, etc. (Distinct from `bundle_version` in
+# sizer_bundle.json which versions the perf/DRAM measurement schema.)
+METHODOLOGY_VERSION = "2026-05-11-semantic-regrade-shipped"
 
 
 @dataclass(frozen=True)
