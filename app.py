@@ -681,6 +681,80 @@ with st.sidebar:
                     "Per-category breakdown not yet populated for this entry."
                 )
 
+            # Eval methodology section — per [docs] 2026-05-11 09:31
+            # reviewer-final substring-reliability arc closure (white paper
+            # Finding 4: Qwen-family format bias). 33 catalog entries
+            # regraded via GPT-4o binary semantic judge; the campaign
+            # produced what the reviewer called "the single most valuable
+            # methodology output — bigger than gotcha #7 itself".
+            # Mirrors PAI sizer's dd4ef31 + e416ee0 surfaces.
+            st.markdown("---")
+            st.markdown("**📐 Eval methodology — Finding 4: Qwen-family format bias (semantic regrade)**")
+            st.markdown(
+                "The headline pass-rate numbers above now use **semantic "
+                "grading** (GPT-4o binary semantic judge, 132-sample "
+                "v2-RAG, deterministic temp=0) per [docs] 2026-05-11 "
+                "white paper Finding 4. Substring grading is retained "
+                "only on 2 entries (Skippy MoE FT v1, pre-v4 dense) "
+                "where _semantic.json was not produced — both flagged "
+                "in their model description."
+            )
+            st.markdown(
+                "**Why the headline switched** — the production model's "
+                "substring-headline-lift eroded across five successive "
+                "cross-checks:"
+            )
+            st.markdown(
+                "| # | Cross-check | Result |\n"
+                "|---|---|---|\n"
+                "| 1 | Substring (original headline) | **+3.1pp** vs base |\n"
+                "| 2 | LLM-judge (Sonnet 4.6) | **−0.35** |\n"
+                "| 3 | Temperature=0.3 substring | **−29.3pp** |\n"
+                "| 4 | Cross-judge (GPT-4o) | **−0.69** |\n"
+                "| 5 | **Semantic regrade** (132-sample binary) | **−4.6pp** (sign reversal) |"
+            )
+            st.markdown(
+                "**Finding 4 (verbatim, [docs] 2026-05-11 white paper):** "
+                "*'The recipe's value is voice transfer and safety "
+                "calibration, not capability lift; the substring-headline-"
+                "capability gain on this corpus was a format-fidelity "
+                "artifact specific to Qwen-shaped phrasings in the "
+                "training data.'*"
+            )
+            st.markdown(
+                "**Substring is biased — per-family regrade Δ** "
+                "(33-entry catalog, semantic minus substring):"
+            )
+            st.markdown(
+                "| Family | Regrade Δ direction | Interpretation |\n"
+                "|---|---|---|\n"
+                "| Qwen-family fine-tunes | **−3.2 to −12.7pp** | Substring over-graded (gold tokens are Qwen-shaped) |\n"
+                "| Non-Qwen stock bases (Gemma/Llama/Mistral) | **+1.6 to +6.0pp** | Substring under-graded |\n"
+                "| Gemma 9B v4 (cross-family) | +5.4pp | Only cross-family FT that lifts under both graders |\n"
+                "| Mistral / Llama / Yi v4 | flat-to-down | Substring direction confirmed |"
+            )
+            st.markdown(
+                "**Standing methodology** — durable, transfers across corpora:"
+            )
+            st.markdown(
+                "> *'Substring grading is reliable for base-vs-base "
+                "comparisons but unreliable for FT-vs-base comparisons "
+                "when the corpus phrasings come from one model family. "
+                "Customers running cross-family campaigns should "
+                "validate substring with semantic grading before drawing "
+                "FT-lift conclusions. Two judges by default (Sonnet 4.6 "
+                "+ GPT-4o) on any cross-family fine-tune eval — "
+                "~$5/N=5 pass.'*"
+            )
+            st.markdown(
+                "**Production decision unaffected.** The Skippy 7B v4 "
+                "ship decision is anchored on the **three-gate framework** "
+                "(capability + voice + safety) — substring was never the "
+                "load-bearing signal. Voice and safety carried the real "
+                "signal; substring failed silently. This is exactly the "
+                "scenario the three-gate framework was designed for."
+            )
+
             st.markdown(
                 "---\n"
                 "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
@@ -691,8 +765,7 @@ with st.sidebar:
                 "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
                 "math differs: dense traverses the full weight set per token, so "
                 "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
-                "alternatives. The accuracy parity (Δ +0.7pp) makes MoE the obvious "
-                "production choice — same quality, much cheaper per token."
+                "alternatives."
             )
 
         # ── Precision-axis quality reference ──────────────────────────
