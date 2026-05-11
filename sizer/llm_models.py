@@ -71,7 +71,7 @@ reverted to Skippy 7B v4 dense in the meantime.
    regressed-but-arrived-near-parity. Cost story still holds: 4-5×
    fewer weights to read per token via MoE 3B-active routing.
 
-## Convention: category_deltas (dict-of-dicts shape)
+## Convention: category_deltas (dict-of-dicts, SEMANTIC GRADE post-2026-05-11)
 
 Each entry's `category_deltas` holds **raw per-category rates**:
 
@@ -82,16 +82,38 @@ numerical_precision, rag_blog, rag_datasheet, rag_email, reasoning,
 refusal. Per-category sums reconcile to `pass_n_passes`.
 
 Δ vs the production reference (`PRODUCTION_REFERENCE_KEY` =
-Skippy 7B v4) is computed at render time from raw counts:
-`delta_passes = this.pass - production.pass` for the matching
-category. This convention mirrors PAI sizer's 8d20beb migration
-(2026-05-07) so both sizers carry the same shape.
+Skippy 7B v4) is computed at render time from raw counts.
 
-Migration history: pre-2026-05-07 the field used signed-int deltas
-(`{category: int}`) anchored to the old production reference (Skippy
-MoE FT v1). The schema was migrated when Skippy 7B v4 became the
-production reference and Tier 2.x evals provided complete per-row
-raw-count payloads from [docs].
+## ⚠ Grade type — SEMANTIC headline post-2026-05-11
+
+All entries carry **GPT-4o semantic-graded** pass_rates as of
+[docs] 2026-05-11 white paper Finding 4 + reviewer closure. Two
+entries (`skippy_finetune` MoE FT v1, `skippy_dense_finetune` pre-v4
+dense) lack a `_semantic.json` regrade payload and carry SUBSTRING
+values with explicit caveats in their category_deltas comment block.
+
+The headline shift: production Skippy 7B v4 was substring 0.705 →
+semantic 0.606. The original substring +3.1pp lift vs the Qwen 2.5
+7B Instruct base reverses to a semantic −4.6pp regression. Per
+[docs]'s reviewer (verbatim, 2026-05-11 09:31):
+
+  "The Qwen-family format bias finding is the single most valuable
+  methodology output of this entire campaign — more valuable than
+  gotcha #7, more valuable than the two-factor model. The recipe's
+  value is voice transfer and safety calibration, not capability
+  lift; the substring-headline-capability gain on this corpus was
+  a format-fidelity artifact specific to Qwen-shaped phrasings."
+
+Production decision UNAFFECTED — the three-gate framework
+(capability + voice + safety) was designed exactly for this.
+Substring failed silently; voice + safety carried the real signal.
+
+Migration history:
+  - 2026-05-07 (3635622): substring dict-of-dicts schema landed
+    (was signed-int deltas). Cross-app parity with PAI 8d20beb.
+  - 2026-05-11 (this commit): semantic-graded headline + per-cat
+    swap. Mirrors PAI e416ee0. Substring values archived in
+    PAI sizer's npu_model.py / `_semantic.json` files on Drive.
 
 Accuracy from Skippy v2 prompt set: 44 prompts × 3 samples = 132,
 RAG enabled (8 chunks via hybrid retrieval). Diffs:
@@ -222,7 +244,12 @@ SKIPPY_MOE_FINETUNE = LLMModel(
         "recipe does not transfer capability to Qwen3-MoE. MoE-aware LoRA "
         "target test (router + experts) on RunPod is the next milestone."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=91).
+    # ⚠ SUBSTRING-GRADED — no _semantic.json available for this row in
+    # [docs] 2026-05-11 bulk regrade. Per the Qwen-family-bias family
+    # pattern (per semantic_regrade_catalog.md), semantic would likely
+    # land ~−3.2pp lower (~65.7% on 132-basis), preserving the apples-
+    # to-apples 'regressed vs Instruct-2507 base' direction. Sum
+    # reconciles to pass_n_passes=91.
     # Source: eval/results/acc_reference-moe-q4km-v2-rag_20260423-091231.json
     # per [docs] 2026-05-07 17:26.
     category_deltas={
@@ -277,7 +304,10 @@ SKIPPY_DENSE_FINETUNE = LLMModel(
         "holds for either dense entry: MoE 3B-active reads 4-5× fewer "
         "weights per token than any 14B dense forward."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=90).
+    # ⚠ SUBSTRING-GRADED — no _semantic.json available for this row in
+    # [docs] 2026-05-11 bulk regrade. Per the Qwen-family-bias family
+    # pattern, semantic would likely land ~−3.2pp lower. Sum reconciles
+    # to pass_n_passes=90.
     # Source: eval/results/acc_reference-dense-q4km-v2-rag_20260423-091847.json
     # per [docs] 2026-05-07 17:26. Schema migration from old signed-int
     # deltas (vs MoE FT v1) landed 2026-05-07.
@@ -312,8 +342,8 @@ INSTRUCT_MOE_STOCK = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=18.0,
     fine_tune="stock (no fine-tune)",
-    pass_rate=0.712,
-    pass_n_passes=94,
+    pass_rate=0.659,
+    pass_n_passes=87,
     pass_n_total=132,
     description=(
         "Qwen3-30B-A3B-Instruct-2507 stock — the **true base** of Skippy MoE FT "
@@ -329,15 +359,16 @@ INSTRUCT_MOE_STOCK = LLMModel(
         "regressed vs its own base. The +5.3pp 'win' vs Thinking sibling was "
         "sister-model gap, not recipe gain."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=94).
-    # Per [docs] 2026-05-06 09:19.
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Substring read 0.712; semantic 0.659 (−5.5pp). Sum reconciles to
+    # pass_n_passes=87.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "general":             {"pass":  3, "n":  6, "rate": 0.500},
+        "multihop":            {"pass":  4, "n":  9, "rate": 0.444},
         "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
         "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 55, "n": 78, "rate": 0.705},
+        "rag_datasheet":       {"pass": 50, "n": 78, "rate": 0.641},
         "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
         "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
         "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
@@ -361,8 +392,8 @@ THINKING_MOE_STOCK = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=18.0,
     fine_tune="public reasoning-tune (no domain corpus)",
-    pass_rate=0.636,
-    pass_n_passes=84,
+    pass_rate=0.561,
+    pass_n_passes=74,
     pass_n_total=132,
     description=(
         "Public Qwen3-30B-A3B-Thinking-2507 — Alibaba's reasoning-tuned "
@@ -381,22 +412,20 @@ THINKING_MOE_STOCK = LLMModel(
         "for 'how does public reasoning rank' framing, not for fine-tune "
         "validation."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=84).
-    # Source: eval/results/acc_candidate-moe-thinking-v2-rag_20260424-094820.json
-    # per [docs] 2026-05-07 17:26. Notable: 0/3 rag_email is a known
-    # base-level failure mode of Thinking-2507 — most fine-tunes on
-    # other bases recover this to 3/3. Also 6/6 numerical_precision
-    # (perfect — matches 32B Instruct stock and 14B v4).
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Substring read 0.636; semantic 0.561 (−12.7pp — Thinking-2507 is
+    # the largest single-cell drop in the catalog, reinforcing the
+    # Qwen-family-format-bias finding). Sum reconciles to pass_n_passes=74.
     category_deltas={
         "coding":              {"pass":  5, "n":  6, "rate": 0.833},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
-        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # perfect
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "general":             {"pass":  6, "n":  6, "rate": 1.000},
+        "multihop":            {"pass":  1, "n":  9, "rate": 0.111},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},
         "rag_datasheet":       {"pass": 46, "n": 78, "rate": 0.590},
-        "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},  # base-level failure
+        "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},
         "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
-        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
+        "refusal":             {"pass":  7, "n":  9, "rate": 0.778},
     },
     # Same Qwen3-30B-A3B Q4 MoE architecture as Skippy MoE FT — runs the
     # same INT8 dequant + INT8 matmul path on dedicated INT8 NPU silicon.
@@ -423,35 +452,45 @@ SKIPPY_7B_V4 = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=4.18,
     fine_tune="v4 SFT — assistant_only_loss, 100 refusal exemplars, 2 epochs",
-    pass_rate=0.705,
-    pass_n_passes=93,
+    pass_rate=0.606,
+    pass_n_passes=80,
     pass_n_total=132,
     description=(
-        "Apples-to-apples-validated dense fine-tune: +3.1pp vs Qwen 2.5 7B "
-        "Instruct base (0.674). v4 recipe (SFTTrainer + assistant_only_loss, "
-        "100 refusal exemplars, 2 epochs). **Current production model** per "
-        "[docs] 2026-05-06 — clean over-gen (0%), proper refusal (9/9), voice "
-        "preserved. Trained locally on 5090 in ~46 min, $0. Per-category "
-        "asymmetry (vs Qwen 2.5 7B Instruct stock): 🟢 rag_datasheet +3, "
-        "rag_email +3, multihop +1; 🔴 reasoning -3 (terser FT outputs lose "
-        "substring grader points on prompts that reward verbose explanation)."
+        "**Current production model** per [docs] 2026-05-04 22:20. Ships via "
+        "the **three-gate framework** (capability + voice + safety), NOT a "
+        "capability headline. The original substring +3.1pp lift vs Qwen 2.5 "
+        "7B Instruct base **eroded across five successive cross-checks** "
+        "(LLM-judge, temperature sensitivity, cross-judge, semantic regrade) "
+        "→ **semantic regrade reverses to −4.6pp** (0.606 vs base 0.652). "
+        "Per [docs] 2026-05-11 white paper Finding 4: the recipe's value is "
+        "**voice transfer + safety calibration**, not capability lift. The "
+        "substring lift was format-fidelity matching trained Qwen phrasings. "
+        "Production decision unaffected — voice ✓ (152 char vs base's 324), "
+        "safety ✓ (refusal 9/9), capability passes three-gate floor. v4 "
+        "recipe = SFTTrainer + assistant_only_loss, 100 refusal exemplars, "
+        "2 epochs. Trained locally on 5090 in ~46 min, $0."
     ),
     deck_bullet=(
-        "Skippy 7B v4 = +3.1pp apples-to-apples gain on its Instruct base. "
-        "Voice preserved, refusal clean, ships in production today. The "
-        "recipe lifts RAG-retrieval and domain-knowledge categories; loses "
-        "a few pp on long-form reasoning (verbosity penalty). The asymmetry "
-        "IS the customer-template signal."
+        "Skippy 7B v4 = production via three-gate framework, NOT capability "
+        "headline. Substring +3.1pp lift eroded to semantic −4.6pp across "
+        "five cross-checks — recipe value is voice + safety transfer, not "
+        "capability gain. The three-gate framework caught substring failing "
+        "silently. Reviewer-final framing: 'Qwen-family format bias is the "
+        "single most valuable methodology output of this campaign.'"
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=93).
-    # Per [docs] 2026-05-06 09:19.
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11 white
+    # paper Finding 4 + reviewer closure. Substring values mirrored from
+    # PAI sizer's commit e416ee0 (single source of truth). Sum reconciles
+    # to pass_n_passes=80. Headline finding: substring +3.1pp lift reverses
+    # to semantic −4.6pp regression — the original capability-lift claim
+    # was format-fidelity to trained Qwen phrasings, not real gain.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
-        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 57, "n": 78, "rate": 0.731},
+        "general":             {"pass":  2, "n":  6, "rate": 0.333},
+        "multihop":            {"pass":  3, "n":  9, "rate": 0.333},
+        "numerical_precision": {"pass":  1, "n":  6, "rate": 0.167},
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},
+        "rag_datasheet":       {"pass": 53, "n": 78, "rate": 0.679},
         "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
         "reasoning":           {"pass":  3, "n":  6, "rate": 0.500},
         "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
@@ -478,8 +517,8 @@ SKIPPY_14B_V4 = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=9.2,
     fine_tune="v4 QLoRA 4-bit — same recipe shape as 7B v4, larger base",
-    pass_rate=0.727,
-    pass_n_passes=96,
+    pass_rate=0.697,
+    pass_n_passes=92,
     pass_n_total=132,
     description=(
         "Apples-to-apples-validated dense fine-tune: +5.3pp vs Qwen 2.5 14B "
@@ -502,18 +541,21 @@ SKIPPY_14B_V4 = LLMModel(
         "(0/3) make it unsuitable for production despite the headline. "
         "Cautionary entry — bigger isn't strictly better on this recipe."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=96).
-    # Per [docs] 2026-05-06 09:19.
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11. One of
+    # only two cross-family v4 cells that lift under semantic (along with
+    # Gemma 9B v4). Apples-to-apples vs Qwen 2.5 14B Instruct base: substring
+    # +5.3pp; semantic +4.8–5.5pp (still lifts; direction survives). Sum
+    # reconciles to pass_n_passes=92.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "general":             {"pass":  6, "n":  6, "rate": 1.000},
         "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
-        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # perfect
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
+        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "rag_blog":            {"pass":  2, "n":  3, "rate": 0.667},
         "rag_datasheet":       {"pass": 60, "n": 78, "rate": 0.769},
         "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},  # ⚠ regressed
-        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
-        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral 0/3
+        "reasoning":           {"pass":  3, "n":  6, "rate": 0.500},
+        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral
     },
     compute_dtype="fp16",
     gops_per_token=28.0,  # 2 × 14B (full dense forward)
@@ -535,8 +577,8 @@ SKIPPY_QWEN25_32B_V4 = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=17.88,
     fine_tune="v4 — 2 ep + assistant_only_loss + messages format (recipe-clean)",
-    pass_rate=0.636,
-    pass_n_passes=84,
+    pass_rate=0.644,
+    pass_n_passes=85,
     pass_n_total=132,
     description=(
         "Recipe-CLEAN 32B v4 fine-tune. 2 epochs + assistant_only_loss + "
@@ -558,18 +600,20 @@ SKIPPY_QWEN25_32B_V4 = LLMModel(
         "data: corpus-size-vs-param-count mismatch is a real customer "
         "constraint, not a plateau."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=84).
-    # Per [docs] 2026-05-07 03:03 (CLEAN 2-epoch recipe).
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11. Apples-
+    # to-apples vs Qwen 2.5 32B Instruct stock: substring −4.6pp; semantic
+    # narrows to −3.0pp (still regresses; trade narrows but holds). Sum
+    # reconciles to pass_n_passes=85.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  3, "n":  9, "rate": 0.333},  # under-trained
-        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 48, "n": 78, "rate": 0.615},
+        "general":             {"pass":  6, "n":  6, "rate": 1.000},
+        "multihop":            {"pass":  1, "n":  9, "rate": 0.111},  # under-trained
+        "numerical_precision": {"pass":  0, "n":  6, "rate": 0.000},
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},
+        "rag_datasheet":       {"pass": 54, "n": 78, "rate": 0.692},
         "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
         "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
-        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},  # recovered
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},  # base fabrication fixed
     },
     compute_dtype="fp16",
     gops_per_token=65.0,  # 2 × 32.5B (full dense forward)
@@ -615,19 +659,21 @@ SKIPPY_MISTRAL_V4 = LLMModel(
         "coupled. Customer rule: re-validate the recipe per base family "
         "before extending."
     ),
-    # Per-category raw rates per [docs] 2026-05-08 09:56 (10-cat payload
-    # in their message; persona dropped to match 9-cat catalog convention).
-    # Sum reconciles: 3+3+6+6+0+45+3+0+9 = 75 = pass_n_passes ✓
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11
+    # white paper Finding 4. Substring originally read −3.8pp vs stock
+    # Mistral; semantic widens to −6.1pp because stock Mistral lifted
+    # +2.4pp under semantic but v4 stayed flat (±0pp). Sum reconciles
+    # to pass_n_passes=75.
     category_deltas={
-        "coding":              {"pass":  3, "n":  6, "rate": 0.500},  # ⚠ −3 vs stock
-        "general":             {"pass":  3, "n":  6, "rate": 0.500},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
-        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # ✓ +3 vs stock
-        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},  # ⚠ −3 vs stock
-        "rag_datasheet":       {"pass": 45, "n": 78, "rate": 0.577},  # ⚠ −8 vs stock
-        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},  # ✓ +3 vs stock
-        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},  # flat (base reasoning-weak)
-        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},  # ✓ +3 vs stock
+        "coding":              {"pass":  3, "n":  6, "rate": 0.500},
+        "general":             {"pass":  4, "n":  6, "rate": 0.667},
+        "multihop":            {"pass":  3, "n":  9, "rate": 0.333},
+        "numerical_precision": {"pass":  4, "n":  6, "rate": 0.667},
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},
+        "rag_datasheet":       {"pass": 49, "n": 78, "rate": 0.628},
+        "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
+        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
     },
     compute_dtype="fp16",
     gops_per_token=14.5,  # 2 × 7.25B
@@ -655,8 +701,8 @@ SKIPPY_MOE_ROUTER_V1 = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=18.0,
     fine_tune="(attention + router) LoRA — adds gate.weight via target_parameters",
-    pass_rate=0.674,
-    pass_n_passes=89,
+    pass_rate=0.644,
+    pass_n_passes=85,
     pass_n_total=132,
     description=(
         "MoE fine-tune with attention + router LoRA targets. Per [docs] "
@@ -681,17 +727,19 @@ SKIPPY_MOE_ROUTER_V1 = LLMModel(
         "MoE bases need router targeting, but corpus-too-small for "
         "expert-FFN targeting at 6.5K examples."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=89).
-    # Per [docs] 2026-05-06 19:49.
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Apples-to-apples vs Instruct-2507 base: substring read −3.8pp;
+    # semantic narrows to −1.5pp (0.644 vs base 0.659). Sum reconciles
+    # to pass_n_passes=85.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},  # recovered from 0/9 (v4)
-        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 51, "n": 78, "rate": 0.654},  # didn't budge from v4
+        "general":             {"pass":  0, "n":  6, "rate": 0.000},
+        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},  # recovered from 0/9
+        "numerical_precision": {"pass":  0, "n":  6, "rate": 0.000},
+        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},
+        "rag_datasheet":       {"pass": 57, "n": 78, "rate": 0.731},
         "rag_email":           {"pass":  2, "n":  3, "rate": 0.667},
-        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "reasoning":           {"pass":  5, "n":  6, "rate": 0.833},
         "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
     },
     compute_dtype="int8",
@@ -711,8 +759,8 @@ SKIPPY_MOE_FULL_V1 = LLMModel(
     quant="Q4_K_M GGUF",
     size_gb=18.0,
     fine_tune="(attention + router + packed-expert FFN) LoRA at r=8, ~470M trainable",
-    pass_rate=0.629,
-    pass_n_passes=83,
+    pass_rate=0.621,
+    pass_n_passes=82,
     pass_n_total=132,
     description=(
         "MoE fine-tune with attention + router + packed-expert FFNs (r=8 "
@@ -736,17 +784,17 @@ SKIPPY_MOE_FULL_V1 = LLMModel(
         "rag_blog 3/3 → 0/3. The extra LoRA capacity lacks training "
         "signal at this corpus size — more isn't always better."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=83).
-    # Per [docs] 2026-05-07 10:21.
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Sum reconciles to pass_n_passes=82.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},  # kept router recovery
-        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
-        "rag_blog":            {"pass":  0, "n":  3, "rate": 0.000},  # ⚠ NEW regression
-        "rag_datasheet":       {"pass": 47, "n": 78, "rate": 0.603},  # worse than router
+        "general":             {"pass":  3, "n":  6, "rate": 0.500},
+        "multihop":            {"pass":  3, "n":  9, "rate": 0.333},
+        "numerical_precision": {"pass":  1, "n":  6, "rate": 0.167},
+        "rag_blog":            {"pass":  1, "n":  3, "rate": 0.333},
+        "rag_datasheet":       {"pass": 53, "n": 78, "rate": 0.679},
         "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
-        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "reasoning":           {"pass":  3, "n":  6, "rate": 0.500},
         "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
     },
     compute_dtype="int8",
@@ -776,8 +824,8 @@ QWEN25_7B_DENSE_INSTRUCT = LLMModel(
     active_params_b=7.6,
     quant="Q4_K_M GGUF (also Q5_K_M, Q8_0 measured)",
     size_gb=4.18,  # Q4 footprint; sizer's per-quant scaling applies via decode_bw_per_token_gb
-    pass_rate=0.674,
-    pass_n_passes=89,
+    pass_rate=0.652,
+    pass_n_passes=86,
     pass_n_total=132,
     description=(
         "Stock Qwen 2.5 7B dense Instruct — serves dual duty: (a) perf-"
@@ -795,20 +843,19 @@ QWEN25_7B_DENSE_INSTRUCT = LLMModel(
         "active streams per token. Also the apples-to-apples baseline for "
         "Skippy 7B v4's +3.1pp validated fine-tune gain."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=89).
-    # Per [docs] 2026-05-06 09:19 — supplied as the apples-to-apples
-    # 7B v4 baseline. Notable: 0/3 rag_email matches Thinking stock's
-    # rag_email failure pattern. 7B v4 fine-tune fully recovered this
-    # category (0/3 → 3/3).
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Substring read 0.674; semantic 0.652 (−2.2pp — small shift; Qwen-
+    # family bases are the baseline against which the substring format
+    # bonus is measured). Sum reconciles to pass_n_passes=86.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  5, "n":  9, "rate": 0.556},
-        "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
+        "general":             {"pass":  6, "n":  6, "rate": 1.000},
+        "multihop":            {"pass":  1, "n":  9, "rate": 0.111},
+        "numerical_precision": {"pass":  0, "n":  6, "rate": 0.000},
         "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 54, "n": 78, "rate": 0.692},
+        "rag_datasheet":       {"pass": 57, "n": 78, "rate": 0.731},
         "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},
-        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
+        "reasoning":           {"pass":  4, "n":  6, "rate": 0.667},
         "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
     },
     # Dense Q4 → fp16 internal path on llama-cpp (gates 🔴 dtype_mismatch
@@ -830,8 +877,8 @@ QWEN25_32B_DENSE_INSTRUCT = LLMModel(
     active_params_b=32.5,
     quant="Q4_K_M GGUF (also Q5_K_M measured; Q8 won't fit on 5090)",
     size_gb=17.88,  # Q4 footprint
-    pass_rate=0.682,
-    pass_n_passes=90,
+    pass_rate=0.674,
+    pass_n_passes=89,
     pass_n_total=132,
     description=(
         "Stock Qwen 2.5 32B Instruct — serves dual duty: (a) perf-comparison "
@@ -854,20 +901,21 @@ QWEN25_32B_DENSE_INSTRUCT = LLMModel(
         "to-apples baseline for Skippy 32B v4 — at 0.682 pass-rate, the "
         "FT regresses 4.6pp from this row. The recipe trade is real."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=90).
-    # Per [docs] 2026-05-07 12:44. Notable: numerical_precision 6/6
-    # (PERFECT — only entry sharing this with 14B v4) but refusal 6/9
-    # (made_up_peripheral 3/3 wrong — Qwen2.5 base behavior).
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Substring read 0.682; semantic 0.674 (−0.8pp — small shift,
+    # Qwen-family base). Notable: refusal 7/9 — made_up_peripheral
+    # fabrication is partial under semantic (substring read 6/9). Sum
+    # reconciles to pass_n_passes=89.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
+        "general":             {"pass":  6, "n":  6, "rate": 1.000},
         "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
-        "numerical_precision": {"pass":  6, "n":  6, "rate": 1.000},  # perfect
+        "numerical_precision": {"pass":  1, "n":  6, "rate": 0.167},
         "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 51, "n": 78, "rate": 0.654},
+        "rag_datasheet":       {"pass": 54, "n": 78, "rate": 0.692},
         "rag_email":           {"pass":  3, "n":  3, "rate": 1.000},
-        "reasoning":           {"pass":  6, "n":  6, "rate": 1.000},
-        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ fabricates made_up
+        "reasoning":           {"pass":  3, "n":  6, "rate": 0.500},
+        "refusal":             {"pass":  7, "n":  9, "rate": 0.778},  # ⚠ fabrication
     },
     compute_dtype="fp16",
     # 5090 anchors (Q4/Q5 decode + prefill) live on
@@ -901,8 +949,8 @@ LLAMA_3_1_8B_INSTRUCT_STOCK = LLMModel(
     quant="Q4_K_M GGUF (bartowski mirror)",
     size_gb=4.92,  # Q4_K_M footprint for 8B class
     fine_tune="stock (no fine-tune)",
-    pass_rate=0.568,
-    pass_n_passes=75,
+    pass_rate=0.583,
+    pass_n_passes=77,
     pass_n_total=132,
     description=(
         "Cross-family baseline per [docs] 2026-05-07 22:28. Materially "
@@ -926,18 +974,20 @@ LLAMA_3_1_8B_INSTRUCT_STOCK = LLMModel(
         "necessarily transfer to other vendors without per-base "
         "calibration."
     ),
-    # Per-category raw rates (sum reconciles to pass_n_passes=75).
-    # Per [docs] 2026-05-07 22:28.
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Substring read 0.568; semantic 0.583 (+1.6pp — substring was being
+    # unfairly harsh on non-Qwen bases; cross-family gap to Qwen narrows
+    # from −10.6pp to −6.9pp). Sum reconciles to pass_n_passes=77.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
-        "general":             {"pass":  3, "n":  3, "rate": 1.000},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
-        "numerical_precision": {"pass":  4, "n":  6, "rate": 0.667},
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 45, "n": 78, "rate": 0.577},  # ⚠ structural weakness
+        "general":             {"pass":  6, "n":  6, "rate": 1.000},
+        "multihop":            {"pass":  5, "n":  9, "rate": 0.556},
+        "numerical_precision": {"pass":  0, "n":  6, "rate": 0.000},
+        "rag_blog":            {"pass":  2, "n":  3, "rate": 0.667},
+        "rag_datasheet":       {"pass": 48, "n": 78, "rate": 0.615},
         "rag_email":           {"pass":  1, "n":  3, "rate": 0.333},
-        "reasoning":           {"pass":  1, "n":  6, "rate": 0.167},  # ⚠ catastrophic 1/6
-        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral fabrication
+        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},
+        "refusal":             {"pass":  9, "n":  9, "rate": 1.000},
     },
     # Dense Q4 → fp16 internal path on llama.cpp. Selecting on Mid (INT8-
     # only) triggers 🔴 dtype_mismatch in the app.py UI gate.
@@ -964,8 +1014,8 @@ MISTRAL_7B_V03_INSTRUCT_STOCK = LLMModel(
     quant="Q4_K_M GGUF (bartowski mirror)",
     size_gb=4.37,
     fine_tune="stock (no fine-tune)",
-    pass_rate=0.606,
-    pass_n_passes=80,
+    pass_rate=0.629,
+    pass_n_passes=83,
     pass_n_total=132,
     description=(
         "Cross-family baseline per [docs] 2026-05-08 09:01. Sits between "
@@ -988,32 +1038,20 @@ MISTRAL_7B_V03_INSTRUCT_STOCK = LLMModel(
         "rate. Same hardware budget as Qwen 7B (within ~7% on 5090 "
         "perf), different quality outcome."
     ),
-    # Per-category raw rates from [docs] 2026-05-08 09:45 (source:
-    # acc_baseline-mistral-7b-instruct-v0.3-v2-rag_20260507-224742.json).
-    # NOTE: the 09:45 payload was 10-cat (includes persona 0/6) sum_n=132;
-    # this 9-cat shape drops persona to match the existing catalog
-    # convention (sum_n=126 on 9 cats). pass_n_total stays 132 (the eval
-    # truth). The 6-prompt gap between 9-cat sum_n and pass_n_total is
-    # the persona category (uniformly 0/6 for stock bases per [docs]
-    # 09:01 — voice gate is exclusively a fine-tune deliverable).
-    # NOTE 2: `general` here has n=6, vs n=3 in older catalog entries
-    # (Qwen-family from [docs] 09:19 / 17:26 evals, dated 2026-04-23).
-    # The 2026-05-07 Mistral eval expanded `general` to n=6. Older
-    # entries are not back-ported (would need [docs] re-payload of all
-    # 11 prior rows). Δ-vs-production is on raw pass counts, so the
-    # rendering still works correctly (Mistral general pass=3 vs prod
-    # pass=3 → Δ=+0); only the rate display differs across entries.
-    # Sum reconciles: 6+3+6+3+3+53+0+0+6 = 80 = pass_n_passes ✓
+    # Per-category raw rates — SEMANTIC GRADE per [docs] 2026-05-11.
+    # Substring read 0.606; semantic 0.629 (+2.4pp — substring was unfairly
+    # harsh on Mistral). Cross-family ladder semantic: Qwen 65.2 > Mistral
+    # 62.9 > Llama 58.3. Sum reconciles to pass_n_passes=83.
     category_deltas={
         "coding":              {"pass":  6, "n":  6, "rate": 1.000},
         "general":             {"pass":  3, "n":  6, "rate": 0.500},
-        "multihop":            {"pass":  6, "n":  9, "rate": 0.667},
+        "multihop":            {"pass":  7, "n":  9, "rate": 0.778},
         "numerical_precision": {"pass":  3, "n":  6, "rate": 0.500},
-        "rag_blog":            {"pass":  3, "n":  3, "rate": 1.000},
-        "rag_datasheet":       {"pass": 53, "n": 78, "rate": 0.679},
+        "rag_blog":            {"pass":  2, "n":  3, "rate": 0.667},
+        "rag_datasheet":       {"pass": 56, "n": 78, "rate": 0.718},
         "rag_email":           {"pass":  0, "n":  3, "rate": 0.000},
-        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},  # ⚠ catastrophic
-        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},  # ⚠ made_up_peripheral
+        "reasoning":           {"pass":  0, "n":  6, "rate": 0.000},
+        "refusal":             {"pass":  6, "n":  9, "rate": 0.667},
     },
     # Dense Q4 → fp16 internal path on llama.cpp. Selecting on Mid (INT8-
     # only) triggers 🔴 dtype_mismatch in the app.py UI gate.
