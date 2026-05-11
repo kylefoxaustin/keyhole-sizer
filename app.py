@@ -605,255 +605,14 @@ with st.sidebar:
                 f"the routed experts). Tier projections shown above reflect "
                 f"this {1/_scale:.1f}× higher per-token BW load."
             )
-        with st.expander("📊 Accuracy details"):
-            st.markdown(
-                f"**{_model.label}**  \n"
-                f"{_model.description}  \n  \n"
-                f"**Family:** {_model.family}  \n"
-                f"**Base:** {_model.base}  \n"
-                f"**Total / active params:** {_model.total_params_b:.0f}B / "
-                f"{_model.active_params_b:.0f}B  \n"
-                f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
-                f"**Specialization:** {_model.fine_tune}  \n  \n"
-                f"🔸 *{_model.deck_bullet}*"
-            )
-            # Three-row catalog comparison table — all selectable models
-            # side by side, current selection highlighted with an arrow.
-            st.markdown("---")
-            st.markdown("**Catalog comparison** (all three selectable models):")
-            _catalog_rows: list[dict] = []
-            for _k, _m in LLM_MODELS.items():
-                _row_delta = accuracy_delta_pp(_m, _production_model)
-                if _k == PRODUCTION_REFERENCE_KEY:
-                    _row_delta_str = "—  (reference)"
-                elif _row_delta is None:
-                    _row_delta_str = "perf ref"
-                else:
-                    _row_delta_str = f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
-                _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
-                _catalog_rows.append({
-                    "Model":         _row_label,
-                    "Pass rate":     (f"{_m.pass_rate*100:.1f}%"
-                                       if _m.pass_rate is not None else "—"),
-                    "Δ vs production": (_row_delta_str if _m.pass_rate is not None
-                                          else "perf ref"),
-                    "n":             (f"{_m.pass_n_passes}/{_m.pass_n_total}"
-                                       if _m.pass_n_passes is not None else "—"),
-                    "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
-                })
-            st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
-
-            # Per-category breakdown — dict-of-dicts shape per [pai-sizer]
-            # 8d20beb migration (mirrored 2026-05-07). Each entry holds raw
-            # rates {category: {pass, n, rate}}; Δ vs production is
-            # computed at render time from raw counts.
-            if _model.category_deltas:
-                _prod_cats = _production_model.category_deltas or {}
-                if _is_production:
-                    st.markdown("**Per-category breakdown** (production reference — Δ vs self = 0):")
-                else:
-                    st.markdown(
-                        f"**Per-category breakdown** "
-                        f"(rate, Δ vs {_production_model.label.split(' (')[0]} — "
-                        f"positive = this model wins):"
-                    )
-                for cat, data in _model.category_deltas.items():
-                    cat_label = CATEGORY_LABELS.get(cat, cat)
-                    passes = data.get("pass", 0)
-                    n = data.get("n", 0)
-                    rate = data.get("rate", 0.0)
-                    prod_data = _prod_cats.get(cat)
-                    if prod_data and not _is_production:
-                        delta = passes - prod_data.get("pass", 0)
-                        sign = "+" if delta >= 0 else ""
-                        st.markdown(
-                            f"- {cat_label}: **{passes}/{n}** ({rate:.1%}) "
-                            f"— Δ {sign}{delta} passes"
-                        )
-                    else:
-                        st.markdown(f"- {cat_label}: **{passes}/{n}** ({rate:.1%})")
-                st.caption(
-                    "Raw counts from Skippy v2 prompt set (132 samples), "
-                    "RAG on (8 chunks via hybrid retrieval). Δ computed at "
-                    "render time from raw pass counts vs production reference."
-                )
-            else:
-                st.caption(
-                    "Per-category breakdown not yet populated for this entry."
-                )
-
-            # Eval methodology section — per [docs] 2026-05-11 09:31
-            # reviewer-final substring-reliability arc closure (white paper
-            # Finding 4: Qwen-family format bias). 33 catalog entries
-            # regraded via GPT-4o binary semantic judge; the campaign
-            # produced what the reviewer called "the single most valuable
-            # methodology output — bigger than gotcha #7 itself".
-            # Mirrors PAI sizer's dd4ef31 + e416ee0 surfaces.
-            st.markdown("---")
-            st.markdown("**📐 Eval methodology — Finding 4: Qwen-family format bias (semantic regrade)**")
-            st.markdown(
-                "The headline pass-rate numbers above now use **semantic "
-                "grading** (GPT-4o binary semantic judge, 132-sample "
-                "v2-RAG, deterministic temp=0) per [docs] 2026-05-11 "
-                "white paper Finding 4. Substring grading is retained "
-                "only on 2 entries (Skippy MoE FT v1, pre-v4 dense) "
-                "where _semantic.json was not produced — both flagged "
-                "in their model description."
-            )
-            st.markdown(
-                "**Why the headline switched** — the production model's "
-                "substring-headline-lift eroded across five successive "
-                "cross-checks:"
-            )
-            st.markdown(
-                "| # | Cross-check | Result |\n"
-                "|---|---|---|\n"
-                "| 1 | Substring (original headline) | **+3.1pp** vs base |\n"
-                "| 2 | LLM-judge (Sonnet 4.6) | **−0.35** |\n"
-                "| 3 | Temperature=0.3 substring | **−29.3pp** |\n"
-                "| 4 | Cross-judge (GPT-4o) | **−0.69** |\n"
-                "| 5 | **Semantic regrade** (132-sample binary) | **−4.6pp** (sign reversal) |"
-            )
-            st.markdown(
-                "**Finding 4 (verbatim, [docs] 2026-05-11 white paper):** "
-                "*'The recipe's value is voice transfer and safety "
-                "calibration, not capability lift; the substring-headline-"
-                "capability gain on this corpus was a format-fidelity "
-                "artifact specific to Qwen-shaped phrasings in the "
-                "training data.'*"
-            )
-            st.markdown(
-                "**Substring is biased — per-family regrade Δ** "
-                "(33-entry catalog, semantic minus substring):"
-            )
-            st.markdown(
-                "| Family | Regrade Δ direction | Interpretation |\n"
-                "|---|---|---|\n"
-                "| Qwen-family fine-tunes | **−3.2 to −12.7pp** | Substring over-graded (gold tokens are Qwen-shaped) |\n"
-                "| Non-Qwen stock bases (Gemma/Llama/Mistral) | **+1.6 to +6.0pp** | Substring under-graded |\n"
-                "| Gemma 9B v4 (cross-family) | +5.4pp | Only cross-family FT that lifts under both graders |\n"
-                "| Mistral / Llama / Yi v4 | flat-to-down | Substring direction confirmed |"
-            )
-            st.markdown(
-                "**Standing methodology** — durable, transfers across corpora:"
-            )
-            st.markdown(
-                "> *'Substring grading is reliable for base-vs-base "
-                "comparisons but unreliable for FT-vs-base comparisons "
-                "when the corpus phrasings come from one model family. "
-                "Customers running cross-family campaigns should "
-                "validate substring with semantic grading before drawing "
-                "FT-lift conclusions. Two judges by default (Sonnet 4.6 "
-                "+ GPT-4o) on any cross-family fine-tune eval — "
-                "~$5/N=5 pass.'*"
-            )
-            st.markdown(
-                "**Production decision unaffected.** The Skippy 7B v4 "
-                "ship decision is anchored on the **three-gate framework** "
-                "(capability + voice + safety) — substring was never the "
-                "load-bearing signal. Voice and safety carried the real "
-                "signal; substring failed silently. This is exactly the "
-                "scenario the three-gate framework was designed for."
-            )
-            st.caption(
-                f"Methodology version: `{METHODOLOGY_VERSION}` — cross-app "
-                f"lockstep with PAI sizer's `sizer_bundle.json __meta__` "
-                f"and Skippy side's `build_sizer_bundle.py`. Bumps when "
-                f"the eval methodology shifts (new grader, new RAG "
-                f"protocol, new eval set, etc.)."
-            )
-
-            st.markdown(
-                "---\n"
-                "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
-                "same decode-tok/s ceiling on every NPU tier regardless of which "
-                "model's weights are in the file — bandwidth-bound physics doesn't "
-                "care. **For the MoE entries** (Skippy MoE FT and Thinking stock), "
-                "model choice is a pure quality-vs-quality trade — no perf cost. "
-                "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
-                "math differs: dense traverses the full weight set per token, so "
-                "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
-                "alternatives."
-            )
-
-        # ── Precision-axis quality reference ──────────────────────────
-        # Parallel to the model-axis "Accuracy details" expander above —
-        # this one captures the cost of the quantization recipe on the
-        # base model (fp16 → FP8 → W8A8 INT8). Composes with the 5090
-        # capability caption: when hw is on tensor_compat (consumer
-        # Blackwell SM120), the W8A8 row is annotated as ecosystem-blocked.
-        with st.expander("📉 Precision quality reference"):
-            _w8a8_blocked_on_tier = (
-                hw.capability_levels is not None
-                and hw.capability_level("int8") == "tensor_compat"
-            )
-            st.markdown(
-                f"**Quality cost of the quantization recipe** on Qwen2.5-14B base "
-                f"+ RAG, measured on the v2 prompt set (44 prompts × 3 samples = 132). "
-                f"fp16 reference: **{FP16_REFERENCE.pass_rate*100:.1f}%** "
-                f"({FP16_REFERENCE.pass_n_passes}/{FP16_REFERENCE.pass_n_total})."
-            )
-
-            ladder_rows: list[dict] = []
-            for cfg in LLM_QUANT_LADDER:
-                _delta = delta_pp_vs_fp16(cfg)
-                _delta_str = (
-                    "—" if cfg.key == FP16_REFERENCE.key
-                    else f"{_delta:+.1f}pp"
-                )
-                _label = cfg.label
-                if cfg.key == QWEN_W8A8_RAG.key and _w8a8_blocked_on_tier:
-                    _label = f"⚠ {_label} — n/a on {hw.name}"
-                ladder_rows.append({
-                    "Configuration":   _label,
-                    "Pass rate":       f"{cfg.pass_rate*100:.1f}%",
-                    "Δ vs fp16 base":  _delta_str,
-                    "n":               f"{cfg.pass_n_passes}/{cfg.pass_n_total}",
-                    "Host":            cfg.measurement_host,
-                })
-            st.dataframe(pd.DataFrame(ladder_rows), width="stretch", hide_index=True)
-
-            if _w8a8_blocked_on_tier:
-                st.warning(
-                    "**W8A8 INT8 is ecosystem-blocked on this tier.** Consumer "
-                    "Blackwell SM120 throws `RuntimeError: Int8 not supported on "
-                    "SM120. Use FP8 quantization instead, or run on older arch "
-                    "(SM < 100).` from `torch.ops._C.cutlass_scaled_mm`. The W8A8 "
-                    "pass-rate row above is a measured number from H100 — kept "
-                    "for the deck story, not achievable on this silicon today. "
-                    "The capability caption near the metric row carries the full "
-                    "kernel-library narrative."
-                )
-
-            st.markdown(
-                "**Where the W8A8 -3.8pp regression lives** (vs fp16 base, RAG on, "
-                "v2 reproducer 2026-04-24):"
-            )
-            for cat, delta_passes in W8A8_VS_FP16_CATEGORY_DELTAS.items():
-                cat_label = CATEGORY_LABELS.get(cat, cat)
-                if delta_passes == 0:
-                    st.markdown(f"- {cat_label}: **±0** (no measurable drift)")
-                else:
-                    sign = "+" if delta_passes > 0 else ""
-                    st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
-            st.caption(
-                "Coding + reasoning are byte-identical between fp16 and W8A8 "
-                "(Jaccard 1.0, exact-match 1.0) — structured-output tasks are "
-                "untouched by INT8. The regression localizes in retrieval-grounded "
-                "wording, not capability. **DO NOT** cite a 'refusal-specific' "
-                "regression — earlier H100 run had refusals -2 but the 2026-04-24 "
-                "reproducer had refusals ±0; that localization didn't hold."
-            )
-
-            st.markdown(
-                "---\n"
-                "**Headline framing for the deck:** W8A8 INT8 costs ~3.8pp vs fp16 "
-                "base. Going base → fine-tune adds ~5pp. So a fine-tuned W8A8 "
-                "would plausibly land near the fp16 base — W8A8 preserves enough "
-                "headroom that **lifecycle cost (the retargeting panel) dominates "
-                "the choice**, not the ~4pp quality hit. Fine-tune-vs-stock and "
-                "precision-recipe are independent axes — surfaced separately above."
-            )
+        # 📊 Accuracy details + 📉 Precision quality reference moved OUT
+        # of the sidebar on 2026-05-11 — the sidebar's ~200px column was
+        # mangling tables + long verbatim quotes (especially after the
+        # Finding 4 methodology surface landed; markdown tables don't fit
+        # at 200px). Both expanders now live in the main area, rendered
+        # under `if llm_enabled:` right after the LLM source banner +
+        # capability caption. Search for `with st.expander("📊 Accuracy`
+        # to find them.
 
         quant = st.selectbox("Qwen3 quantization",
                               ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
@@ -1315,6 +1074,259 @@ if vision_enabled and pipeline.precision and hw.capability_levels:
         f"**{pipeline.precision.upper()} kernel path on {hw.name}:** "
         f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
     )
+
+# ── 🔬 Model & precision details — moved out of sidebar on 2026-05-11 ──
+# These two expanders used to live in the sidebar's "LLM workload" section,
+# but the ~200px sidebar column mangled the tables + long verbatim quotes
+# (especially after the Finding 4 methodology surface landed). Moved here
+# so the main-area width (~800-1000px) can render the dataframes, the
+# 5-checkpoint headline-erosion table, and the per-family regrade Δ table
+# at human-readable widths. Conditional on llm_enabled — these only render
+# when the user has the LLM toggle on (matches original sidebar behavior).
+if llm_enabled:
+    with st.expander("📊 Accuracy details"):
+        st.markdown(
+            f"**{_model.label}**  \n"
+            f"{_model.description}  \n  \n"
+            f"**Family:** {_model.family}  \n"
+            f"**Base:** {_model.base}  \n"
+            f"**Total / active params:** {_model.total_params_b:.0f}B / "
+            f"{_model.active_params_b:.0f}B  \n"
+            f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
+            f"**Specialization:** {_model.fine_tune}  \n  \n"
+            f"🔸 *{_model.deck_bullet}*"
+        )
+        # Catalog comparison table — all selectable models side by side,
+        # current selection highlighted with an arrow.
+        st.markdown("---")
+        st.markdown("**Catalog comparison** (all selectable models):")
+        _catalog_rows: list[dict] = []
+        for _k, _m in LLM_MODELS.items():
+            _row_delta = accuracy_delta_pp(_m, _production_model)
+            if _k == PRODUCTION_REFERENCE_KEY:
+                _row_delta_str = "—  (reference)"
+            elif _row_delta is None:
+                _row_delta_str = "perf ref"
+            else:
+                _row_delta_str = f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
+            _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
+            _catalog_rows.append({
+                "Model":         _row_label,
+                "Pass rate":     (f"{_m.pass_rate*100:.1f}%"
+                                   if _m.pass_rate is not None else "—"),
+                "Δ vs production": (_row_delta_str if _m.pass_rate is not None
+                                      else "perf ref"),
+                "n":             (f"{_m.pass_n_passes}/{_m.pass_n_total}"
+                                   if _m.pass_n_passes is not None else "—"),
+                "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
+            })
+        st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
+
+        # Per-category breakdown — dict-of-dicts shape per [pai-sizer]
+        # 8d20beb migration. Each entry holds raw rates
+        # {category: {pass, n, rate}}; Δ vs production computed at render
+        # time from raw counts.
+        if _model.category_deltas:
+            _prod_cats = _production_model.category_deltas or {}
+            if _is_production:
+                st.markdown("**Per-category breakdown** (production reference — Δ vs self = 0):")
+            else:
+                st.markdown(
+                    f"**Per-category breakdown** "
+                    f"(rate, Δ vs {_production_model.label.split(' (')[0]} — "
+                    f"positive = this model wins):"
+                )
+            for cat, data in _model.category_deltas.items():
+                cat_label = CATEGORY_LABELS.get(cat, cat)
+                passes = data.get("pass", 0)
+                n = data.get("n", 0)
+                rate = data.get("rate", 0.0)
+                prod_data = _prod_cats.get(cat)
+                if prod_data and not _is_production:
+                    delta = passes - prod_data.get("pass", 0)
+                    sign = "+" if delta >= 0 else ""
+                    st.markdown(
+                        f"- {cat_label}: **{passes}/{n}** ({rate:.1%}) "
+                        f"— Δ {sign}{delta} passes"
+                    )
+                else:
+                    st.markdown(f"- {cat_label}: **{passes}/{n}** ({rate:.1%})")
+            st.caption(
+                "Raw counts from Skippy v2 prompt set (132 samples), "
+                "RAG on (8 chunks via hybrid retrieval). Δ computed at "
+                "render time from raw pass counts vs production reference."
+            )
+        else:
+            st.caption(
+                "Per-category breakdown not yet populated for this entry."
+            )
+
+        # Eval methodology section — per [docs] 2026-05-11 09:31
+        # reviewer-final substring-reliability arc closure (white paper
+        # Finding 4: Qwen-family format bias). Mirrors PAI sizer dd4ef31.
+        st.markdown("---")
+        st.markdown("**📐 Eval methodology — Finding 4: Qwen-family format bias (semantic regrade)**")
+        st.markdown(
+            "The headline pass-rate numbers above now use **semantic "
+            "grading** (GPT-4o binary semantic judge, 132-sample "
+            "v2-RAG, deterministic temp=0) per [docs] 2026-05-11 "
+            "white paper Finding 4. Substring grading is retained "
+            "only on 2 entries (Skippy MoE FT v1, pre-v4 dense) "
+            "where _semantic.json was not produced — both flagged "
+            "in their model description."
+        )
+        st.markdown(
+            "**Why the headline switched** — the production model's "
+            "substring-headline-lift eroded across five successive "
+            "cross-checks:"
+        )
+        st.markdown(
+            "| # | Cross-check | Result |\n"
+            "|---|---|---|\n"
+            "| 1 | Substring (original headline) | **+3.1pp** vs base |\n"
+            "| 2 | LLM-judge (Sonnet 4.6) | **−0.35** |\n"
+            "| 3 | Temperature=0.3 substring | **−29.3pp** |\n"
+            "| 4 | Cross-judge (GPT-4o) | **−0.69** |\n"
+            "| 5 | **Semantic regrade** (132-sample binary) | **−4.6pp** (sign reversal) |"
+        )
+        st.markdown(
+            "**Finding 4 (verbatim, [docs] 2026-05-11 white paper):** "
+            "*'The recipe's value is voice transfer and safety "
+            "calibration, not capability lift; the substring-headline-"
+            "capability gain on this corpus was a format-fidelity "
+            "artifact specific to Qwen-shaped phrasings in the "
+            "training data.'*"
+        )
+        st.markdown(
+            "**Substring is biased — per-family regrade Δ** "
+            "(33-entry catalog, semantic minus substring):"
+        )
+        st.markdown(
+            "| Family | Regrade Δ direction | Interpretation |\n"
+            "|---|---|---|\n"
+            "| Qwen-family fine-tunes | **−3.2 to −12.7pp** | Substring over-graded (gold tokens are Qwen-shaped) |\n"
+            "| Non-Qwen stock bases (Gemma/Llama/Mistral) | **+1.6 to +6.0pp** | Substring under-graded |\n"
+            "| Gemma 9B v4 (cross-family) | +5.4pp | Only cross-family FT that lifts under both graders |\n"
+            "| Mistral / Llama / Yi v4 | flat-to-down | Substring direction confirmed |"
+        )
+        st.markdown(
+            "**Standing methodology** — durable, transfers across corpora:"
+        )
+        st.markdown(
+            "> *'Substring grading is reliable for base-vs-base "
+            "comparisons but unreliable for FT-vs-base comparisons "
+            "when the corpus phrasings come from one model family. "
+            "Customers running cross-family campaigns should "
+            "validate substring with semantic grading before drawing "
+            "FT-lift conclusions. Two judges by default (Sonnet 4.6 "
+            "+ GPT-4o) on any cross-family fine-tune eval — "
+            "~$5/N=5 pass.'*"
+        )
+        st.markdown(
+            "**Production decision unaffected.** The Skippy 7B v4 "
+            "ship decision is anchored on the **three-gate framework** "
+            "(capability + voice + safety) — substring was never the "
+            "load-bearing signal. Voice and safety carried the real "
+            "signal; substring failed silently. This is exactly the "
+            "scenario the three-gate framework was designed for."
+        )
+        st.caption(
+            f"Methodology version: `{METHODOLOGY_VERSION}` — cross-app "
+            f"lockstep with PAI sizer's `sizer_bundle.json __meta__` "
+            f"and Skippy side's `build_sizer_bundle.py`. Bumps when "
+            f"the eval methodology shifts (new grader, new RAG "
+            f"protocol, new eval set, etc.)."
+        )
+
+        st.markdown(
+            "---\n"
+            "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
+            "same decode-tok/s ceiling on every NPU tier regardless of which "
+            "model's weights are in the file — bandwidth-bound physics doesn't "
+            "care. **For the MoE entries** (Skippy MoE FT and Thinking stock), "
+            "model choice is a pure quality-vs-quality trade — no perf cost. "
+            "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
+            "math differs: dense traverses the full weight set per token, so "
+            "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
+            "alternatives."
+        )
+
+    with st.expander("📉 Precision quality reference"):
+        # Quality cost of the quantization recipe on the base model
+        # (fp16 → FP8 → W8A8 INT8). Composes with the 5090 capability
+        # caption: when hw is on tensor_compat (consumer Blackwell SM120),
+        # the W8A8 row is annotated as ecosystem-blocked.
+        _w8a8_blocked_on_tier = (
+            hw.capability_levels is not None
+            and hw.capability_level("int8") == "tensor_compat"
+        )
+        st.markdown(
+            f"**Quality cost of the quantization recipe** on Qwen2.5-14B base "
+            f"+ RAG, measured on the v2 prompt set (44 prompts × 3 samples = 132). "
+            f"fp16 reference: **{FP16_REFERENCE.pass_rate*100:.1f}%** "
+            f"({FP16_REFERENCE.pass_n_passes}/{FP16_REFERENCE.pass_n_total})."
+        )
+
+        ladder_rows: list[dict] = []
+        for cfg in LLM_QUANT_LADDER:
+            _delta = delta_pp_vs_fp16(cfg)
+            _delta_str = (
+                "—" if cfg.key == FP16_REFERENCE.key
+                else f"{_delta:+.1f}pp"
+            )
+            _label = cfg.label
+            if cfg.key == QWEN_W8A8_RAG.key and _w8a8_blocked_on_tier:
+                _label = f"⚠ {_label} — n/a on {hw.name}"
+            ladder_rows.append({
+                "Configuration":   _label,
+                "Pass rate":       f"{cfg.pass_rate*100:.1f}%",
+                "Δ vs fp16 base":  _delta_str,
+                "n":               f"{cfg.pass_n_passes}/{cfg.pass_n_total}",
+                "Host":            cfg.measurement_host,
+            })
+        st.dataframe(pd.DataFrame(ladder_rows), width="stretch", hide_index=True)
+
+        if _w8a8_blocked_on_tier:
+            st.warning(
+                "**W8A8 INT8 is ecosystem-blocked on this tier.** Consumer "
+                "Blackwell SM120 throws `RuntimeError: Int8 not supported on "
+                "SM120. Use FP8 quantization instead, or run on older arch "
+                "(SM < 100).` from `torch.ops._C.cutlass_scaled_mm`. The W8A8 "
+                "pass-rate row above is a measured number from H100 — kept "
+                "for the deck story, not achievable on this silicon today. "
+                "The capability caption near the metric row carries the full "
+                "kernel-library narrative."
+            )
+
+        st.markdown(
+            "**Where the W8A8 -3.8pp regression lives** (vs fp16 base, RAG on, "
+            "v2 reproducer 2026-04-24):"
+        )
+        for cat, delta_passes in W8A8_VS_FP16_CATEGORY_DELTAS.items():
+            cat_label = CATEGORY_LABELS.get(cat, cat)
+            if delta_passes == 0:
+                st.markdown(f"- {cat_label}: **±0** (no measurable drift)")
+            else:
+                sign = "+" if delta_passes > 0 else ""
+                st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
+        st.caption(
+            "Coding + reasoning are byte-identical between fp16 and W8A8 "
+            "(Jaccard 1.0, exact-match 1.0) — structured-output tasks are "
+            "untouched by INT8. The regression localizes in retrieval-grounded "
+            "wording, not capability. **DO NOT** cite a 'refusal-specific' "
+            "regression — earlier H100 run had refusals -2 but the 2026-04-24 "
+            "reproducer had refusals ±0; that localization didn't hold."
+        )
+
+        st.markdown(
+            "---\n"
+            "**Headline framing for the deck:** W8A8 INT8 costs ~3.8pp vs fp16 "
+            "base. Going base → fine-tune adds ~5pp. So a fine-tuned W8A8 "
+            "would plausibly land near the fp16 base — W8A8 preserves enough "
+            "headroom that **lifecycle cost (the retargeting panel) dominates "
+            "the choice**, not the ~4pp quality hit. Fine-tune-vs-stock and "
+            "precision-recipe are independent axes — surfaced separately above."
+        )
 
 # ── Pipeline flow (collapsible, expanded by default) ──
 # Vision-pipeline-centric (the diagram shows YOLO → CLIP → ... stages with
