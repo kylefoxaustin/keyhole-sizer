@@ -1075,16 +1075,17 @@ if vision_enabled and pipeline.precision and hw.capability_levels:
         f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
     )
 
-# ── 🔬 Model & precision details — moved out of sidebar on 2026-05-11 ──
-# These two expanders used to live in the sidebar's "LLM workload" section,
-# but the ~200px sidebar column mangled the tables + long verbatim quotes
-# (especially after the Finding 4 methodology surface landed). Moved here
-# so the main-area width (~800-1000px) can render the dataframes, the
-# 5-checkpoint headline-erosion table, and the per-family regrade Δ table
-# at human-readable widths. Conditional on llm_enabled — these only render
-# when the user has the LLM toggle on (matches original sidebar behavior).
+# ── 🔬 Model & precision details — main-area tabs (option B, 2026-05-11) ──
+# Two-tab layout replacing the prior pair of nested expanders. After
+# moving out of sidebar (dd17baa), the content was readable but vertical
+# stacking made two stacked-expanded surfaces compete for screen real
+# estate. Tabs keep both labels visible as affordances and show one body
+# at a time — same content, less scroll competition, clearer that these
+# are paired views of the same model+precision question. Conditional on
+# llm_enabled — these only render when the user has the LLM toggle on.
 if llm_enabled:
-    with st.expander("📊 Accuracy details"):
+    _tab_acc, _tab_prec = st.tabs(["📊 Accuracy details", "📉 Precision quality reference"])
+    with _tab_acc:
         st.markdown(
             f"**{_model.label}**  \n"
             f"{_model.description}  \n  \n"
@@ -1251,7 +1252,7 @@ if llm_enabled:
             "alternatives."
         )
 
-    with st.expander("📉 Precision quality reference"):
+    with _tab_prec:
         # Quality cost of the quantization recipe on the base model
         # (fp16 → FP8 → W8A8 INT8). Composes with the 5090 capability
         # caption: when hw is on tensor_compat (consumer Blackwell SM120),
