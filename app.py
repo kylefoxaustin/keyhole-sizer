@@ -629,29 +629,11 @@ with st.sidebar:
         )
         st.caption(WORKLOAD_CATEGORIES[llm_workload]["description"])
 
-        with st.expander("ℹ️ About these workload patterns"):
-            st.markdown(
-                "All five patterns were measured in production against "
-                "**Qwen3-30B-A3B-Instruct-2507** (Q4_K_M GGUF, llama.cpp) on "
-                "an **RTX 5090**. Decode tok/s spans **3.6 → 222 across real "
-                "traffic** — a ~60× range that single-number vendor benchmarks "
-                "don't capture."
-            )
-            for key, wc in WORKLOAD_CATEGORIES.items():
-                st.markdown(
-                    f"**{wc['label']}** &nbsp;·&nbsp; *n={wc['n']}*  \n"
-                    f"{wc['description']}  \n"
-                    f"5090 reference: **{wc['decode_5090_tok_s_p50']:.1f} tok/s decode (p50)**, "
-                    f"TTFT **{wc['ttft_5090_sec_p50']*1000:.0f} ms** (p50)  \n"
-                    f"🔸 *{wc['note']}*"
-                )
-            st.markdown(
-                "---\n"
-                "**How the sizer scales these:** *plain chat* is the reference (≈ the 1K-prompt "
-                "condition under which vendor NPU Q4 benchmarks are published). Each category's "
-                "multiplier (measured on 5090) is applied to the target NPU's plain-chat "
-                "projection. Both decode tok/s and TTFT are scaled."
-            )
+        # "About these workload patterns" content moved OUT of the sidebar
+        # on 2026-05-11 (option-B follow-up) into a "📊 Performance details"
+        # tab in the main area. Same readability rationale as the Accuracy
+        # + Precision moves: tables + per-category bullets need full main-
+        # pane width. Search for `_tab_perf` in the main-area tabs widget.
         queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1,
                                      key="llm_queries_per_min")
         answer_kind = st.radio("Typical answer length",
@@ -1075,16 +1057,48 @@ if vision_enabled and pipeline.precision and hw.capability_levels:
         f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
     )
 
-# ── 🔬 Model & precision details — main-area tabs (option B, 2026-05-11) ──
-# Two-tab layout replacing the prior pair of nested expanders. After
-# moving out of sidebar (dd17baa), the content was readable but vertical
-# stacking made two stacked-expanded surfaces compete for screen real
-# estate. Tabs keep both labels visible as affordances and show one body
-# at a time — same content, less scroll competition, clearer that these
-# are paired views of the same model+precision question. Conditional on
-# llm_enabled — these only render when the user has the LLM toggle on.
+# ── 🔬 Model + perf + precision details — main-area tabs (2026-05-11) ──
+# Three-tab layout consolidating the explanatory surfaces that used to
+# live as expanders in the sidebar (workload patterns) + main area
+# (accuracy + precision). Tab order reads Performance → Accuracy →
+# Precision, matching the conceptual flow (perf is the headline
+# question, then quality, then quant detail). Conditional on llm_enabled
+# — these only render when the user has the LLM toggle on.
 if llm_enabled:
-    _tab_acc, _tab_prec = st.tabs(["📊 Accuracy details", "📉 Precision quality reference"])
+    _tab_perf, _tab_acc, _tab_prec = st.tabs([
+        "📊 Performance details",
+        "📊 Accuracy details",
+        "📉 Precision quality reference",
+    ])
+    with _tab_perf:
+        # Workload-pattern definitions + decode tok/s spans + scaling
+        # methodology. Moved here from the sidebar on 2026-05-11 — sidebar
+        # placement was discovery-adjacent to the workload selectbox but
+        # the ~200px column was cramping the per-pattern bullets.
+        st.markdown(
+            "All five patterns were measured in production against "
+            "**Qwen3-30B-A3B-Instruct-2507** (Q4_K_M GGUF, llama.cpp) on "
+            "an **RTX 5090**. Decode tok/s spans **3.6 → 222 across real "
+            "traffic** — a ~60× range that single-number vendor benchmarks "
+            "don't capture."
+        )
+        for key, wc in WORKLOAD_CATEGORIES.items():
+            st.markdown(
+                f"**{wc['label']}** &nbsp;·&nbsp; *n={wc['n']}*  \n"
+                f"{wc['description']}  \n"
+                f"5090 reference: **{wc['decode_5090_tok_s_p50']:.1f} tok/s decode (p50)**, "
+                f"TTFT **{wc['ttft_5090_sec_p50']*1000:.0f} ms** (p50)  \n"
+                f"🔸 *{wc['note']}*"
+            )
+        st.markdown(
+            "---\n"
+            "**How the sizer scales these:** *plain chat* is the reference "
+            "(≈ the 1K-prompt condition under which vendor NPU Q4 benchmarks "
+            "are published). Each category's multiplier (measured on 5090) "
+            "is applied to the target NPU's plain-chat projection. Both "
+            "decode tok/s and TTFT are scaled."
+        )
+
     with _tab_acc:
         st.markdown(
             f"**{_model.label}**  \n"
