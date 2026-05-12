@@ -569,6 +569,19 @@ with st.sidebar:
         _delta_vs_prod = accuracy_delta_pp(_model, _production_model)
         _is_production = (llm_model_key == PRODUCTION_REFERENCE_KEY)
         _delta_sign = "+" if (_delta_vs_prod is not None and _delta_vs_prod >= 0) else ""
+        # Pre-compute the dtype-mismatch state INLINE in the sidebar so we
+        # can gray out downstream LLM-config widgets (workload pattern in
+        # particular) when the selected model's compute_dtype is not
+        # supported on the current tier — e.g. fp16 dense Q4 on Mid INT8-
+        # only silicon. The full dtype-mismatch gate + red banner still
+        # runs in the main area (line ~680); this just makes the sidebar
+        # widgets visually communicate "no-op on this tier" instead of
+        # appearing interactive while having no effect on the rendered
+        # output. Per Kyle 2026-05-12.
+        _sidebar_dtype_supported = (
+            hw.capability_level(getattr(_model, "compute_dtype", "int8"))
+            != "unsupported"
+        )
         if _model.pass_rate is None:
             # Perf-comparison-only entries (e.g. Qwen 2.5 7B / 32B dense)
             # — no Skippy v2 prompt-set evaluation. Surface that explicitly.
@@ -617,15 +630,35 @@ with st.sidebar:
         quant = st.selectbox("Qwen3 quantization",
                               ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
                               key="llm_quant")
+        # When dtype-mismatch is in play (e.g. fp16 dense model on Mid
+        # INT8-only silicon), the LLM tile + perf chart won't render at
+        # all — workload-pattern selection has no visible effect. Disable
+        # the selectbox in that case so the UI signals "no-op on this
+        # tier" instead of appearing interactive. Per Kyle 2026-05-12
+        # (option 1 of the dtype-mismatch UX clarity options).
+        _wl_help_base = (
+            "Real-world workload categories measured on Skippy production "
+            "(n=1-5 per category). Decode tok/s spans 3.6-222 across "
+            "categories — pick the one your deployment will actually see."
+        )
+        _wl_help_disabled_suffix = (
+            f"\n\n⚠ DISABLED — {_model.label.split(' (')[0]} requires "
+            f"{getattr(_model, 'compute_dtype', 'int8').upper()} tensor "
+            f"support, but {hw.name}'s silicon doesn't provide it. The "
+            f"LLM tile is suppressed (see red banner in main area). "
+            f"Pick NPU High / RTX 5090 for FP-capable silicon, or pick "
+            f"an INT8-native MoE model (Skippy MoE / Thinking) to "
+            f"re-enable this control."
+        )
         llm_workload = st.selectbox(
             "LLM workload pattern",
             options=list(WORKLOAD_CATEGORIES.keys()),
             format_func=lambda k: WORKLOAD_CATEGORIES[k]["label"],
             index=0,
-            help="Real-world workload categories measured on Skippy production "
-                 "(n=1-5 per category). Decode tok/s spans 3.6-222 across "
-                 "categories — pick the one your deployment will actually see.",
+            help=(_wl_help_base if _sidebar_dtype_supported
+                  else _wl_help_base + _wl_help_disabled_suffix),
             key="llm_workload",
+            disabled=not _sidebar_dtype_supported,
         )
         st.caption(WORKLOAD_CATEGORIES[llm_workload]["description"])
 
