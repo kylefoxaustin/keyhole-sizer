@@ -1057,6 +1057,39 @@ if vision_enabled and pipeline.precision and hw.capability_levels:
         f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
     )
 
+# ── Pipeline flow (collapsible, expanded by default) ──
+# Vision-pipeline-centric (the diagram shows YOLO → CLIP → ... stages with
+# the LLM stage layered in when enabled). Skip entirely when vision is off
+# — the LLM-only flow doesn't have an interesting per-stage breakdown to
+# render, and the diagram's Always-on/Pipeline-stage-changes legend assumes
+# a vision pipeline. Placed BEFORE the LLM tabs (per Kyle 2026-05-11)
+# because the pipeline diagram is the headline visual story; the LLM
+# tabs are deep-dive detail that flows naturally after the diagram.
+if vision_enabled:
+  with st.expander("🔀 Pipeline flow", expanded=True):
+    _render_pipeline_strip(
+        _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
+    )
+    _legend_html = (
+        '<div style="display:flex; flex-wrap:wrap; align-items:center; '
+        'gap:20px; margin:4px 0 2px;">'
+        '<div style="display:flex; align-items:center; gap:7px;">'
+        '<span style="display:inline-block; width:16px; height:16px; '
+        'background:#334155; border:1.5px solid #475569; border-radius:3px;"></span>'
+        '<span style="font-size:13px;">'
+        '<b>Always on</b> &nbsp;— ingest, storage</span></div>'
+        '<div style="display:flex; align-items:center; gap:7px;">'
+        '<span style="display:inline-block; width:16px; height:16px; '
+        'background:#6366F1; border:1.5px solid #6366F1; border-radius:3px;"></span>'
+        '<span style="font-size:13px;">'
+        '<b>Pipeline stage changes</b> &nbsp;— varies with your choice</span></div>'
+        '</div>'
+        '<div style="font-size:12px; opacity:0.85; margin-top:4px;">'
+        'Every stage is running — the colors just flag where your controls take effect.'
+        '</div>'
+    )
+    st.markdown(_legend_html, unsafe_allow_html=True)
+
 # ── 🔬 Model + perf + precision details — main-area tabs (2026-05-11) ──
 # Three-tab layout consolidating the explanatory surfaces that used to
 # live as expanders in the sidebar (workload patterns) + main area
@@ -1342,37 +1375,6 @@ if llm_enabled:
             "the choice**, not the ~4pp quality hit. Fine-tune-vs-stock and "
             "precision-recipe are independent axes — surfaced separately above."
         )
-
-# ── Pipeline flow (collapsible, expanded by default) ──
-# Vision-pipeline-centric (the diagram shows YOLO → CLIP → ... stages with
-# the LLM stage layered in when enabled). Skip entirely when vision is off
-# — the LLM-only flow doesn't have an interesting per-stage breakdown to
-# render, and the diagram's Always-on/Pipeline-stage-changes legend assumes
-# a vision pipeline.
-if vision_enabled:
-  with st.expander("🔀 Pipeline flow", expanded=True):
-    _render_pipeline_strip(
-        _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
-    )
-    _legend_html = (
-        '<div style="display:flex; flex-wrap:wrap; align-items:center; '
-        'gap:20px; margin:4px 0 2px;">'
-        '<div style="display:flex; align-items:center; gap:7px;">'
-        '<span style="display:inline-block; width:16px; height:16px; '
-        'background:#334155; border:1.5px solid #475569; border-radius:3px;"></span>'
-        '<span style="font-size:13px;">'
-        '<b>Always on</b> &nbsp;— ingest, storage</span></div>'
-        '<div style="display:flex; align-items:center; gap:7px;">'
-        '<span style="display:inline-block; width:16px; height:16px; '
-        'background:#6366F1; border:1.5px solid #6366F1; border-radius:3px;"></span>'
-        '<span style="font-size:13px;">'
-        '<b>Pipeline stage changes</b> &nbsp;— varies with your choice</span></div>'
-        '</div>'
-        '<div style="font-size:12px; opacity:0.85; margin-top:4px;">'
-        'Every stage is running — the colors just flag where your controls take effect.'
-        '</div>'
-    )
-    st.markdown(_legend_html, unsafe_allow_html=True)
 
 # ── Export data (collapsible, collapsed by default) ──
 # Two rows: platform-budget CSVs on top, KPI-spreadsheet preview triggers
