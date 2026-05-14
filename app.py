@@ -37,6 +37,7 @@ from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
     QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
 )
+from sizer.npu_anchors import load_llm_anchor, load_cnn_anchor
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -242,7 +243,10 @@ with st.sidebar:
                  "NPU Mid", "NPU High",
                  "RTX 5090 (reference, measured)",
                  "Custom"),
-        index=3,  # lands on 'NPU Mid'
+        index=4,  # lands on 'NPU High' — has FP support, so the default
+                  # (Skippy 7B v4 dense fp16) doesn't trip dtype-mismatch
+                  # on first load. Mirrors PAI sizer 5b6e49f rationale
+                  # (per [pai-sizer] 2026-05-14 16:35 first-render polish).
         help="i.MX 95 = entry-tier NPU class (NXP eIQ Neutron, 32-bit LPDDR5 @ 6.4 GT/s, 25.6 GB/s, "
              "2 TOPS INT8 dense silicon) with a real 2026-04 production measurement: yolov8n-seg INT8 "
              "@ 1080p = 32.0 ms. Selecting this tier returns the measured number directly for "
@@ -696,11 +700,155 @@ if not vision_enabled and not llm_enabled:
     )
     st.stop()
 
+# ── Private NPU + CNN anchor hot-swap helpers — 2026-05-14 ─────────────
+# Per [docs] 2026-05-14 13:24 + spec at personal-ai-framework
+# `docs/private_anchor_secrets_spec.md` @ 65bf89c. Loader in
+# `sizer/npu_anchors.py` (verbatim from PAI sizer's `3742375`).
+#
+# Both helpers run RIGHT AFTER the corresponding project_*() call. When
+# a real measured silicon anchor exists for the current (tier, model/
+# pipeline) cell, override the headline number and upgrade the source
+# state to "measured_silicon_anchor" (🟢). Mirrors PAI sizer's
+# `_maybe_anchor_overlay` pattern from `31a0dd2`.
+#
+# Anchors measured at stock LPDDR5X 8.4 GT/s — skip hot-swap on memory-
+# upgrade overlays (LPDDR5T/LPDDR6) since the measurement no longer
+# applies.
+
+# LLM catalog_key → spec model_key. Multiple catalog entries can map to
+# the same spec key (e.g. all int8 MoE entries share the same arch).
+# Maps include the perf-reference variants added 2026-05-14 to unlock
+# the missing-by-routing spec cells.
+_ANCHOR_LLM_MODEL_KEY_MAP = {
+    # int8-routed MoE (Q4_K_M weight-only × INT8 matmul on dedicated
+    # INT8 silicon — Mid INT8-only, High INT8 mode). All 4 catalog
+    # entries share the same arch + quant + base; perf is identical.
+    "skippy_finetune":              "qwen3_30b_a3b_moe",
+    "skippy_moe_router_v1":         "qwen3_30b_a3b_moe",
+    "skippy_moe_full_v1":           "qwen3_30b_a3b_moe",
+    "instruct_moe_stock":           "qwen3_30b_a3b_moe",
+    # fp16-routed MoE variant — perf-reference row added today.
+    "qwen3_30b_a3b_moe_fp":         "qwen3_30b_a3b_moe",
+    # fp16-routed dense (Q4_K_M weight-only × fp16 matmul, default
+    # llama-cpp path). FT entries share architecture with the stocks.
+    "skippy_qwen25_32b_v4":         "qwen25_32b_dense",
+    "qwen25_32b_dense":             "qwen25_32b_dense",
+    "skippy_7b_v4":                 "qwen25_7b_dense",
+    "qwen25_7b_dense":              "qwen25_7b_dense",
+    # int8-routed dense variants — perf-reference rows added today.
+    "qwen25_32b_dense_int8":        "qwen25_32b_dense",
+    "qwen25_7b_dense_int8":         "qwen25_7b_dense",
+}
+
+# Vision (CNN) pipeline_key → spec cnn_key. Maps existing INT8 (8-bit
+# weight) pipelines to the spec's `_w8` measurement. Spec `_w4` (4-bit
+# weight) cells need additional pipeline entries — left unmapped for
+# now; those cells stay "not measured" in the standalone display until
+# a 4-bit-weight pipeline lands in PIPELINES + the mapping is wired.
+_ANCHOR_CNN_PIPELINE_KEY_MAP = {
+    "yolov8n_trt_int8_coco128":     "yolov8n_w8",
+    # 8-bit ResNet-50 and 4-bit variants: TODO add pipelines + mapping
+    # once Kyle confirms the precise pipeline shape he measured.
+}
+
+# Tier name + dtype → spec (tier, precision). Only NPU Mid/High covered
+# per spec scope. Memory-upgrade variants of Mid/High skip via the
+# stock-bus guard in the overlay helper.
+def _resolve_spec_tier_precision(tier_name: str, dtype: str):
+    if tier_name == "NPU Mid" and dtype == "int8":
+        return ("mid", "int8")
+    if tier_name == "NPU High" and dtype == "int8":
+        return ("high", "int8")
+    if tier_name == "NPU High" and dtype in ("fp16", "fp"):
+        return ("high", "fp")
+    return None
+
+
+def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share):
+    """Hot-swap measured silicon anchor into LLM projection result.
+
+    Returns r unchanged if no anchor matches; otherwise returns a new
+    dict with `decode_tok_s` overridden + `source = "measured_silicon_anchor"`.
+    """
+    if r is None or not isinstance(r, dict):
+        return r
+    # Skip if dtype-mismatch / won't-fit already fired
+    if r.get("source") in ("wont_fit", "dtype_mismatch"):
+        return r
+    # Anchors measured at stock LPDDR5X 8.4 GT/s — skip memory upgrades.
+    if abs(getattr(hw, "mem_data_rate_gtps", 0.0) - 8.4) > 0.05:
+        return r
+    spec_model = _ANCHOR_LLM_MODEL_KEY_MAP.get(model_key)
+    if spec_model is None:
+        return r
+    dtype = getattr(LLM_MODELS.get(model_key), "compute_dtype", "") if LLM_MODELS.get(model_key) else ""
+    resolved = _resolve_spec_tier_precision(tier_name, dtype)
+    if resolved is None:
+        return r
+    spec_tier, spec_prec = resolved
+    anchor = load_llm_anchor(spec_tier, spec_prec, spec_model)
+    if anchor is None or anchor.source != "measured" or anchor.tokps <= 0:
+        return r
+    r2 = dict(r)
+    r2["decode_tok_s"] = anchor.tokps
+    # Preserve TTFT / prefill / regime from projection — anchor may not
+    # carry those. Recompute total_s if downstream uses it.
+    if anchor.prefill_tokps > 0:
+        r2["ttft_1k_sec"] = 1024.0 / anchor.prefill_tokps
+    r2["source"] = "measured_silicon_anchor"
+    r2["_silicon_anchor_meta"] = {
+        "measured_date": anchor.measured_date,
+        "spec_tier_precision": f"{spec_tier}_{spec_prec}",
+        "spec_model_key": spec_model,
+    }
+    return r2
+
+
+def _maybe_anchor_overlay_cnn(r, pipeline_key, hw, tier_name):
+    """Hot-swap measured CNN anchor into vision projection result.
+
+    Returns r unchanged if no anchor matches; otherwise overrides
+    `per_stream_ms` + `fps_per_stream` (n_streams=1 case).
+    """
+    if r is None or not isinstance(r, dict):
+        return r
+    if abs(getattr(hw, "mem_data_rate_gtps", 0.0) - 8.4) > 0.05:
+        return r
+    spec_cnn = _ANCHOR_CNN_PIPELINE_KEY_MAP.get(pipeline_key)
+    if spec_cnn is None:
+        return r
+    # CNN spec: INT-only on both Mid and High. Vision pipelines we map
+    # are all int8 today; no fp branch needed yet.
+    if tier_name == "NPU Mid":
+        spec_tier, spec_prec = "mid", "int8"
+    elif tier_name == "NPU High":
+        spec_tier, spec_prec = "high", "int8"
+    else:
+        return r
+    anchor = load_cnn_anchor(spec_tier, spec_prec, spec_cnn)
+    if anchor is None or anchor.source != "measured" or anchor.ms_per_inference <= 0:
+        return r
+    r2 = dict(r)
+    r2["per_stream_ms"] = anchor.ms_per_inference
+    r2["fps_per_stream"] = anchor.fps if anchor.fps > 0 else (1000.0 / anchor.ms_per_inference)
+    r2["edge_ms_source"] = "measured_silicon_anchor"
+    r2["_silicon_anchor_meta"] = {
+        "measured_date": anchor.measured_date,
+        "spec_tier_precision": f"{spec_tier}_{spec_prec}",
+        "spec_cnn_key": spec_cnn,
+    }
+    return r2
+
+
 # Compute projections
 vision = (project_vision(pipeline, hw, resolution, n_streams=n_streams,
                           compiler_quality_vs_trt=compiler_quality,
                           npu_share=npu_share)
           if vision_enabled else None)
+# CNN anchor hot-swap (single-stream case only — multi-stream batch
+# scaling continues through projection). Per [docs] 2026-05-14 spec.
+if vision_enabled and vision is not None and n_streams <= 1:
+    vision = _maybe_anchor_overlay_cnn(vision, pipeline_key, hw, hw.name)
 # dtype-mismatch gate — per [backend] 15:46 + [pai-sizer] e69237b parity.
 # Check whether the selected model's compute_dtype is supported by the
 # silicon BEFORE running the projection. If unsupported (e.g. Skippy
@@ -737,6 +885,13 @@ llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
 if llm_enabled and llm is not None:
     llm = scale_llm_projection(llm, LLM_MODELS[llm_model_key],
                                 hw_mem_capacity_gb=hw.mem_capacity_gb)
+# LLM anchor hot-swap — overrides decode_tok_s with measured silicon
+# anchor when (tier, model_key, compute_dtype) maps to a populated spec
+# cell. Runs AFTER scale_llm_projection so the per-model BW-scaling
+# would never override a measured value. Per [docs] 2026-05-14 spec +
+# PAI sizer 31a0dd2 pattern.
+if llm_enabled and llm is not None:
+    llm = _maybe_anchor_overlay_llm(llm, llm_model_key, hw, hw.name, npu_share)
 
 # Render the 🔴 dtype-mismatch banner upfront when the selected model's
 # compute_dtype isn't supported by the silicon. After the banner, mute
@@ -1027,7 +1182,19 @@ def _render_source_banner(source: str, regime: str | None, hw_name: str,
             f" Scaled by **NPU_share = {share*100:.0f}%** "
             f"(BW-bound paths only; TTFT / compute floors unaffected)."
         )
-    if source == "measured":
+    if source == "measured_silicon_anchor":
+        # Private NPU anchor hot-swap — per [docs] 2026-05-14. The
+        # measurement lives in Streamlit secrets, never in chat or git.
+        st.success(
+            f"🟢 **Measured on real NPU silicon** — {kind} = **{value_str}** on **{hw_name}**. "
+            f"Headline number is the silicon measurement (loaded from "
+            f"`.streamlit/secrets.toml` via `sizer/npu_anchors.py`), not a "
+            f"BW-projection from RTX 5090. See the standalone "
+            f"\"📡 Measured silicon anchors (private)\" expander below for "
+            f"the full grid + bandwidth derivation under the current "
+            f"NPU_share.{regime_suffix}{share_suffix}"
+        )
+    elif source == "measured":
         st.success(
             f"🟢 **Measured silicon** — {kind} = **{value_str}** on **{hw_name}** "
             f"({_source_attribution(hw_name)}). Direct measurement, not a projection — "
@@ -1122,6 +1289,107 @@ if vision_enabled:
         '</div>'
     )
     st.markdown(_legend_html, unsafe_allow_html=True)
+
+# ── 📡 Measured silicon anchors (private) — 2026-05-14 ─────────────────
+# Standalone display surface for the private NPU + CNN anchor secrets.
+# Spec: personal-ai-framework `docs/private_anchor_secrets_spec.md`
+# (commit 65bf89c). Loader: `sizer/npu_anchors.py`.
+#
+# Numbers live in `.streamlit/secrets.toml` (local) + Streamlit Cloud
+# Secrets (production). The example file (.streamlit/secrets.toml.example)
+# has placeholder zeros — those render as "not measured" in the grid.
+# When real values are populated, cells flip to 🟢 with the headline
+# tok/s or ms_per_inference + BW derivation under the current NPU_share.
+#
+# Headline tiles AT THE TOP OF THE PAGE use these same numbers via the
+# `_maybe_anchor_overlay_llm` / `_maybe_anchor_overlay_cnn` hot-swap
+# helpers (run right after project_llm / project_vision returns). The
+# standalone display + headline tiles surface the same values — no
+# two-number ambiguity (per [docs] 2026-05-14 14:37 PAI sizer lesson).
+with st.expander("📡 Measured silicon anchors (private)", expanded=False):
+    st.caption(
+        f"Direct measurements on real NPU silicon. Numbers live in "
+        f"Streamlit secrets (`sizer/npu_anchors.py` loads them) — this "
+        f"surface confirms they loaded. Bandwidth derivation uses your "
+        f"selected **NPU_share = {int(npu_share*100)}%** as the share "
+        f"override (change the NPU_share selector in the sidebar to "
+        f"re-derive). Cells reading 'not measured' have placeholder "
+        f"zeros in secrets — populate `.streamlit/secrets.toml` locally "
+        f"or in Streamlit Cloud Secrets to surface them."
+    )
+
+    # ── LLM throughput: 3 tier-precision rows × 3 models ──
+    st.markdown("**LLM throughput**")
+    _llm_tier_rows = [
+        ("NPU Mid INT8",       "mid",  "int8"),
+        ("NPU High INT8",      "high", "int8"),
+        ("NPU High FP",        "high", "fp"),
+    ]
+    _llm_model_cols = [
+        ("Qwen3 30B-A3B MoE",  "qwen3_30b_a3b_moe"),
+        ("Qwen 2.5 32B dense", "qwen25_32b_dense"),
+        ("Qwen 2.5 7B dense",  "qwen25_7b_dense"),
+    ]
+    for _tier_label, _tier_key, _prec_key in _llm_tier_rows:
+        st.markdown(f"*{_tier_label}*")
+        _cols = st.columns(3)
+        for _col, (_model_label, _spec_model_key) in zip(_cols, _llm_model_cols):
+            _anchor_llm = load_llm_anchor(_tier_key, _prec_key, _spec_model_key)
+            with _col:
+                if _anchor_llm is None:
+                    st.metric(f"⏸ {_model_label}", "not measured")
+                else:
+                    _bpt = _anchor_llm.bytes_per_token(share_override=npu_share)
+                    st.metric(
+                        f"{_anchor_llm.badge} {_model_label}",
+                        f"{_anchor_llm.tokps:.1f} tok/s",
+                        delta=f"{_bpt/1e6:.0f} MB/tok @ {int(npu_share*100)}% BW share",
+                        delta_color="off",
+                    )
+
+    st.markdown("---")
+
+    # ── CNN latency: 2 tier-precision rows × 3 CNN variants ──
+    # CNN measured INT-only on both Mid and High (no high_fp.* CNN cells
+    # in spec). Keyhole-sizer is the canonical CNN home per Kyle 15:00.
+    st.markdown("**CNN latency**")
+    _cnn_tier_rows = [
+        ("NPU Mid INT8",  "mid",  "int8"),
+        ("NPU High INT8", "high", "int8"),
+    ]
+    _cnn_model_cols = [
+        ("ResNet-50 W4",  "resnet50_w4",  "224×224"),
+        ("YOLOv8n W4",    "yolov8n_w4",   "640×640"),
+        ("YOLOv8n W8",    "yolov8n_w8",   "640×640"),
+    ]
+    for _tier_label, _tier_key, _prec_key in _cnn_tier_rows:
+        st.markdown(f"*{_tier_label}*")
+        _cols = st.columns(3)
+        for _col, (_cnn_label, _cnn_key, _res) in zip(_cols, _cnn_model_cols):
+            _anchor_cnn = load_cnn_anchor(_tier_key, _prec_key, _cnn_key)
+            with _col:
+                if _anchor_cnn is None:
+                    st.metric(f"⏸ {_cnn_label}", "not measured")
+                else:
+                    st.metric(
+                        f"{_anchor_cnn.badge} {_cnn_label}",
+                        f"{_anchor_cnn.ms_per_inference:.2f} ms",
+                        delta=f"{_anchor_cnn.fps:.1f} FPS · {_res}",
+                        delta_color="off",
+                    )
+
+    st.caption(
+        "Private silicon anchors. Numbers loaded from Streamlit secrets "
+        "via `sizer/npu_anchors.py`. Per spec: peak_bw × bw_share × "
+        "bw_efficiency derives achieved BW; the share override at "
+        "render-time lets the NPU_share selector re-derive without "
+        "re-reading secrets. **The headline decode-rate (LLM) and "
+        "per-frame-ms (CNN) tiles at the top of the page use these "
+        "values directly** when the selected (tier, model/pipeline) "
+        "cell has a measured anchor — see the source banner for the "
+        "cell's actual state. Cells without measurements fall back to "
+        "RTX 5090 BW-projection (LLM) or Phase 2 two-floor model (CNN)."
+    )
 
 # ── Export data (collapsible, collapsed by default) ──
 # Two rows: platform-budget CSVs on top, KPI-spreadsheet preview triggers

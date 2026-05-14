@@ -1085,6 +1085,100 @@ MISTRAL_7B_V03_INSTRUCT_STOCK = LLMModel(
 )
 
 
+# ─────────── Anchor-reachability perf-reference variants (added 2026-05-14)
+# Per [docs] 2026-05-14 13:24/13:31 private NPU + CNN anchor secrets spec
+# (personal-ai-framework `docs/private_anchor_secrets_spec.md` @ 65bf89c).
+# The spec defines 9 LLM cells: 3 tier-precisions (mid_int8/high_int8/
+# high_fp) × 3 models (qwen3_30b_a3b_moe / qwen25_32b_dense / qwen25_7b_dense).
+# Hot-swap fires when (catalog_key + tier + compute_dtype) maps to a spec
+# cell. The catalog had gaps for 5 of 9 cells:
+#   - high_fp.qwen3_30b_a3b_moe       → needed an fp16-routed MoE variant
+#   - {mid,high}_int8.qwen25_32b_dense → needed an INT8-routed 32B variant
+#   - {mid,high}_int8.qwen25_7b_dense  → needed an INT8-routed 7B variant
+# These three perf-reference entries unlock the gaps by routing the same
+# Q4_K_M weights through the alternate compute path. Same architecture +
+# same gguf bytes as siblings — only compute_dtype differs to route the
+# matmul through INT8 vs fp16. Mirrors PAI sizer's ee41def pattern.
+
+QWEN3_30B_A3B_MOE_FP = LLMModel(
+    key="qwen3_30b_a3b_moe_fp",
+    label="Qwen3-30B-A3B-Instruct-2507 (MoE, fp16-routed — anchor reachability)",
+    family="Sparse MoE — 128 experts × 8 used per token",
+    base="Qwen3-30B-A3B-Instruct-2507 (Alibaba)",
+    total_params_b=30.0,
+    active_params_b=3.0,
+    quant="Q4_K_M GGUF",
+    size_gb=18.0,
+    description=(
+        "Same model + quant as INSTRUCT_MOE_STOCK; only difference is "
+        "the compute path — this row routes the matmul through fp16 "
+        "instead of INT8 dequant. Exists so the (NPU High + this model) "
+        "selection unlocks the spec's `high_fp.qwen3_30b_a3b_moe` anchor "
+        "cell. Perf-reference only — no Skippy v2 eval distinct from "
+        "the underlying stock."
+    ),
+    deck_bullet=(
+        "Perf-reference variant to unlock the high_fp MoE anchor cell. "
+        "Same weights as Instruct-2507 stock; fp16-routed matmul."
+    ),
+    compute_dtype="fp16",
+    gops_per_token=6.0,
+    # Same 5090 perf as Skippy MoE FT (FT preserves arch/quant); fp/int8
+    # path difference doesn't change the 5090 measurement either.
+    measurement_alias="skippy_finetune",
+)
+
+QWEN25_32B_DENSE_INT8 = LLMModel(
+    key="qwen25_32b_dense_int8",
+    label="Qwen 2.5 32B Instruct (dense, INT8-routed — anchor reachability)",
+    family="Dense — 32B params (no expert sparsity)",
+    base="Qwen2.5-32B-Instruct (Alibaba)",
+    total_params_b=32.5,
+    active_params_b=32.5,
+    quant="Q4_K_M GGUF",
+    size_gb=17.88,
+    description=(
+        "Same model + quant as QWEN25_32B_DENSE_INSTRUCT; only difference "
+        "is the compute path — this row routes the matmul through INT8 "
+        "instead of fp16. Exists so (NPU Mid + this model) or (NPU High "
+        "+ this model) unlocks the spec's `{mid,high}_int8.qwen25_32b_dense` "
+        "anchor cells. Perf-reference only."
+    ),
+    deck_bullet=(
+        "Perf-reference variant to unlock the {mid,high}_int8 dense 32B "
+        "anchor cells. Same weights as Qwen 2.5 32B Instruct; INT8-routed."
+    ),
+    compute_dtype="int8",
+    gops_per_token=65.0,
+    measurement_alias="qwen25_32b_dense",
+)
+
+QWEN25_7B_DENSE_INT8 = LLMModel(
+    key="qwen25_7b_dense_int8",
+    label="Qwen 2.5 7B Instruct (dense, INT8-routed — anchor reachability)",
+    family="Dense — 7B params (no expert sparsity)",
+    base="Qwen2.5-7B-Instruct (Alibaba)",
+    total_params_b=7.6,
+    active_params_b=7.6,
+    quant="Q4_K_M GGUF",
+    size_gb=4.18,
+    description=(
+        "Same model + quant as QWEN25_7B_DENSE_INSTRUCT; only difference "
+        "is the compute path — this row routes the matmul through INT8 "
+        "instead of fp16. Exists so (NPU Mid + this model) or (NPU High "
+        "+ this model) unlocks the spec's `{mid,high}_int8.qwen25_7b_dense` "
+        "anchor cells. Perf-reference only."
+    ),
+    deck_bullet=(
+        "Perf-reference variant to unlock the {mid,high}_int8 dense 7B "
+        "anchor cells. Same weights as Qwen 2.5 7B Instruct; INT8-routed."
+    ),
+    compute_dtype="int8",
+    gops_per_token=15.2,
+    measurement_alias="qwen25_7b_dense",
+)
+
+
 LLM_MODELS: dict[str, LLMModel] = {
     # Order matters — drives selectbox display order. Convention:
     # production first (default), then prior-production (cost-different
@@ -1108,6 +1202,11 @@ LLM_MODELS: dict[str, LLMModel] = {
     QWEN25_32B_DENSE_INSTRUCT.key:  QWEN25_32B_DENSE_INSTRUCT,    # 32B v4 baseline
     LLAMA_3_1_8B_INSTRUCT_STOCK.key: LLAMA_3_1_8B_INSTRUCT_STOCK, # cross-family baseline (Tier 3)
     MISTRAL_7B_V03_INSTRUCT_STOCK.key: MISTRAL_7B_V03_INSTRUCT_STOCK,  # cross-family baseline (Tier 3)
+    # Anchor-reachability variants (2026-05-14) — perf-reference rows that
+    # unlock spec anchor cells via alternate compute_dtype routing.
+    QWEN3_30B_A3B_MOE_FP.key:       QWEN3_30B_A3B_MOE_FP,         # unlocks high_fp.qwen3_30b_a3b_moe
+    QWEN25_32B_DENSE_INT8.key:      QWEN25_32B_DENSE_INT8,        # unlocks {mid,high}_int8.qwen25_32b_dense
+    QWEN25_7B_DENSE_INT8.key:       QWEN25_7B_DENSE_INT8,         # unlocks {mid,high}_int8.qwen25_7b_dense
 }
 
 DEFAULT_LLM_MODEL_KEY = SKIPPY_7B_V4.key
