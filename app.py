@@ -215,6 +215,11 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
         "yolov8n_only_fp8":             ("yolov8n-seg FP8 (TRT)", True, "(no CLIP)", False),
         "yolo11s_trt_int8":              ("yolo11s-seg INT8 (TRT)\n20-frame PTQ", True, "(no CLIP)", False),
         "yolov8n_trt_int8_coco128":      ("yolov8n-seg INT8 (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        # 4-bit-weight variants (2026-05-14) — compute path is still INT8
+        # on edge silicon; only weights compress to 4-bit. Diagram shape
+        # matches the 8-bit-weight siblings (one-model, no CLIP).
+        "yolov8n_trt_int4_coco128":      ("yolov8n-seg INT4-w (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        "resnet50v1_int4_224":           ("ResNet-50 INT4-w (TRT)\nImageNet 224×224", True, "(no CLIP)", False),
     }
     det_label, det_hl, enr_label, enr_hl = mapping.get(
         pipeline_key, ("?", False, "?", False)
@@ -438,7 +443,10 @@ with st.sidebar:
           "yolov8n_only_fp8"],
          "yolov8n_trt_fp8_1hz_clip"),
         ("INT8 vendor-comparison",
-         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128", "resnet50v1_int8_224"],
+         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128", "resnet50v1_int8_224",
+          # 4-bit-weight variants added 2026-05-14 to surface the
+          # spec's resnet50_w4 / yolov8n_w4 anchor cells.
+          "yolov8n_trt_int4_coco128", "resnet50v1_int4_224"],
          "yolov8n_trt_int8_coco128"),
         ("ViT alternatives (what-if)",
          ["rtdetr_l_pytorch_fp16", "detr_resnet50_pytorch_fp16",
@@ -746,9 +754,16 @@ _ANCHOR_LLM_MODEL_KEY_MAP = {
 # now; those cells stay "not measured" in the standalone display until
 # a 4-bit-weight pipeline lands in PIPELINES + the mapping is wired.
 _ANCHOR_CNN_PIPELINE_KEY_MAP = {
+    # Existing 8-bit-weight INT8 pipelines → spec _w8 cells
     "yolov8n_trt_int8_coco128":     "yolov8n_w8",
-    # 8-bit ResNet-50 and 4-bit variants: TODO add pipelines + mapping
-    # once Kyle confirms the precise pipeline shape he measured.
+    # 4-bit-weight INT8 pipelines (added 2026-05-14 per [docs] 20:56)
+    # → spec _w4 cells. Per spec, these unlock both mid_int8 and
+    # high_int8 tier cells (CNN measured INT-only on both tiers).
+    "yolov8n_trt_int4_coco128":     "yolov8n_w4",
+    "resnet50v1_int4_224":          "resnet50_w4",
+    # No spec key for 8-bit-weight ResNet-50 (resnet50v1_int8_224) —
+    # spec only has resnet50_w4. The 8-bit ResNet pipeline remains a
+    # projection-only entry on the vision tile.
 }
 
 # Tier name + dtype → spec (tier, precision). Only NPU Mid/High covered

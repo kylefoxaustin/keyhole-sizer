@@ -954,6 +954,64 @@ PIPELINES = {
         gops_per_forward=4.1, precision="int8",
         dram_per_forward_mb=94.15,  # bundle resnet50_int8_trt__224
     ),
+    # ─────────── 4-bit-weight CNN variants (Kyle 2026-05-14) ────────────
+    # Added to unlock the spec's `{mid,high}_int8.{resnet50_w4,yolov8n_w4}`
+    # anchor cells (per [docs] 2026-05-14 20:56 — `_w4`/`_w8` are
+    # genuinely different weight bit-widths, not naming shorthand).
+    # Compute path is still INT8; weights are 4-bit quantized. 5090-side
+    # bake-offs for 4-bit weights don't exist yet ([backend] 21:03 noted
+    # this as KH-P3-003 methodology-validation candidate, not urgent) —
+    # the headline number for these pipelines on edge silicon comes from
+    # the private NPU anchor secrets hot-swap when populated; falls back
+    # to a Phase 2 BW-projection with halved DRAM streaming (4-bit weights
+    # are ~half the bytes of 8-bit) when secrets is missing.
+    "yolov8n_trt_int4_coco128": VisionPipeline(
+        key="yolov8n_trt_int4_coco128",
+        label="yolov8n-seg INT4 weights (coco128-seg PTQ)",
+        description=(
+            "Nano detector with 4-bit weights × INT8 compute. Same "
+            "architecture as the 8-bit-weight INT8 variant; bytes-per-"
+            "forward is roughly halved (only the weight stream shrinks; "
+            "activations stay at INT8). Surfaces the spec's "
+            "{mid,high}_int8.yolov8n_w4 anchor cells when secrets is "
+            "populated."
+        ),
+        # Conservative placeholders — real numbers come from anchor
+        # secrets hot-swap when populated. Halving the 8-bit-variant's
+        # DRAM and using same compute (4-bit-weight × INT8-act doesn't
+        # reduce compute, just memory traffic).
+        edge_ms_720p=6.0, edge_ms_1080p=6.2, edge_ms_4k=6.0,
+        vram_mb=28,
+        note=(
+            "Same architecture as yolov8n_trt_int8_coco128 — only the "
+            "weight quant differs (4-bit vs 8-bit). Headline edge_ms on "
+            "NPU Mid/High overrides to anchor when populated in "
+            ".streamlit/secrets.toml (cnn_anchors.{mid,high}_int8.yolov8n_w4)."
+        ),
+        gops_per_forward=12.0, precision="int8",
+        dram_per_forward_mb=53.0,  # ~half of 8-bit-weight 106 MB
+    ),
+    "resnet50v1_int4_224": VisionPipeline(
+        key="resnet50v1_int4_224",
+        label="ResNet-50v1 INT4 weights (image classification, 224×224)",
+        description=(
+            "ImageNet classifier with 4-bit weights × INT8 compute. Same "
+            "25.5M-param architecture as the 8-bit-weight INT8 variant; "
+            "DRAM streaming roughly halved due to compressed weights. "
+            "Surfaces the spec's {mid,high}_int8.resnet50_w4 anchor "
+            "cells when secrets is populated."
+        ),
+        edge_ms_720p=1.0, edge_ms_1080p=1.0, edge_ms_4k=1.0,
+        vram_mb=47,
+        note=(
+            "Same architecture as resnet50v1_int8_224 — only the weight "
+            "quant differs. Headline edge_ms on NPU Mid/High overrides "
+            "to anchor when populated in .streamlit/secrets.toml "
+            "(cnn_anchors.{mid,high}_int8.resnet50_w4)."
+        ),
+        gops_per_forward=4.1, precision="int8",
+        dram_per_forward_mb=47.0,  # ~half of 8-bit-weight 94.15 MB
+    ),
     # ─────────── ViT alternatives (Kyle 2026-04-25 what-if) ──────────────
     # Could vision transformers replace YOLO-seg + SAM 3? Two roles, four
     # candidates. Edge ms = 5090 PyTorch FP16 × 16.19 BW ratio (Grounding

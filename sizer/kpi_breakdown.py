@@ -169,6 +169,20 @@ PIPELINE_STAGES: dict[str, dict[str, Any]] = {
         "yolo_type":  "ResNet-50v1 INT8 TRT (ImageNet 224×224)",
         "seg_type":   None,
     },
+    # 4-bit-weight variants added 2026-05-14 to unlock the spec's
+    # {mid,high}_int8.{resnet50_w4,yolov8n_w4} anchor cells per
+    # [docs] 20:56 — same KPI categories as their 8-bit siblings;
+    # only the weight quantization differs.
+    "yolov8n_trt_int4_coco128": {
+        "category":   "yolo_only",
+        "yolo_type":  "Yolov8n-seg INT4-w TRT (coco128-seg PTQ)",
+        "seg_type":   None,
+    },
+    "resnet50v1_int4_224": {
+        "category":   "one_model",
+        "yolo_type":  "ResNet-50v1 INT4-w TRT (ImageNet 224×224)",
+        "seg_type":   None,
+    },
 
     # ─── ViT alternatives (Kyle 2026-04-25 what-if) ───────────────────
     # Camera-stream candidates: single-model object detectors. Treated
