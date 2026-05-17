@@ -1305,107 +1305,6 @@ if vision_enabled:
     )
     st.markdown(_legend_html, unsafe_allow_html=True)
 
-# ── 📡 Measured silicon anchors (private) — 2026-05-14 ─────────────────
-# Standalone display surface for the private NPU + CNN anchor secrets.
-# Spec: personal-ai-framework `docs/private_anchor_secrets_spec.md`
-# (commit 65bf89c). Loader: `sizer/npu_anchors.py`.
-#
-# Numbers live in `.streamlit/secrets.toml` (local) + Streamlit Cloud
-# Secrets (production). The example file (.streamlit/secrets.toml.example)
-# has placeholder zeros — those render as "not measured" in the grid.
-# When real values are populated, cells flip to 🟢 with the headline
-# tok/s or ms_per_inference + BW derivation under the current NPU_share.
-#
-# Headline tiles AT THE TOP OF THE PAGE use these same numbers via the
-# `_maybe_anchor_overlay_llm` / `_maybe_anchor_overlay_cnn` hot-swap
-# helpers (run right after project_llm / project_vision returns). The
-# standalone display + headline tiles surface the same values — no
-# two-number ambiguity (per [docs] 2026-05-14 14:37 PAI sizer lesson).
-with st.expander("📡 Measured silicon anchors (private)", expanded=False):
-    st.caption(
-        f"Direct measurements on real NPU silicon. Numbers live in "
-        f"Streamlit secrets (`sizer/npu_anchors.py` loads them) — this "
-        f"surface confirms they loaded. Bandwidth derivation uses your "
-        f"selected **NPU_share = {int(npu_share*100)}%** as the share "
-        f"override (change the NPU_share selector in the sidebar to "
-        f"re-derive). Cells reading 'not measured' have placeholder "
-        f"zeros in secrets — populate `.streamlit/secrets.toml` locally "
-        f"or in Streamlit Cloud Secrets to surface them."
-    )
-
-    # ── LLM throughput: 3 tier-precision rows × 3 models ──
-    st.markdown("**LLM throughput**")
-    _llm_tier_rows = [
-        ("NPU Mid INT8",       "mid",  "int8"),
-        ("NPU High INT8",      "high", "int8"),
-        ("NPU High FP",        "high", "fp"),
-    ]
-    _llm_model_cols = [
-        ("Qwen3 30B-A3B MoE",  "qwen3_30b_a3b_moe"),
-        ("Qwen 2.5 32B dense", "qwen25_32b_dense"),
-        ("Qwen 2.5 7B dense",  "qwen25_7b_dense"),
-    ]
-    for _tier_label, _tier_key, _prec_key in _llm_tier_rows:
-        st.markdown(f"*{_tier_label}*")
-        _cols = st.columns(3)
-        for _col, (_model_label, _spec_model_key) in zip(_cols, _llm_model_cols):
-            _anchor_llm = load_llm_anchor(_tier_key, _prec_key, _spec_model_key)
-            with _col:
-                if _anchor_llm is None:
-                    st.metric(f"⏸ {_model_label}", "not measured")
-                else:
-                    _bpt = _anchor_llm.bytes_per_token(share_override=npu_share)
-                    st.metric(
-                        f"{_anchor_llm.badge} {_model_label}",
-                        f"{_anchor_llm.tokps:.1f} tok/s",
-                        delta=f"{_bpt/1e6:.0f} MB/tok @ {int(npu_share*100)}% BW share",
-                        delta_color="off",
-                    )
-
-    st.markdown("---")
-
-    # ── CNN latency: 2 tier-precision rows × 3 CNN variants ──
-    # CNN measured INT-only on both Mid and High (no high_fp.* CNN cells
-    # in spec). Keyhole-sizer is the canonical CNN home per Kyle 15:00.
-    st.markdown("**CNN latency**")
-    _cnn_tier_rows = [
-        ("NPU Mid INT8",  "mid",  "int8"),
-        ("NPU High INT8", "high", "int8"),
-    ]
-    _cnn_model_cols = [
-        ("ResNet-50 W4",  "resnet50_w4",  "224×224"),
-        ("YOLOv8n W4",    "yolov8n_w4",   "640×640"),
-        ("YOLOv8n W8",    "yolov8n_w8",   "640×640"),
-    ]
-    for _tier_label, _tier_key, _prec_key in _cnn_tier_rows:
-        st.markdown(f"*{_tier_label}*")
-        _cols = st.columns(3)
-        for _col, (_cnn_label, _cnn_key, _res) in zip(_cols, _cnn_model_cols):
-            _anchor_cnn = load_cnn_anchor(_tier_key, _prec_key, _cnn_key)
-            with _col:
-                if _anchor_cnn is None:
-                    st.metric(f"⏸ {_cnn_label}", "not measured")
-                else:
-                    st.metric(
-                        f"{_anchor_cnn.badge} {_cnn_label}",
-                        f"{_anchor_cnn.ms_per_inference:.2f} ms",
-                        delta=f"{_anchor_cnn.fps:.1f} FPS · {_res}",
-                        delta_color="off",
-                    )
-
-    st.caption(
-        "Private silicon anchors. Numbers loaded from Streamlit secrets "
-        "via `sizer/npu_anchors.py`. Per spec: peak_bw × bw_share × "
-        "bw_efficiency derives achieved BW; the share override at "
-        "render-time lets the NPU_share selector re-derive without "
-        "re-reading secrets. **The headline decode-rate (LLM) and "
-        "per-frame-ms (CNN) tiles at the top of the page use these "
-        "values directly** when the selected (tier, model/pipeline) "
-        "cell has a measured anchor — see the source banner for the "
-        "cell's actual state. Cells without measurements fall back to "
-        "RTX 5090 BW-projection (LLM) or Phase 2 two-floor model (CNN)."
-    )
-
 # ── Export data (collapsible, collapsed by default) ──
 # Two rows: platform-budget CSVs on top, KPI-spreadsheet preview triggers
 # below. KPI preview (if active) renders just below the expander so it's
@@ -1536,16 +1435,21 @@ st.markdown("---")
 # LLM Performance / Accuracy / Precision tabs slot in between Duty-cycle
 # and Detail when llm_enabled (per Kyle 2026-05-12 — consolidating the
 # previously-separate 3-tab widget into the main tabs row).
-_tab_specs: list[tuple[str, str]] = [("📊 Overview", "overview")]
-if vision_enabled:
-    _tab_specs.append(("🎥 Stream scaling", "streams"))
-if vision_enabled and llm_enabled:
-    _tab_specs.append(("⚖ Duty-cycle", "duty"))
+# Tab order + labels mirror PAI sizer per Kyle 2026-05-16 19:35 + [pai-sizer]
+# 19:35 confirmation. Conceptual order: Overview → Accuracy → Precision →
+# Performance → (our vision-specific Stream scaling, Duty-cycle) → Detail.
+# Labels match PAI verbatim for the 4 shared tabs (single-word, no emojis)
+# so users moving between apps see the same labels for the same concept.
+_tab_specs: list[tuple[str, str]] = [("Overview", "overview")]
 if llm_enabled:
-    _tab_specs.append(("📊 Performance details", "perf"))
-    _tab_specs.append(("📊 Accuracy details", "acc"))
-    _tab_specs.append(("📉 Precision quality reference", "prec"))
-_tab_specs.append(("🔎 Detail", "detail"))
+    _tab_specs.append(("Accuracy", "acc"))
+    _tab_specs.append(("Precision", "prec"))
+    _tab_specs.append(("Performance", "perf"))
+if vision_enabled:
+    _tab_specs.append(("Stream scaling", "streams"))
+if vision_enabled and llm_enabled:
+    _tab_specs.append(("Duty-cycle", "duty"))
+_tab_specs.append(("Detail", "detail"))
 _tabs = dict(zip(
     [s[1] for s in _tab_specs],
     st.tabs([s[0] for s in _tab_specs]),
@@ -2062,172 +1966,283 @@ if llm_enabled:
             "decode tok/s and TTFT are scaled."
         )
 
-    with tab_acc:
-        st.markdown(
-            f"**{_model.label}**  \n"
-            f"{_model.description}  \n  \n"
-            f"**Family:** {_model.family}  \n"
-            f"**Base:** {_model.base}  \n"
-            f"**Total / active params:** {_model.total_params_b:.0f}B / "
-            f"{_model.active_params_b:.0f}B  \n"
-            f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
-            f"**Specialization:** {_model.fine_tune}  \n  \n"
-            f"🔸 *{_model.deck_bullet}*"
+    # ── 📡 Measured silicon anchors expander — folded into Performance
+    # tab on 2026-05-16 per Kyle 19:35 + [pai-sizer] 19:35 mirror confirm.
+    # Anchor grid lives alongside the FPS/tok-s headline it produces.
+    # Numbers live in `.streamlit/secrets.toml` (local) + Streamlit Cloud
+    # Secrets (production). Spec: personal-ai-framework
+    # `docs/private_anchor_secrets_spec.md` (commit 65bf89c). Loader:
+    # `sizer/npu_anchors.py`. Hot-swap helpers
+    # `_maybe_anchor_overlay_llm` / `_maybe_anchor_overlay_cnn` run after
+    # project_llm / project_vision; standalone grid + headline tiles
+    # surface the same values (no two-number ambiguity).
+    with st.expander("📡 Measured silicon anchors (private)", expanded=False):
+        st.caption(
+            f"Direct measurements on real NPU silicon. Numbers live in "
+            f"Streamlit secrets (`sizer/npu_anchors.py` loads them) — this "
+            f"surface confirms they loaded. Bandwidth derivation uses your "
+            f"selected **NPU_share = {int(npu_share*100)}%** as the share "
+            f"override (change the NPU_share selector in the sidebar to "
+            f"re-derive). Cells reading 'not measured' have placeholder "
+            f"zeros in secrets — populate `.streamlit/secrets.toml` locally "
+            f"or in Streamlit Cloud Secrets to surface them."
         )
-        # Catalog comparison table — all selectable models side by side,
-        # current selection highlighted with an arrow.
-        st.markdown("---")
-        st.markdown("**Catalog comparison** (all selectable models):")
-        _catalog_rows: list[dict] = []
-        for _k, _m in LLM_MODELS.items():
-            _row_delta = accuracy_delta_pp(_m, _production_model)
-            if _k == PRODUCTION_REFERENCE_KEY:
-                _row_delta_str = "—  (reference)"
-            elif _row_delta is None:
-                _row_delta_str = "perf ref"
-            else:
-                _row_delta_str = f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
-            _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
-            _catalog_rows.append({
-                "Model":         _row_label,
-                "Pass rate":     (f"{_m.pass_rate*100:.1f}%"
-                                   if _m.pass_rate is not None else "—"),
-                "Δ vs production": (_row_delta_str if _m.pass_rate is not None
-                                      else "perf ref"),
-                "n":             (f"{_m.pass_n_passes}/{_m.pass_n_total}"
-                                   if _m.pass_n_passes is not None else "—"),
-                "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
-            })
-        st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
 
-        # Per-category breakdown — dict-of-dicts shape per [pai-sizer]
-        # 8d20beb migration. Each entry holds raw rates
-        # {category: {pass, n, rate}}; Δ vs production computed at render
-        # time from raw counts.
-        if _model.category_deltas:
-            _prod_cats = _production_model.category_deltas or {}
-            if _is_production:
-                st.markdown("**Per-category breakdown** (production reference — Δ vs self = 0):")
-            else:
-                st.markdown(
-                    f"**Per-category breakdown** "
-                    f"(rate, Δ vs {_production_model.label.split(' (')[0]} — "
-                    f"positive = this model wins):"
-                )
-            for cat, data in _model.category_deltas.items():
-                cat_label = CATEGORY_LABELS.get(cat, cat)
-                passes = data.get("pass", 0)
-                n = data.get("n", 0)
-                rate = data.get("rate", 0.0)
-                prod_data = _prod_cats.get(cat)
-                if prod_data and not _is_production:
-                    delta = passes - prod_data.get("pass", 0)
-                    sign = "+" if delta >= 0 else ""
-                    st.markdown(
-                        f"- {cat_label}: **{passes}/{n}** ({rate:.1%}) "
-                        f"— Δ {sign}{delta} passes"
-                    )
-                else:
-                    st.markdown(f"- {cat_label}: **{passes}/{n}** ({rate:.1%})")
-            st.caption(
-                "Raw counts from Skippy v2 prompt set (132 samples), "
-                "RAG on (8 chunks via hybrid retrieval). Δ computed at "
-                "render time from raw pass counts vs production reference."
+        # ── LLM throughput: 3 tier-precision rows × 3 models ──
+        st.markdown("**LLM throughput**")
+        _llm_tier_rows = [
+            ("NPU Mid INT8",       "mid",  "int8"),
+            ("NPU High INT8",      "high", "int8"),
+            ("NPU High FP",        "high", "fp"),
+        ]
+        _llm_model_cols = [
+            ("Qwen3 30B-A3B MoE",  "qwen3_30b_a3b_moe"),
+            ("Qwen 2.5 32B dense", "qwen25_32b_dense"),
+            ("Qwen 2.5 7B dense",  "qwen25_7b_dense"),
+        ]
+        for _tier_label, _tier_key, _prec_key in _llm_tier_rows:
+            st.markdown(f"*{_tier_label}*")
+            _cols = st.columns(3)
+            for _col, (_model_label, _spec_model_key) in zip(_cols, _llm_model_cols):
+                _anchor_llm = load_llm_anchor(_tier_key, _prec_key, _spec_model_key)
+                with _col:
+                    if _anchor_llm is None:
+                        st.metric(f"⏸ {_model_label}", "not measured")
+                    else:
+                        _bpt = _anchor_llm.bytes_per_token(share_override=npu_share)
+                        st.metric(
+                            f"{_anchor_llm.badge} {_model_label}",
+                            f"{_anchor_llm.tokps:.1f} tok/s",
+                            delta=f"{_bpt/1e6:.0f} MB/tok @ {int(npu_share*100)}% BW share",
+                            delta_color="off",
+                        )
+
+        st.markdown("---")
+
+        # ── CNN latency: 2 tier-precision rows × 3 CNN variants ──
+        # CNN measured INT-only on both Mid and High (no high_fp.* CNN cells
+        # in spec). Keyhole-sizer is the canonical CNN home per Kyle 15:00.
+        st.markdown("**CNN latency**")
+        _cnn_tier_rows = [
+            ("NPU Mid INT8",  "mid",  "int8"),
+            ("NPU High INT8", "high", "int8"),
+        ]
+        _cnn_model_cols = [
+            ("ResNet-50 W4",  "resnet50_w4",  "224×224"),
+            ("YOLOv8n W4",    "yolov8n_w4",   "640×640"),
+            ("YOLOv8n W8",    "yolov8n_w8",   "640×640"),
+        ]
+        for _tier_label, _tier_key, _prec_key in _cnn_tier_rows:
+            st.markdown(f"*{_tier_label}*")
+            _cols = st.columns(3)
+            for _col, (_cnn_label, _cnn_key, _res) in zip(_cols, _cnn_model_cols):
+                _anchor_cnn = load_cnn_anchor(_tier_key, _prec_key, _cnn_key)
+                with _col:
+                    if _anchor_cnn is None:
+                        st.metric(f"⏸ {_cnn_label}", "not measured")
+                    else:
+                        st.metric(
+                            f"{_anchor_cnn.badge} {_cnn_label}",
+                            f"{_anchor_cnn.ms_per_inference:.2f} ms",
+                            delta=f"{_anchor_cnn.fps:.1f} FPS · {_res}",
+                            delta_color="off",
+                        )
+
+        st.caption(
+            "Private silicon anchors. Numbers loaded from Streamlit secrets "
+            "via `sizer/npu_anchors.py`. Per spec: peak_bw × bw_share × "
+            "bw_efficiency derives achieved BW; the share override at "
+            "render-time lets the NPU_share selector re-derive without "
+            "re-reading secrets. **The headline decode-rate (LLM) and "
+            "per-frame-ms (CNN) tiles at the top of the page use these "
+            "values directly** when the selected (tier, model/pipeline) "
+            "cell has a measured anchor — see the source banner for the "
+            "cell's actual state. Cells without measurements fall back to "
+            "RTX 5090 BW-projection (LLM) or Phase 2 two-floor model (CNN)."
+        )
+
+    with tab_acc:
+        # Perf-reference-only entries (qwen3_30b_a3b_moe_fp / qwen25_*_dense_int8,
+        # added 2026-05-14 for anchor reachability) have `pass_rate = None`
+        # — same weights as the underlying stock, alternate compute_dtype
+        # routing. Show a clean info banner instead of an empty Accuracy
+        # surface (per [pai-sizer] 2026-05-16 19:35 implementation note #4).
+        if _model.pass_rate is None:
+            st.info(
+                f"**{_model.label}**  \n  \n"
+                f"This is a **perf-reference variant** — same weights as "
+                f"the underlying stock model, just routed through an "
+                f"alternate compute_dtype to unlock a specific anchor cell. "
+                f"No standalone Skippy v2 eval — switch to a production / "
+                f"fine-tune / baseline row in the LLM model selector to see "
+                f"accuracy details."
             )
         else:
+            st.markdown(
+                f"**{_model.label}**  \n"
+                f"{_model.description}  \n  \n"
+                f"**Family:** {_model.family}  \n"
+                f"**Base:** {_model.base}  \n"
+                f"**Total / active params:** {_model.total_params_b:.0f}B / "
+                f"{_model.active_params_b:.0f}B  \n"
+                f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
+                f"**Specialization:** {_model.fine_tune}  \n  \n"
+                f"🔸 *{_model.deck_bullet}*"
+            )
+            # Catalog comparison table — all selectable models side by side,
+            # current selection highlighted with an arrow.
+            st.markdown("---")
+            st.markdown("**Catalog comparison** (all selectable models):")
+            _catalog_rows: list[dict] = []
+            for _k, _m in LLM_MODELS.items():
+                _row_delta = accuracy_delta_pp(_m, _production_model)
+                if _k == PRODUCTION_REFERENCE_KEY:
+                    _row_delta_str = "—  (reference)"
+                elif _row_delta is None:
+                    _row_delta_str = "perf ref"
+                else:
+                    _row_delta_str = f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
+                _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
+                _catalog_rows.append({
+                    "Model":         _row_label,
+                    "Pass rate":     (f"{_m.pass_rate*100:.1f}%"
+                                       if _m.pass_rate is not None else "—"),
+                    "Δ vs production": (_row_delta_str if _m.pass_rate is not None
+                                          else "perf ref"),
+                    "n":             (f"{_m.pass_n_passes}/{_m.pass_n_total}"
+                                       if _m.pass_n_passes is not None else "—"),
+                    "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
+                })
+            st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
+
+            # Per-category breakdown — dict-of-dicts shape per [pai-sizer]
+            # 8d20beb migration. Each entry holds raw rates
+            # {category: {pass, n, rate}}; Δ vs production computed at render
+            # time from raw counts.
+            if _model.category_deltas:
+                _prod_cats = _production_model.category_deltas or {}
+                if _is_production:
+                    st.markdown("**Per-category breakdown** (production reference — Δ vs self = 0):")
+                else:
+                    st.markdown(
+                        f"**Per-category breakdown** "
+                        f"(rate, Δ vs {_production_model.label.split(' (')[0]} — "
+                        f"positive = this model wins):"
+                    )
+                for cat, data in _model.category_deltas.items():
+                    cat_label = CATEGORY_LABELS.get(cat, cat)
+                    passes = data.get("pass", 0)
+                    n = data.get("n", 0)
+                    rate = data.get("rate", 0.0)
+                    prod_data = _prod_cats.get(cat)
+                    if prod_data and not _is_production:
+                        delta = passes - prod_data.get("pass", 0)
+                        sign = "+" if delta >= 0 else ""
+                        st.markdown(
+                            f"- {cat_label}: **{passes}/{n}** ({rate:.1%}) "
+                            f"— Δ {sign}{delta} passes"
+                        )
+                    else:
+                        st.markdown(f"- {cat_label}: **{passes}/{n}** ({rate:.1%})")
+                st.caption(
+                    "Raw counts from Skippy v2 prompt set (132 samples), "
+                    "RAG on (8 chunks via hybrid retrieval). Δ computed at "
+                    "render time from raw pass counts vs production reference."
+                )
+            else:
+                st.caption(
+                    "Per-category breakdown not yet populated for this entry."
+                )
+
+            # Eval methodology section — per [docs] 2026-05-11 09:31
+            # reviewer-final substring-reliability arc closure (white paper
+            # Finding 4: Qwen-family format bias). Mirrors PAI sizer dd4ef31.
+            st.markdown("---")
+            st.markdown("**📐 Eval methodology — Finding 4: Qwen-family format bias (semantic regrade)**")
+            st.markdown(
+                "The headline pass-rate numbers above now use **semantic "
+                "grading** (GPT-4o binary semantic judge, 132-sample "
+                "v2-RAG, deterministic temp=0) per [docs] 2026-05-11 "
+                "white paper Finding 4. Substring grading is retained "
+                "only on 2 entries (Skippy MoE FT v1, pre-v4 dense) "
+                "where _semantic.json was not produced — both flagged "
+                "in their model description."
+            )
+            st.markdown(
+                "**Why the headline switched** — the production model's "
+                "substring-headline-lift eroded across five successive "
+                "cross-checks:"
+            )
+            st.markdown(
+                "| # | Cross-check | Result |\n"
+                "|---|---|---|\n"
+                "| 1 | Substring (original headline) | **+3.1pp** vs base |\n"
+                "| 2 | LLM-judge (Sonnet 4.6) | **−0.35** |\n"
+                "| 3 | Temperature=0.3 substring | **−29.3pp** |\n"
+                "| 4 | Cross-judge (GPT-4o) | **−0.69** |\n"
+                "| 5 | **Semantic regrade** (132-sample binary) | **−4.6pp** (sign reversal) |"
+            )
+            st.markdown(
+                "**Finding 4 (verbatim, [docs] 2026-05-11 white paper):** "
+                "*'The recipe's value is voice transfer and safety "
+                "calibration, not capability lift; the substring-headline-"
+                "capability gain on this corpus was a format-fidelity "
+                "artifact specific to Qwen-shaped phrasings in the "
+                "training data.'*"
+            )
+            st.markdown(
+                "**Substring is biased — per-family regrade Δ** "
+                "(33-entry catalog, semantic minus substring):"
+            )
+            st.markdown(
+                "| Family | Regrade Δ direction | Interpretation |\n"
+                "|---|---|---|\n"
+                "| Qwen-family fine-tunes | **−3.2 to −12.7pp** | Substring over-graded (gold tokens are Qwen-shaped) |\n"
+                "| Non-Qwen stock bases (Gemma/Llama/Mistral) | **+1.6 to +6.0pp** | Substring under-graded |\n"
+                "| Gemma 9B v4 (cross-family) | +5.4pp | Only cross-family FT that lifts under both graders |\n"
+                "| Mistral / Llama / Yi v4 | flat-to-down | Substring direction confirmed |"
+            )
+            st.markdown(
+                "**Standing methodology** — durable, transfers across corpora:"
+            )
+            st.markdown(
+                "> *'Substring grading is reliable for base-vs-base "
+                "comparisons but unreliable for FT-vs-base comparisons "
+                "when the corpus phrasings come from one model family. "
+                "Customers running cross-family campaigns should "
+                "validate substring with semantic grading before drawing "
+                "FT-lift conclusions. Two judges by default (Sonnet 4.6 "
+                "+ GPT-4o) on any cross-family fine-tune eval — "
+                "~$5/N=5 pass.'*"
+            )
+            st.markdown(
+                "**Production decision unaffected.** The Skippy 7B v4 "
+                "ship decision is anchored on the **three-gate framework** "
+                "(capability + voice + safety) — substring was never the "
+                "load-bearing signal. Voice and safety carried the real "
+                "signal; substring failed silently. This is exactly the "
+                "scenario the three-gate framework was designed for."
+            )
             st.caption(
-                "Per-category breakdown not yet populated for this entry."
+                f"Methodology version: `{METHODOLOGY_VERSION}` — cross-app "
+                f"lockstep with PAI sizer's `sizer_bundle.json __meta__` "
+                f"and Skippy side's `build_sizer_bundle.py`. Bumps when "
+                f"the eval methodology shifts (new grader, new RAG "
+                f"protocol, new eval set, etc.)."
             )
 
-        # Eval methodology section — per [docs] 2026-05-11 09:31
-        # reviewer-final substring-reliability arc closure (white paper
-        # Finding 4: Qwen-family format bias). Mirrors PAI sizer dd4ef31.
-        st.markdown("---")
-        st.markdown("**📐 Eval methodology — Finding 4: Qwen-family format bias (semantic regrade)**")
-        st.markdown(
-            "The headline pass-rate numbers above now use **semantic "
-            "grading** (GPT-4o binary semantic judge, 132-sample "
-            "v2-RAG, deterministic temp=0) per [docs] 2026-05-11 "
-            "white paper Finding 4. Substring grading is retained "
-            "only on 2 entries (Skippy MoE FT v1, pre-v4 dense) "
-            "where _semantic.json was not produced — both flagged "
-            "in their model description."
-        )
-        st.markdown(
-            "**Why the headline switched** — the production model's "
-            "substring-headline-lift eroded across five successive "
-            "cross-checks:"
-        )
-        st.markdown(
-            "| # | Cross-check | Result |\n"
-            "|---|---|---|\n"
-            "| 1 | Substring (original headline) | **+3.1pp** vs base |\n"
-            "| 2 | LLM-judge (Sonnet 4.6) | **−0.35** |\n"
-            "| 3 | Temperature=0.3 substring | **−29.3pp** |\n"
-            "| 4 | Cross-judge (GPT-4o) | **−0.69** |\n"
-            "| 5 | **Semantic regrade** (132-sample binary) | **−4.6pp** (sign reversal) |"
-        )
-        st.markdown(
-            "**Finding 4 (verbatim, [docs] 2026-05-11 white paper):** "
-            "*'The recipe's value is voice transfer and safety "
-            "calibration, not capability lift; the substring-headline-"
-            "capability gain on this corpus was a format-fidelity "
-            "artifact specific to Qwen-shaped phrasings in the "
-            "training data.'*"
-        )
-        st.markdown(
-            "**Substring is biased — per-family regrade Δ** "
-            "(33-entry catalog, semantic minus substring):"
-        )
-        st.markdown(
-            "| Family | Regrade Δ direction | Interpretation |\n"
-            "|---|---|---|\n"
-            "| Qwen-family fine-tunes | **−3.2 to −12.7pp** | Substring over-graded (gold tokens are Qwen-shaped) |\n"
-            "| Non-Qwen stock bases (Gemma/Llama/Mistral) | **+1.6 to +6.0pp** | Substring under-graded |\n"
-            "| Gemma 9B v4 (cross-family) | +5.4pp | Only cross-family FT that lifts under both graders |\n"
-            "| Mistral / Llama / Yi v4 | flat-to-down | Substring direction confirmed |"
-        )
-        st.markdown(
-            "**Standing methodology** — durable, transfers across corpora:"
-        )
-        st.markdown(
-            "> *'Substring grading is reliable for base-vs-base "
-            "comparisons but unreliable for FT-vs-base comparisons "
-            "when the corpus phrasings come from one model family. "
-            "Customers running cross-family campaigns should "
-            "validate substring with semantic grading before drawing "
-            "FT-lift conclusions. Two judges by default (Sonnet 4.6 "
-            "+ GPT-4o) on any cross-family fine-tune eval — "
-            "~$5/N=5 pass.'*"
-        )
-        st.markdown(
-            "**Production decision unaffected.** The Skippy 7B v4 "
-            "ship decision is anchored on the **three-gate framework** "
-            "(capability + voice + safety) — substring was never the "
-            "load-bearing signal. Voice and safety carried the real "
-            "signal; substring failed silently. This is exactly the "
-            "scenario the three-gate framework was designed for."
-        )
-        st.caption(
-            f"Methodology version: `{METHODOLOGY_VERSION}` — cross-app "
-            f"lockstep with PAI sizer's `sizer_bundle.json __meta__` "
-            f"and Skippy side's `build_sizer_bundle.py`. Bumps when "
-            f"the eval methodology shifts (new grader, new RAG "
-            f"protocol, new eval set, etc.)."
-        )
-
-        st.markdown(
-            "---\n"
-            "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
-            "same decode-tok/s ceiling on every NPU tier regardless of which "
-            "model's weights are in the file — bandwidth-bound physics doesn't "
-            "care. **For the MoE entries** (Skippy MoE FT and Thinking stock), "
-            "model choice is a pure quality-vs-quality trade — no perf cost. "
-            "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
-            "math differs: dense traverses the full weight set per token, so "
-            "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
-            "alternatives."
-        )
+            st.markdown(
+                "---\n"
+                "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
+                "same decode-tok/s ceiling on every NPU tier regardless of which "
+                "model's weights are in the file — bandwidth-bound physics doesn't "
+                "care. **For the MoE entries** (Skippy MoE FT and Thinking stock), "
+                "model choice is a pure quality-vs-quality trade — no perf cost. "
+                "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
+                "math differs: dense traverses the full weight set per token, so "
+                "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
+                "alternatives."
+            )
 
     with tab_prec:
         # Quality cost of the quantization recipe on the base model
