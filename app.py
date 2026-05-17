@@ -2288,6 +2288,9 @@ with tab_kpis:
     # Platform-budget CSVs + KPI spreadsheet preview. Lived in a top-of-page
     # expander before 2026-05-16; promoted to its own tab to mirror PAI sizer's
     # "KPIs" tab and to keep the page header focused on the headline metrics.
+    # In-content header mirrors PAI sizer's convention (emoji on the section
+    # header inside the tab, not on the tab label) for cross-app visual parity.
+    st.header("📊 KPIs")
     _btn_cur_col, _btn_mat_col = st.columns(2)
     with _btn_cur_col:
         st.download_button(
