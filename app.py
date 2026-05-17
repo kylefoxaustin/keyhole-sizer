@@ -552,23 +552,86 @@ with st.sidebar:
                                   "with vision disabled).",
                              key="llm_enabled")
     if llm_enabled:
-        # Model selection — domain fine-tune (default) vs stock public
-        # reasoning baseline. Both are Q4_K_M MoE 30B/3B-active so decode
-        # tok/s is the same across models — accuracy is what differs.
-        llm_model_keys = list(LLM_MODELS.keys())
+        # Model selection — categorized by role (PROD / FT / BASE / PERF)
+        # with compatibility-aware sort. Mirrors PAI sizer's _model_role +
+        # _ROLE_PRIORITY pattern per Kyle 2026-05-16 + [pai-sizer] 20:02
+        # confirmation. Same icon vocabulary across both apps:
+        #   🚀 PROD = production reference (Skippy 7B v4)
+        #   🔬 FT   = Skippy fine-tune experiment (skippy_* keys)
+        #   📚 BASE = stock public base model
+        #   ⚙️ PERF = perf-reference variant (anchor-reachability — pass_rate=None)
+        #   🔴      = incompatible with current NPU tier (sinks to bottom)
+        def _model_role(k: str) -> tuple[str, str]:
+            if k == PRODUCTION_REFERENCE_KEY:
+                return "PROD", "🚀"
+            m = LLM_MODELS[k]
+            if m.pass_rate is None:
+                # Anchor-reachability perf-reference variants from
+                # 2026-05-14 (qwen3_30b_a3b_moe_fp, qwen25_*_dense_int8)
+                # — same weights as stock, alternate compute_dtype.
+                return "PERF", "⚙️"
+            if k.startswith("skippy_"):
+                return "FT", "🔬"
+            return "BASE", "📚"
+
+        def _model_compatible(k: str) -> bool:
+            return hw.capability_level(
+                getattr(LLM_MODELS[k], "compute_dtype", "int8")
+            ) != "unsupported"
+
+        _ROLE_PRIORITY = {"PROD": 0, "FT": 1, "BASE": 2, "PERF": 3}
+        _original_index = {k: i for i, k in enumerate(LLM_MODELS.keys())}
+        # Sort: compatible-first (incompatibles sink to bottom with 🔴),
+        # then by role priority (PROD → FT → BASE → PERF), then by
+        # original dict-order (preserves the curated narrative within
+        # each (compat, role) bucket).
+        llm_model_keys = sorted(
+            LLM_MODELS.keys(),
+            key=lambda k: (
+                0 if _model_compatible(k) else 1,
+                _ROLE_PRIORITY[_model_role(k)[0]],
+                _original_index[k],
+            ),
+        )
+
+        def _format_model(k: str) -> str:
+            role, badge = _model_role(k)
+            compat_prefix = "" if _model_compatible(k) else "🔴 "
+            return f"{compat_prefix}{badge} {role} · {LLM_MODELS[k].label}"
+
+        # Default selection: production model (still SKIPPY_7B_V4). On
+        # NPU High (default tier), production is compatible and lands at
+        # the top of the sorted list. On Mid (INT8-only), production
+        # sinks to the incompatible group — selectbox sticky-state keeps
+        # whatever was last selected; the 🔴 prefix surfaces the mismatch
+        # at model-pick time, and the existing dtype-mismatch banner +
+        # workload-selectbox-disabled gate handle the downstream cascade.
         llm_model_key = st.selectbox(
             "LLM model",
             options=llm_model_keys,
-            format_func=lambda k: LLM_MODELS[k].label,
+            format_func=_format_model,
             index=llm_model_keys.index(DEFAULT_LLM_MODEL_KEY),
-            help="Both Q4_K_M MoE 30B/3B-active entries share decode tok/s "
-                 "and TTFT — accuracy is what differs. Note: the MoE "
-                 "fine-tune row's pass-rate is base-confounded vs Thinking "
-                 "stock (different sister-models within Qwen3-30B-A3B). "
-                 "Apples-to-apples fine-tune validation lives on the dense "
-                 "Qwen2.5 entries — see model description for the base-"
-                 "identity caveat per [docs] 2026-05-05.",
+            help="Badges: 🚀 PROD = current production model (Skippy 7B "
+                 "v4 dense). 🔬 FT = Skippy fine-tune experiment "
+                 "(validated or cautionary; see Accuracy tab). 📚 BASE = "
+                 "stock public base model (apples-to-apples comparison "
+                 "anchor). ⚙️ PERF = perf-reference variant — same "
+                 "weights as the underlying stock, alternate "
+                 "compute_dtype routing to unlock anchor-secret cells "
+                 "(no separate eval; for sizing comparisons only). 🔴 "
+                 "prefix = this model's compute precision can't execute "
+                 "on the currently-selected NPU Tier (e.g. fp16 models "
+                 "on NPU Mid's INT8-only silicon); incompatible models "
+                 "are sorted to the bottom.",
             key="llm_model_key",
+        )
+        # Compact visible legend — Streamlit selectbox doesn't support
+        # per-option tooltips, so the legend surfaces what the icons mean
+        # without requiring a hover on the ? icon. Mirrors PAI sizer's
+        # caption verbatim for cross-app consistency.
+        st.caption(
+            "🚀 production · 🔬 fine-tune · 📚 stock base · "
+            "⚙️ perf reference · 🔴 won't run on this NPU tier"
         )
         _model = LLM_MODELS[llm_model_key]
         _production_model = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
