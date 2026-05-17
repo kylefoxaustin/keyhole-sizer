@@ -112,16 +112,10 @@ if not _password_gate():
 # ───────────────────────── Header ─────────────────────────
 
 st.title("🎯 keyhole-sizer")
-with st.expander("ℹ About this sizer", expanded=False):
-    st.markdown(
-        "Interactive sandbox for the Keyhole bake-off findings. "
-        "Tune NPU spec, pipeline, concurrency, and LLM load to see live "
-        "FPS / tok/s / duty-cycle projections. All numbers trace back to "
-        "measured bake-offs (`github.com/kylefoxaustin/keyhole`, see "
-        "`REPRODUCE.md`).\n\n"
-        "⚠️ Assumes vision/LLM time-slice on the NPU — concurrent BW "
-        "contention not modeled."
-    )
+# "ℹ About this sizer" expander was here at the top until 2026-05-16;
+# moved to the bottom of the page (just above the footer caption) per
+# Kyle — header should land the user straight on the metrics, not on
+# explanatory copy.
 
 
 # ───────────────────────── Helpers: chart theme + pipeline strip ─────────────────────────
@@ -2396,6 +2390,16 @@ with tab_detail:
     })
 
 st.markdown("---")
+with st.expander("ℹ About this sizer", expanded=False):
+    st.markdown(
+        "Interactive sandbox for the Keyhole bake-off findings. "
+        "Tune NPU spec, pipeline, concurrency, and LLM load to see live "
+        "FPS / tok/s / duty-cycle projections. All numbers trace back to "
+        "measured bake-offs (`github.com/kylefoxaustin/keyhole`, see "
+        "`REPRODUCE.md`).\n\n"
+        "⚠️ Assumes vision/LLM time-slice on the NPU — concurrent BW "
+        "contention not modeled."
+    )
 st.caption(
     "keyhole-sizer — derived from the Keyhole bake-off series. "
     "All numbers trace back to measurements on an RTX 5090; edge projections "
