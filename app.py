@@ -17,6 +17,7 @@ from sizer.npu_model import (
     describe_hw, project_vision, project_llm,
     theoretical_bandwidth, vision_fps_under_llm_load,
     workload_distribution_on_hw,
+    workload_multiplier,
 )
 from sizer.platform_budget import (
     vision_workload_row, llm_workload_row, rows_to_csv_str,
@@ -836,11 +837,22 @@ def _resolve_spec_tier_precision(tier_name: str, dtype: str):
     return None
 
 
-def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share):
+def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share, workload="plain_chat"):
     """Hot-swap measured silicon anchor into LLM projection result.
 
     Returns r unchanged if no anchor matches; otherwise returns a new
     dict with `decode_tok_s` overridden + `source = "measured_silicon_anchor"`.
+
+    The `workload` parameter is the user's current selection from the
+    workload-pattern selectbox. The anchor measurement is taken at the
+    silicon's plain-chat-class reference seqlen=2048 (per spec), so we
+    apply the same `workload_multiplier` that project_llm() applies to
+    the BW-projected baseline — keeps workload-selectbox changes visible
+    in the headline tok/s when the anchor fires. Per Kyle 2026-05-16:
+    "when I change the type of prompt the tokens per second doesn't
+    change" — the bug was that this overlay was setting decode_tok_s
+    to anchor.tokps verbatim, dropping the workload scaling that
+    project_llm had already applied.
     """
     if r is None or not isinstance(r, dict):
         return r
@@ -861,17 +873,30 @@ def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share):
     anchor = load_llm_anchor(spec_tier, spec_prec, spec_model)
     if anchor is None or anchor.source != "measured" or anchor.tokps <= 0:
         return r
+    # Apply the workload multiplier to the anchor value — the anchor is
+    # the plain-chat-equivalent measurement (seqlen=2048 per spec); the
+    # user-selected workload scales relative to that the same way it
+    # scales the BW projection.
+    try:
+        mult = workload_multiplier(workload)
+        decode_mult = mult.get("decode_p50_mult", 1.0)
+        ttft_mult = mult.get("ttft_p50_mult", 1.0)
+    except Exception:
+        decode_mult, ttft_mult = 1.0, 1.0
     r2 = dict(r)
-    r2["decode_tok_s"] = anchor.tokps
+    r2["decode_tok_s"] = anchor.tokps * decode_mult
     # Preserve TTFT / prefill / regime from projection — anchor may not
-    # carry those. Recompute total_s if downstream uses it.
+    # carry those. When anchor has a prefill rate, derive ttft @ 1K and
+    # scale by the workload's TTFT multiplier.
     if anchor.prefill_tokps > 0:
-        r2["ttft_1k_sec"] = 1024.0 / anchor.prefill_tokps
+        r2["ttft_1k_sec"] = (1024.0 / anchor.prefill_tokps) * ttft_mult
     r2["source"] = "measured_silicon_anchor"
     r2["_silicon_anchor_meta"] = {
         "measured_date": anchor.measured_date,
         "spec_tier_precision": f"{spec_tier}_{spec_prec}",
         "spec_model_key": spec_model,
+        "workload_applied": workload,
+        "decode_mult_applied": round(decode_mult, 3),
     }
     return r2
 
@@ -963,7 +988,7 @@ if llm_enabled and llm is not None:
 # would never override a measured value. Per [docs] 2026-05-14 spec +
 # PAI sizer 31a0dd2 pattern.
 if llm_enabled and llm is not None:
-    llm = _maybe_anchor_overlay_llm(llm, llm_model_key, hw, hw.name, npu_share)
+    llm = _maybe_anchor_overlay_llm(llm, llm_model_key, hw, hw.name, npu_share, workload=llm_workload)
 
 # Render the 🔴 dtype-mismatch banner upfront when the selected model's
 # compute_dtype isn't supported by the silicon. After the banner, mute
