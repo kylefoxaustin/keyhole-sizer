@@ -1387,127 +1387,6 @@ if vision_enabled:
     )
     st.markdown(_legend_html, unsafe_allow_html=True)
 
-# ── Export data (collapsible, collapsed by default) ──
-# Two rows: platform-budget CSVs on top, KPI-spreadsheet preview triggers
-# below. KPI preview (if active) renders just below the expander so it's
-# full-width and readable.
-with st.expander("📥 Export data", expanded=False):
-    _btn_cur_col, _btn_mat_col = st.columns(2)
-    with _btn_cur_col:
-        st.download_button(
-            label="💾 This config",
-            data=_cur_csv,
-            file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
-            mime="text/csv",
-            help=(
-                "Platform-budget CSV row for the *current* config (vision + LLM if "
-                "enabled). ss_* columns are additive at the platform level; peak_* "
-                "are per-workload ceilings. Read the header `#` comments for caveats."
-            ),
-            width="stretch",
-        )
-    with _btn_mat_col:
-        st.download_button(
-            label="📦 All configs",
-            data=_full_matrix_csv(),
-            file_name="keyhole_sizer_platform_budget_matrix.csv",
-            mime="text/csv",
-            help=(
-                "Every preset HW tier × pipeline × resolution × stream count + every "
-                "LLM (quant × workload × answer_kind) combination (~585 rows). "
-                "Custom HW is skipped — use 'This config' for custom. Cached hourly."
-            ),
-            width="stretch",
-        )
-    # KPI spreadsheet buttons are vision-pipeline-centric (per-pipeline rows
-    # of vision KPIs). Hidden when vision is off — there's no per-pipeline
-    # KPI to surface in an LLM-only sizing.
-    if vision_enabled:
-        _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
-        with _kpi_btn_all_col:
-            if st.button(
-                "📊 KPI spreadsheet (all models)",
-                width="stretch",
-                key="kpi_btn_all",
-                help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
-                     "the current HW / resolution / LLM state, plus a button to "
-                     "download the formatted XLSX.",
-            ):
-                st.session_state.kpi_preview_mode = "all"
-        with _kpi_btn_one_col:
-            if st.button(
-                "📊 KPI spreadsheet (this model)",
-                width="stretch",
-                key="kpi_btn_this",
-                help="Reveal the KPI row for just the currently-selected pipeline "
-                     "(the one from the sidebar), plus a button to download the XLSX.",
-            ):
-                st.session_state.kpi_preview_mode = "this"
-
-# ── KPI preview (renders below the expander when a button above is active) ──
-_kpi_mode = st.session_state.get("kpi_preview_mode") if vision_enabled else None
-if _kpi_mode in ("all", "this"):
-    if _kpi_mode == "all":
-        _kpi_rows = all_pipeline_kpi_rows(
-            hw, resolution=resolution,
-            llm_enabled=llm_enabled, llm_quant=quant,
-            llm_workload=llm_workload,
-            compiler_quality_vs_trt=compiler_quality,
-        )
-        _kpi_file_slug = "all"
-    else:
-        _kpi_rows = [pipeline_kpi_row(
-            pipeline_key, hw, resolution=resolution,
-            llm_enabled=llm_enabled, llm_quant=quant,
-            llm_workload=llm_workload,
-            compiler_quality_vs_trt=compiler_quality,
-        )]
-        _kpi_file_slug = pipeline_key
-
-    # Override total_fps so it matches the metric card's Per-camera FPS
-    # exactly (same math as the website: project_vision at current hw /
-    # resolution / n_streams / compiler_quality, plus vision_fps_under_llm_load
-    # when LLM is on). The kpi_breakdown module's own total_fps is vision-only
-    # including ingest — honest, but different from what users read in the
-    # main metric row, which caused 'wait, why don't these match?' confusion.
-    for _row in _kpi_rows:
-        _pipe_for_row = PIPELINES[_row["pipeline_key"]]
-        _v_for_row = project_vision(
-            _pipe_for_row, hw, resolution, n_streams=n_streams,
-            compiler_quality_vs_trt=compiler_quality,
-        )
-        _base_fps = _v_for_row["fps_per_stream"]
-        _row["total_fps"] = round(
-            vision_fps_under_llm_load(
-                _base_fps, llm, queries_per_min, answer_kind
-            ) if llm_enabled else _base_fps,
-            2,
-        )
-
-    _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
-    _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
-    with _kpi_dl_col:
-        st.download_button(
-            "⬇ Download XLSX",
-            data=_kpi_xlsx_bytes,
-            file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
-            key=f"kpi_dl_{_kpi_mode}",
-        )
-    with _kpi_data_col:
-        st.dataframe(
-            pd.DataFrame(_kpi_rows),
-            width="stretch",
-            hide_index=True,
-        )
-    st.caption(
-        "`total_fps` matches the **Per-camera FPS** metric card above — "
-        "same math (engine ms only, with LLM duty-cycle reduction applied "
-        "when LLM is on). The `ingest_ms` column is shown for reference "
-        "but not in `total_fps`."
-    )
-
 st.markdown("---")
 
 # ───────── Tabs: charts + detail tables ─────────
@@ -1531,6 +1410,7 @@ if vision_enabled:
     _tab_specs.append(("Stream scaling", "streams"))
 if vision_enabled and llm_enabled:
     _tab_specs.append(("Duty-cycle", "duty"))
+_tab_specs.append(("KPIs", "kpis"))
 _tab_specs.append(("Detail", "detail"))
 _tabs = dict(zip(
     [s[1] for s in _tab_specs],
@@ -1542,6 +1422,7 @@ tab_duty = _tabs.get("duty")
 tab_perf = _tabs.get("perf")
 tab_acc = _tabs.get("acc")
 tab_prec = _tabs.get("prec")
+tab_kpis = _tabs["kpis"]
 tab_detail = _tabs["detail"]
 
 with tab_overview:
@@ -2401,6 +2282,130 @@ if llm_enabled:
             "headroom that **lifecycle cost (the retargeting panel) dominates "
             "the choice**, not the ~4pp quality hit. Fine-tune-vs-stock and "
             "precision-recipe are independent axes — surfaced separately above."
+        )
+
+with tab_kpis:
+    # Platform-budget CSVs + KPI spreadsheet preview. Lived in a top-of-page
+    # expander before 2026-05-16; promoted to its own tab to mirror PAI sizer's
+    # "KPIs" tab and to keep the page header focused on the headline metrics.
+    _btn_cur_col, _btn_mat_col = st.columns(2)
+    with _btn_cur_col:
+        st.download_button(
+            label="💾 This config",
+            data=_cur_csv,
+            file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
+            mime="text/csv",
+            help=(
+                "Platform-budget CSV row for the *current* config (vision + LLM if "
+                "enabled). ss_* columns are additive at the platform level; peak_* "
+                "are per-workload ceilings. Read the header `#` comments for caveats."
+            ),
+            width="stretch",
+        )
+    with _btn_mat_col:
+        st.download_button(
+            label="📦 All configs",
+            data=_full_matrix_csv(),
+            file_name="keyhole_sizer_platform_budget_matrix.csv",
+            mime="text/csv",
+            help=(
+                "Every preset HW tier × pipeline × resolution × stream count + every "
+                "LLM (quant × workload × answer_kind) combination (~585 rows). "
+                "Custom HW is skipped — use 'This config' for custom. Cached hourly."
+            ),
+            width="stretch",
+        )
+    # KPI spreadsheet buttons are vision-pipeline-centric (per-pipeline rows
+    # of vision KPIs). Hidden when vision is off — no per-pipeline KPI in an
+    # LLM-only sizing.
+    if vision_enabled:
+        _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
+        with _kpi_btn_all_col:
+            if st.button(
+                "📊 KPI spreadsheet (all models)",
+                width="stretch",
+                key="kpi_btn_all",
+                help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
+                     "the current HW / resolution / LLM state, plus a button to "
+                     "download the formatted XLSX.",
+            ):
+                st.session_state.kpi_preview_mode = "all"
+        with _kpi_btn_one_col:
+            if st.button(
+                "📊 KPI spreadsheet (this model)",
+                width="stretch",
+                key="kpi_btn_this",
+                help="Reveal the KPI row for just the currently-selected pipeline "
+                     "(the one from the sidebar), plus a button to download the XLSX.",
+            ):
+                st.session_state.kpi_preview_mode = "this"
+
+    # KPI preview renders inside the tab below the buttons when active.
+    _kpi_mode = st.session_state.get("kpi_preview_mode") if vision_enabled else None
+    if _kpi_mode in ("all", "this"):
+        if _kpi_mode == "all":
+            _kpi_rows = all_pipeline_kpi_rows(
+                hw, resolution=resolution,
+                llm_enabled=llm_enabled, llm_quant=quant,
+                llm_workload=llm_workload,
+                compiler_quality_vs_trt=compiler_quality,
+            )
+            _kpi_file_slug = "all"
+        else:
+            _kpi_rows = [pipeline_kpi_row(
+                pipeline_key, hw, resolution=resolution,
+                llm_enabled=llm_enabled, llm_quant=quant,
+                llm_workload=llm_workload,
+                compiler_quality_vs_trt=compiler_quality,
+            )]
+            _kpi_file_slug = pipeline_key
+
+        # Override total_fps to match the metric card's Per-camera FPS (engine
+        # ms only, with LLM duty-cycle reduction when LLM is on). kpi_breakdown's
+        # own total_fps is vision-only including ingest — honest but different
+        # from the headline, which caused "wait, why don't these match?" confusion.
+        for _row in _kpi_rows:
+            _pipe_for_row = PIPELINES[_row["pipeline_key"]]
+            _v_for_row = project_vision(
+                _pipe_for_row, hw, resolution, n_streams=n_streams,
+                compiler_quality_vs_trt=compiler_quality,
+            )
+            _base_fps = _v_for_row["fps_per_stream"]
+            _row["total_fps"] = round(
+                vision_fps_under_llm_load(
+                    _base_fps, llm, queries_per_min, answer_kind
+                ) if llm_enabled else _base_fps,
+                2,
+            )
+
+        _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
+        _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
+        with _kpi_dl_col:
+            st.download_button(
+                "⬇ Download XLSX",
+                data=_kpi_xlsx_bytes,
+                file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch",
+                key=f"kpi_dl_{_kpi_mode}",
+            )
+        with _kpi_data_col:
+            st.dataframe(
+                pd.DataFrame(_kpi_rows),
+                width="stretch",
+                hide_index=True,
+            )
+        st.caption(
+            "`total_fps` matches the **Per-camera FPS** metric card above — "
+            "same math (engine ms only, with LLM duty-cycle reduction applied "
+            "when LLM is on). The `ingest_ms` column is shown for reference "
+            "but not in `total_fps`."
+        )
+    elif not vision_enabled:
+        st.caption(
+            "KPI spreadsheet is per-pipeline (vision); enable vision in the "
+            "sidebar to see the per-pipeline KPI buttons. CSV exports above "
+            "always work."
         )
 
 with tab_detail:
