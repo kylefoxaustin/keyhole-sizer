@@ -1,12 +1,21 @@
 # keyhole-sizer
 
+[![version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v1.0.0)
+[![streamlit](https://img.shields.io/badge/streamlit-live-FF4B4B)](https://keyhole-sizer.streamlit.app)
+
 Interactive NPU sizing sandbox for the
 [Keyhole](https://github.com/kylefoxaustin/keyhole) edge-AI bake-off findings.
 
-A Streamlit app that wraps the measured bake-off data in tunable sliders:
+A Streamlit app that wraps the measured bake-off data in tunable controls:
 pick an NPU tier (or build a custom one), a vision pipeline, concurrent
 stream count, and whether an LLM co-exists on the same silicon — then
 watch live FPS / tok/s / VRAM-fit / duty-cycle projections.
+
+**Companion app:**
+[personal-ai-assistant-sizer](https://github.com/kylefoxaustin/personal-ai-assistant-sizer)
+(LLM-only sizing for the Skippy assistant deployment). Both sizers share
+schema, source taxonomy, anchor-secrets mechanism, and tab structure — pick
+the one that matches your workload.
 
 If you've read the Keyhole deck and want to answer **"what if my NPU had
 a 96-bit bus instead of 128?"** or **"how many 480p streams can I run
@@ -15,28 +24,22 @@ with a 2 Hz LLM query rate?"**, this is the tool.
 ## Install & run
 
 ```bash
-# 1. Clone
 git clone https://github.com/kylefoxaustin/keyhole-sizer.git
 cd keyhole-sizer
 
-# 2. Option A — reuse an existing venv (if you already have the Keyhole
-#    project's venv, it has streamlit+plotly already):
-source ~/.virtualenvs/keyhole/bin/activate
-
-# 2. Option B — fresh venv with plain stdlib venv:
+# Option A — fresh venv with plain stdlib venv
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Option C — virtualenvwrapper:
+# Option B — virtualenvwrapper
 mkvirtualenv keyhole-sizer --python=/usr/bin/python3.10
 pip install -r requirements.txt
-#    Note: on some systems virtualenvwrapper + virtualenv 20.x fails to
-#    create the bin/ dir. If `workon keyhole-sizer` gives "no activate
-#    script", remove the half-built env and use Option B instead:
-#       rm -rf ~/.virtualenvs/keyhole-sizer && python3 -m venv .venv
 
-# 3. Launch
+# Option C — reuse the Keyhole project's venv (has streamlit+plotly already)
+source ~/.virtualenvs/keyhole/bin/activate
+
+# Launch
 streamlit run app.py
 ```
 
@@ -45,8 +48,8 @@ pure projection math on top of already-measured numbers.
 
 ## Deployment (Streamlit Community Cloud)
 
-The app is deployed at **share.streamlit.io** with a shared-password gate.
-Auto-redeploys on every push to `main`.
+The app is deployed at **https://keyhole-sizer.streamlit.app** with a
+shared-password gate. Auto-redeploys on every push to `main`.
 
 To set up your own deployment:
 
@@ -54,130 +57,236 @@ To set up your own deployment:
    grant access to this repo.
 2. **New app** → pick `kylefoxaustin/keyhole-sizer`, branch `main`,
    main file `app.py`.
-3. Click **Advanced settings → Secrets** and add:
+3. **Advanced settings → Secrets**:
    ```toml
    PASSWORD = "your-shared-password-here"
    ```
-4. Deploy. The password gate is active whenever the `PASSWORD` secret is set;
-   when absent (e.g. local dev via `streamlit run app.py`), the gate is
-   bypassed so you don't have to type it during development.
+   (Optional — when absent, the password gate is bypassed so local dev
+   doesn't require typing it.)
+4. Deploy.
 
-## Platform-budget CSV export
-
-The sizer can emit **additive platform-budget CSV rows** for feeding into an
-SoC-level spreadsheet (total NPU duty cycle, DDR GB/s consumed, MB resident,
-power). Three ways to get the data:
-
-1. **UI button** — every rendered config has a **💾 Download platform budget
-   CSV (current config)** button that emits a single vision row + (if
-   enabled) a single LLM row for the currently-selected config.
-2. **CLI** — `scripts/export_platform_budget.py` emits a row for any
-   combination of pipeline × HW × resolution × streams × optional LLM.
-   Run `python scripts/export_platform_budget.py --list` for valid keys.
-3. **Full matrix** — `scripts/export_platform_matrix.py` iterates every
-   preset HW tier × pipeline × resolution × stream count (1/2/4/8/16) +
-   every LLM quant × workload, writing `data/platform_budget_matrix.csv`
-   (~585 rows). Custom HW is skipped (use the UI download for custom).
-
-**Schema** (per row = one workload slot):
-- `ss_*` columns (duty cycle, DDR GB/s, TOPS, MB resident, watts,
-  throughput) are **additive** across rows at the platform level.
-- `peak_*` columns (per-frame ms, peak GB/s, peak TOPS) are NOT additive —
-  they're per-workload ceilings.
-- `hw_*` columns are duplicated on every row so each row is self-contained.
-- `sizer_commit_sha` + `export_timestamp_iso` let you trace a row back to
-  the sizer revision that emitted it.
-
-**Caveats baked into the CSV header comments** (read before using for procurement):
-- Power is TDP × duty-cycle approximation, NOT measured per-workload.
-- NPU Low-LP5-32bit / Low-LP5-64bit / Low-LP5X / Mid / High numbers
-  are bandwidth-scaled from RTX 5090 measurements, NOT measured on
-  actual NPU silicon.
-
-**Consume in pandas:** `pd.read_csv(path, comment='#')`.
+**Note:** changes to `app.py` auto-reload; changes to files under `sizer/`
+require a manual reboot from the Streamlit Cloud console. (See
+[`memory/project_streamlit_deploy.md`](https://github.com/kylefoxaustin/personal-ai-framework)
+in the framework repo for the inotify-stuck-reload trap.)
 
 ## What you can tune
 
-**Hardware** (sidebar):
-- **Tier preset:** `NPU Low-LP5-32bit` (32-bit LPDDR5 @ 6.4 GT/s,
-  25.6 GB/s; dense INT8-only, narrow-bus variant) / `NPU Low-LP5-64bit`
-  (64-bit LPDDR5 @ 6.4 GT/s, 51.2 GB/s; dense INT8-only, NXP Neutron
-  class) / `NPU Low-LP5X` (64-bit LPDDR5X @ 8.4 GT/s, 67.2 GB/s) /
-  `NPU Mid` (128-bit LPDDR5X @ 8.4 GT/s, 134.4 GB/s — Keyhole
-  recommended target, BF16/FP8-capable) / `NPU High` (128-bit LPDDR5X
-  @ 11.2 GT/s, high-bin) / `Custom` (roll your own). All presets assume
-  70% bandwidth efficiency.
-- **Custom mode:** bus width, memory type, data rate, bandwidth
-  efficiency, peak BF16 TOPS, peak FP8 TOPS, compute efficiency, DRAM
-  capacity, TDP
+### Hardware
 
-**Vision workload:**
-- Pipeline: SAM 3 baseline, EfficientSAM-Small FP8, Hybrid V2 variants,
-  TRT FP8 shipping stack, YOLO-only
-- Resolution: 720p / 1080p / 4K
-- Concurrent streams: 1..16 (YOLO batching applied automatically)
+| Tier preset | Memory | Effective BW | INT8 / FP path |
+|---|---|---:|---|
+| **i.MX 95** (ground truth) | 32-bit LPDDR5 @ 6.4 GT/s | 25.6 GB/s × 0.70 | INT8-only (Neutron) |
+| Low-LP5-64bit | 64-bit LPDDR5 @ 6.4 GT/s | 51.2 GB/s × 0.70 | INT8-only |
+| Low-LP5X | 64-bit LPDDR5X @ 8.4 GT/s | 67.2 GB/s × 0.70 | INT8-only |
+| NPU Mid | 128-bit LPDDR5X @ 8.4 GT/s | 134.4 GB/s × 0.70 | INT8-only |
+| **NPU High** *(default)* | 128-bit LPDDR5X @ 8.4 GT/s | 134.4 GB/s × 0.70 | FP-capable (FP16 / FP8 / BF16) |
+| RTX 5090 | GDDR7 @ 28 GT/s | reference cell | full FP + INT8 + INT4 |
+| Custom | configurable | computed | configurable |
 
-**LLM co-exist:**
-- Toggle on/off
-- Qwen3-30B-A3B quantization: Q4_K_M / Q5_K_M / Q8_0
-- Queries per minute (slider)
-- Answer length: short (~200 tok) or RAG (8K prompt + 2K response)
+Mid + High share memory bandwidth (Class 3b `LP5X-8.4-128b`); High
+differentiates on **compute** (1.375× TOPS), **capacity** (1.33× DRAM),
+and **TDP** (1.6×), NOT memory BW. FP recipes pin to High. Default tier
+is High to keep the default LLM (fp16 dense) compatible on first load.
+
+**Optional memory upgrade overlays** on Mid + High: LPDDR5T @ 11.2 GT/s
+(179 GB/s), LPDDR6 @ 12 GT/s (192 GB/s), LPDDR6 @ 14 GT/s (224 GB/s).
+BW-projected — flips the source badge to 🟡 same-class.
+
+**Custom mode:** bus width, memory type, data rate, BW efficiency, peak
+BF16/FP8 TOPS, compute efficiency, DRAM capacity, TDP.
+
+**NPU share** (sidebar): 100% / 75% / 50% / 25%. Models SoC bus contention
+from display / camera / audio paths. Default 75% for NPU tiers, 100% for
+5090 (dedicated VRAM). Scales BW-bound paths only.
+
+### Vision workload
+
+- **Pipelines (23 entries):** SAM 3 baseline, EfficientSAM-Small, Hybrid V2
+  variants, TRT FP8 shipping stack, YOLO-only, ResNet-50 vendor-compare
+  pipelines (INT8 + INT4), CLIP, ViT alternatives, EfficientSAM3,
+  YOLOE-26 — organized into 5 narrative tracks via the sidebar
+  pipeline picker.
+- **Resolution:** 720p / 1080p / 4K.
+- **Concurrent streams:** 1..16 (YOLO batching applied automatically).
+- **Compiler quality:** slider for projected pipelines (non-applicable
+  when measured-silicon anchor fires).
+
+### LLM workload
+
+- **17-model catalog** with role icons in the dropdown:
+  🚀 production (1) · 🔬 fine-tune (7) · 📚 stock base (6) · ⚙️ perf
+  reference (3). Default: 🚀 **Skippy 7B v4** (Qwen2.5-7B FT, current
+  production). Models incompatible with the selected NPU tier sink to
+  the bottom of the dropdown with a 🔴 prefix.
+- **Workload pattern:** plain_chat (reference) · long_form_reasoning ·
+  tool_use · rag_long_context · cold_start. Scales decode tok/s + TTFT
+  by reference multipliers (26× spread across categories). Disabled
+  when dtype-mismatch is in play (model won't actually run).
+- **Precision (quant):** Q4_K_M / Q5_K_M / Q8_0 / FP8 / FP16 — picker
+  shape depends on the model's `compute_dtype` and the NPU tier's
+  capability levels.
+- **Queries per minute** (slider) + **answer length** (short ~200 tok or
+  RAG 8K prompt + 2K response).
 
 ## What you see
 
-- **Vision FPS per stream** (under concurrency + LLM duty cycle)
-- **Total system FPS** across all streams
-- **Memory fit** — does the current config spill your DRAM?
-- **LLM decode tok/s** + TTFT at the chosen quant
-- **Pipeline timing breakdown** — how much is YOLO vs CLIP
-- **Per-tier comparison** — same workload on Low/Mid/High
-- **Stream scaling curve** — per-stream FPS & total FPS as N changes
-- **Duty-cycle curve** — vision FPS vs LLM queries/min, two answer
-  styles
+The app uses a tab strip below the headline metric row. Tab order adapts
+to which workloads are enabled:
+
+| Tab | Always | When |
+|---|---|---|
+| Overview | ✓ | metric tiles + headline cards |
+| Accuracy | | LLM on (Finding 4 cross-model + per-category) |
+| Precision | | LLM on (precision-axis ladder + capability levels) |
+| Performance | | LLM on (cross-tier comparison) |
+| Stream scaling | | Vision on (per-stream / total FPS curves) |
+| Duty-cycle | | Vision + LLM on (FPS vs queries/min) |
+| **KPIs** | ✓ | CSV exports + per-pipeline KPI spreadsheet preview |
+| Detail | ✓ | raw projection dicts, debug surface |
+
+Headline metrics: Vision FPS per stream · Total system FPS · LLM decode
+tok/s · TTFT · End-to-end latency · Memory fit. Each tile carries a
+source badge (🟢 measured / 🟢 measured_anchor / 🟡 same-class /
+🟠 cross-class projected) so users can see data pedigree at a glance.
 
 ## Where the numbers come from
 
-Every baseline constant traces back to a specific bake-off script in the
-Keyhole project. See
-[`keyhole/REPRODUCE.md`](https://github.com/kylefoxaustin/keyhole/blob/main/REPRODUCE.md)
-for how to regenerate them on your own RTX 5090.
+The sizer composes **three layers**, in priority order:
+
+1. **Measured-silicon anchor overlay** (🟢) — when a real-silicon
+   measurement exists for the selected (tier, precision, model) cell, it
+   hot-swaps the BW-projected baseline. NPU silicon measurements live in
+   `.streamlit/secrets.toml` (gitignored); see
+   [`.streamlit/secrets.toml.example`](.streamlit/secrets.toml.example)
+   for the schema. RTX 5090 measurements are in-tree (public bake-off
+   data).
+2. **Phase 1 measured override** (🟢) — `Hardware.measured_edge_ms` maps
+   `(pipeline, resolution) → ms` for vision; `Hardware.measured_llm` maps
+   `(model, quant) → {decode_tok_s, prefill_tok_s}` for LLMs. When a
+   tier has the cell, `project_*()` returns measured ms verbatim.
+3. **Phase 2 projection** — `max(bw_floor, compute_floor) + overhead` with
+   tier-specific calibration constants. Source badge `cross_class` 🟠
+   when no anchor in this tier_family; `same_class_anchor` 🟡 when
+   BW-scaled within family from a measured anchor.
+
+Bake-off data origins:
 
 | Baseline | Source |
 |----------|--------|
-| YOLO-seg FP8 edge ms @ resolution | `bakeoff_trt_yolo.py` |
-| CLIP FP8 edge ms | `bakeoff_trt_clip.py` |
-| YOLO batching curve (B=1..16) | `bakeoff_concurrency.py` |
-| SAM 3 / EfficientSAM / MobileSAM edge ms | `bakeoff_sam_variants.py`, `bakeoff_fp8.py` |
-| LLM NPU tier actuals (TTFT, decode) | Vendor benchmarks, folded into `bakeoff_llm.py` |
-| Qwen3-30B-A3B GGUF sizes + bytes/param | `bakeoff_llm.py` |
+| YOLO-seg FP8 edge ms @ resolution | `keyhole/bakeoff_trt_yolo.py` |
+| CLIP FP8 edge ms | `keyhole/bakeoff_trt_clip.py` |
+| YOLO batching curve (B=1..16) | `keyhole/bakeoff_concurrency.py` |
+| ResNet-50 INT8/INT4 ncu DRAM | `keyhole/scripts/export_ncu_for_sizer.py` |
+| SAM 3 / EfficientSAM / MobileSAM edge ms | `keyhole/bakeoff_sam_variants.py`, `bakeoff_fp8.py` |
+| LLM 5090 perf cells (TTFT, decode) | `keyhole/bakeoff_llm.py` |
+| Qwen3-30B-A3B + Qwen2.5 dense GGUF sizes | `keyhole/bakeoff_llm.py` |
+| LLM accuracy (Finding 4 per-category) | `personal-ai-framework` eval harness |
+| NPU silicon anchors (Mid / High / Low-LP5X) | `.streamlit/secrets.toml` (gitignored) |
 
-Vision pipelines are **bandwidth-bound** on the NPUs we're modeling, so
-edge ms scales inversely with effective bandwidth. LLM decode is
-bandwidth-bound on active-params × bytes-per-param (MoE wins — only 3B
-of the 30B total are loaded per token).
+Vision pipelines on NPUs are **bandwidth-bound** in the common case, so
+edge ms scales inversely with effective bandwidth on un-anchored cells.
+LLM decode is bandwidth-bound on `active_params × bytes_per_param` (MoE
+wins — Qwen3-30B-A3B Q4_K_M streams only ~1.65 GB per token despite the
+30B total params). LLM prefill (TTFT) is compute-bound — bigger TOPS
+helps TTFT, more BW does not.
+
+## Platform-budget CSV export
+
+The **KPIs tab** carries two CSV download buttons + two KPI-spreadsheet
+preview buttons:
+
+- **💾 This config** — single platform-budget row for the current
+  (HW × pipeline × resolution × streams × LLM) configuration.
+- **📦 All configs** — full matrix (~585 rows) of every preset HW tier ×
+  pipeline × resolution × stream count × LLM (quant × workload ×
+  answer_kind). Custom HW is skipped — use "This config" for custom.
+- **📊 KPI spreadsheet (all models / this model)** — per-pipeline KPI
+  preview table + ⬇ Download XLSX. Vision-only (per-pipeline rows make
+  no sense LLM-only).
+
+CLI alternatives in `scripts/`:
+- `export_platform_budget.py` — one row for any specific config.
+- `export_platform_matrix.py` — full matrix to `data/platform_budget_matrix.csv`.
+
+**Schema:**
+- `ss_*` columns (duty cycle, DDR GB/s, TOPS, MB resident, watts,
+  throughput) are **additive** across rows at the platform level.
+- `peak_*` columns (per-frame ms, peak GB/s, peak TOPS) are NOT
+  additive — per-workload ceilings.
+- `hw_*` columns duplicated per row so each row is self-contained.
+- `sizer_commit_sha` + `export_timestamp_iso` trace a row back to the
+  sizer revision that emitted it.
+
+**Caveats baked into the CSV header `#` comments** (read before using
+for procurement):
+- Power is `TDP × duty-cycle` approximation, NOT measured per-workload.
+- NPU Low/Mid/High vision numbers without anchors are BW-scaled from
+  RTX 5090 measurements, NOT measured on actual NPU silicon.
+
+**Consume in pandas:** `pd.read_csv(path, comment='#')`.
+
+## Anchor-secrets system (private silicon measurements)
+
+Real NPU silicon measurements for the LLM + CNN cells in the spec live
+in `.streamlit/secrets.toml` (gitignored). The loader at
+[`sizer/npu_anchors.py`](sizer/npu_anchors.py) reads them at runtime and
+hot-swaps them into projection results.
+
+**Discipline rule:** measurement values are NEVER committed, logged, or
+quoted in source / bus traffic / commit messages — refer by **KEY**
+(`npu_llm_anchors.mid_int8.qwen3_30b_a3b_moe.tokps`) not VALUE. Treat
+like credentials.
+
+For your own deployment, copy `.streamlit/secrets.toml.example` to
+`.streamlit/secrets.toml`, fill in your measurements, and the
+appropriate cells will flip from 🟠 projected to 🟢 measured. Cells
+without an anchor entry fall through to the projection path
+transparently.
+
+Coverage at v1.0.0: **9/9 LLM + 6/6 CNN spec cells** reachable from the
+headline tiles.
 
 ## Limitations
 
-- **Synthetic projection, not simulation.** If you push the custom
-  sliders way out of range (e.g. 2048-bit bus @ 100 GT/s), the
-  projection still linearly scales — the math doesn't know about
-  cache hierarchies, tiling, or NoC topology.
+- **Synthetic projection, not simulation** outside anchored cells. If
+  you push custom sliders way out of range (e.g. 2048-bit bus @ 100 GT/s),
+  the projection still linearly scales — the math doesn't model cache
+  hierarchies, tiling, or NoC topology.
 - **Pipeline list is fixed** to what Keyhole measured. Adding a new
-  pipeline requires editing `sizer/npu_model.py::PIPELINES`.
-- **LLM model is fixed** to Qwen3-30B-A3B. Other models would need
-  their own per-quant bytes-per-param + active-param counts.
+  pipeline requires three registrations (`PIPELINES` + `PIPELINE_TRACKS`
+  + `PIPELINE_STAGES`); startup assertion fires if any are missing.
+- **LLM catalog is fixed** to the 17 entries in `sizer/llm_models.py`.
+  Adding a new model requires a `LLMModel` entry + (optionally) a
+  `measurement_alias` pointing perf-anchor lookup at an existing entry,
+  + (optionally) a `.streamlit/secrets.toml` cell for the
+  measured-silicon overlay.
+- **NPU silicon vision anchors are sparse outside the i.MX 95 + Low-LP5X
+  measured cells.** Mid / High vision cells fall through to BW-scaling
+  from 5090 unless you populate `.streamlit/secrets.toml`. LLM cells
+  have broader coverage.
 
 ## Related projects
 
+- **[personal-ai-assistant-sizer](https://github.com/kylefoxaustin/personal-ai-assistant-sizer)** —
+  LLM-only sizing for the Skippy assistant deployment. Same anchor-secrets
+  mechanism, same tab structure, same source taxonomy. Pick this one if
+  you don't care about the vision workload.
 - **[Keyhole](https://github.com/kylefoxaustin/keyhole)** — the edge-AI
-  video intelligence project that produced all the bake-off data this
-  sandbox wraps. 49-slide deck of results + the raw measurement
-  scripts.
+  video intelligence project that produced the bake-off data this sandbox
+  wraps. 63-slide deck of results + the raw measurement scripts.
+- **[personal-ai-framework](https://github.com/kylefoxaustin/personal-ai-framework)** —
+  the Skippy fine-tuning / evaluation framework. Source of the Finding 4
+  per-category accuracy data surfaced in the Accuracy tab.
 - **[keyhole-UI](https://github.com/kylefoxaustin/keyhole-UI)** — a
-  Next.js app that demos the Keyhole pipeline on real videos. Upload a
-  clip, see object detection + CLIP concept tags + semantic search.
-  Different purpose than this sizer: a user-facing product demo vs. a
-  hardware-sizing tool.
+  Next.js app that demos the Keyhole pipeline on real videos. Different
+  purpose: user-facing product demo vs. this hardware-sizing tool.
+
+## Version history
+
+| Version | Date | Highlights |
+|---|---|---|
+| **v1.0.0** | 2026-05-18 | First tagged release. Recovery point ahead of cross-repo engine-extraction work. Captures: 17-entry LLM catalog with role icons, 23-pipeline coverage (incl. 4-bit-weight CNN variants), anchor-secrets system (9/9 LLM + 6/6 CNN reachable), 8-tab UX mirroring PAI sizer (Overview · Accuracy · Precision · Performance · Stream · Duty · KPIs · Detail), 4-state source taxonomy + NPU_share third factor + Phase 2 compute-clamp, 5-state workload-pattern multipliers, capability-levels taxonomy, measurement_alias mechanism, category_deltas dict-of-dicts schema. |
 
 ## License
 
