@@ -18,6 +18,7 @@ from sizer.npu_model import (
     theoretical_bandwidth, vision_fps_under_llm_load,
     workload_distribution_on_hw,
     workload_multiplier,
+    capability_level,
 )
 from sizer.platform_budget import (
     vision_workload_row, llm_workload_row, rows_to_csv_str,
@@ -38,7 +39,7 @@ from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
     QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
 )
-from sizer.npu_anchors import load_llm_anchor, load_cnn_anchor
+from ratchet.anchors import load_llm_anchor, load_cnn_anchor
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -576,8 +577,8 @@ with st.sidebar:
             return "BASE", "📚"
 
         def _model_compatible(k: str) -> bool:
-            return hw.capability_level(
-                getattr(LLM_MODELS[k], "compute_dtype", "int8")
+            return capability_level(
+                hw, getattr(LLM_MODELS[k], "compute_dtype", "int8")
             ) != "unsupported"
 
         _ROLE_PRIORITY = {"PROD": 0, "FT": 1, "BASE": 2, "PERF": 3}
@@ -649,7 +650,7 @@ with st.sidebar:
         # appearing interactive while having no effect on the rendered
         # output. Per Kyle 2026-05-12.
         _sidebar_dtype_supported = (
-            hw.capability_level(getattr(_model, "compute_dtype", "int8"))
+            capability_level(hw, getattr(_model, "compute_dtype", "int8"))
             != "unsupported"
         )
         if _model.pass_rate is None:
@@ -859,9 +860,6 @@ def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share, workload="
     # Skip if dtype-mismatch / won't-fit already fired
     if r.get("source") in ("wont_fit", "dtype_mismatch"):
         return r
-    # Anchors measured at stock LPDDR5X 8.4 GT/s — skip memory upgrades.
-    if abs(getattr(hw, "mem_data_rate_gtps", 0.0) - 8.4) > 0.05:
-        return r
     spec_model = _ANCHOR_LLM_MODEL_KEY_MAP.get(model_key)
     if spec_model is None:
         return r
@@ -883,8 +881,15 @@ def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share, workload="
         ttft_mult = mult.get("ttft_p50_mult", 1.0)
     except Exception:
         decode_mult, ttft_mult = 1.0, 1.0
+    # Memory-upgrade clones BW-scale the measured anchor's decode (decode is
+    # BW-bound); TTFT held at stock (prefill is compute-bound). Stock tiers keep
+    # ratio 1.0. Mirrors ratchet v0.2.3 / ADR 011 Amendment 5 — prior code
+    # skipped the overlay on memory upgrades, dropping the anchor to cross-class.
+    bw_ratio = 1.0
+    if getattr(hw, "bw_projected", False) and hw.stock_mem_bandwidth_gbs:
+        bw_ratio = hw.mem_bandwidth_gbs / hw.stock_mem_bandwidth_gbs
     r2 = dict(r)
-    r2["decode_tok_s"] = anchor.tokps * decode_mult
+    r2["decode_tok_s"] = anchor.tokps * decode_mult * bw_ratio
     # Preserve TTFT / prefill / regime from projection — anchor may not
     # carry those. When anchor has a prefill rate, derive ttft @ 1K and
     # scale by the workload's TTFT multiplier.
@@ -958,7 +963,7 @@ _llm_dtype_supported = True
 if llm_enabled:
     _model = LLM_MODELS[llm_model_key]
     _required_dtype = getattr(_model, "compute_dtype", "int8")
-    _capability = hw.capability_level(_required_dtype)
+    _capability = capability_level(hw, _required_dtype)
     if _capability == "unsupported":
         _llm_dtype_supported = False
 
@@ -1348,7 +1353,7 @@ if llm_enabled:
 # `tensor_native` (the common cases aren't hidden; the contrast shows).
 # Driven by the vision pipeline's precision; only meaningful with vision on.
 if vision_enabled and pipeline.precision and hw.capability_levels:
-    _level = hw.capability_level(pipeline.precision)
+    _level = capability_level(hw, pipeline.precision)
     st.caption(
         f"**{pipeline.precision.upper()} kernel path on {hw.name}:** "
         f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
@@ -2214,7 +2219,7 @@ if llm_enabled:
         # the W8A8 row is annotated as ecosystem-blocked.
         _w8a8_blocked_on_tier = (
             hw.capability_levels is not None
-            and hw.capability_level("int8") == "tensor_compat"
+            and capability_level(hw, "int8") == "tensor_compat"
         )
         st.markdown(
             f"**Quality cost of the quantization recipe** on Qwen2.5-14B base "

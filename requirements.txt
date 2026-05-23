@@ -1,4 +1,8 @@
 # keyhole-sizer — interactive NPU sizing sandbox for the Keyhole bake-off findings
+# (retrofitted onto ratchet v0.2.4 — phase 3 of the engine consolidation)
+
+# Shared SoC sizing engine — canonical tiers, anchor loader, capability tables.
+ratchet>=0.2.4,<0.3.0
 
 streamlit>=1.40.0
 pandas>=2.2.0

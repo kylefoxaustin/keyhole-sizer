@@ -9,524 +9,104 @@ Keyhole deck (see `scripts/bakeoff_*.py` in the parent project and
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
+
+from ratchet import (
+    Hardware,
+    IMX95_MEASURED, NPU_LOW_LP5_64BIT, NPU_LOW_LP5X, NPU_MID, NPU_HIGH,
+    RTX_5090_REFERENCE,
+    hw_with_memory, MEMORY_UPGRADE_OPTIONS,
+    hw_supports_dtype, hw_peak_tops_for_dtype,
+)
 
 from .precision import CapabilityLevel
 
 
-# ───────────────────────── Hardware tiers ─────────────────────────
+# ───────────────────────── Hardware tiers (ratchet) ─────────────────────────
+# Hardware, the tier instances, hw_with_memory, MEMORY_UPGRADE_OPTIONS, and the
+# capability tables are now owned by ratchet (the shared SoC sizing engine).
+# keyhole composes its VISIBLE video ladder from ratchet's canonical registry;
+# surface-specific measurements (LLM anchors + vision edge-ms) are re-attached
+# to these shared instances at import by sizer/measured.py
+# (attach_keyhole_anchors_to_ratchet_tiers).
 
-@dataclass
-class Hardware:
-    """Generic compute-and-bandwidth spec for any NPU or GPU."""
-    name: str
-    peak_tops_bf16: float        # TOPS at BF16 tensor
-    peak_tops_int8: float        # TOPS at INT8 tensor
-    peak_tops_fp8: float         # TOPS at FP8 tensor (Blackwell+ class)
-    mem_bandwidth_gbs: float      # raw theoretical bandwidth (GB/s)
-    mem_capacity_gb: float        # total DRAM capacity
-    mem_bus_width_bits: int
-    mem_type: str                 # "LPDDR4" / "LPDDR5" / "LPDDR5X" / "GDDR7" / ...
-    mem_data_rate_gtps: float
+TIERS = {hw.name: hw for hw in (
+    IMX95_MEASURED,
+    NPU_LOW_LP5_64BIT,
+    NPU_LOW_LP5X,
+    NPU_MID,
+    NPU_HIGH,
+    RTX_5090_REFERENCE,
+)}
 
-    compute_efficiency: float = 0.65    # fraction of peak we see on real models
-    bandwidth_efficiency: float = 0.70   # fraction of peak BW realized
-
-    tdp_watts: float = 0.0
-
-    # Optional: empirical LLM decode tok/s at Q4_K_M (3B active MoE) — used
-    # if set, otherwise computed from bandwidth ceiling × measured efficiency.
-    # NOTE: these flat fields are the LEGACY "Skippy MoE Q4 only" path,
-    # kept for back-compat (hw_with_memory BW-scales them, several read
-    # sites). For richer per-(model, quant) anchors (e.g. Qwen 2.5 7B Q4
-    # on RTX 5090 = 183.9 tok/s), see `measured_llm` dict below.
-    measured_llm_q4_decode_tok_s: float | None = None
-    measured_llm_ttft_1k_sec: float | None = None
-
-    # Per-(model_key, quant) measured LLM anchor dict — added 2026-05-01
-    # for cross-app schema parity with PAI sizer's e69237b. Nested shape:
-    #     hw.measured_llm[model_key][quant] = {"decode_tok_s": ..., "prefill_tok_s": ...}
-    # Resolution order in project_llm: (1) measured_llm[model_key][quant]
-    # if populated → 🟢 measured; (2) measured_llm_q4_decode_tok_s legacy
-    # path if model is the Skippy-MoE-Q4 implicit reference → 🟢
-    # measured_anchor; (3) cross-class fallback. Today populated only on
-    # RTX_5090_REFERENCE with the 5 Qwen 2.5 dense quant cells from
-    # backend's 20:08 weekend bake-off + the Skippy MoE Q4 5090
-    # reference (~250 tok/s). NPU tiers (Mid, High, Low-LP5-64bit) keep
-    # their existing flat-field anchors for now — migrating them to
-    # this dict is a separate cleanup pass.
-    measured_llm: dict[str, dict[str, dict[str, float]]] | None = None
-
-    # True when this Hardware was synthesized via `hw_with_memory()` (i.e.
-    # represents a memory-only what-if upgrade, not stock silicon). UI
-    # checks this to mark BW-projected LLM tok/s as "(BW-proj)" so users
-    # don't mistake a what-if projection for a vendor-measured number.
-    bw_projected: bool = False
-
-    # Optional: real-silicon edge ms per frame, keyed by (pipeline_key → resolution → ms).
-    # When populated, project_vision returns this value directly for matching
-    # (pipeline, resolution) pairs — bypassing both the BW-bound scale and the
-    # compute-bound clamp. Mirrors the measured_llm_* pattern for LLM decode.
-    # Use for tiers where we have production measurements on real silicon
-    # (e.g. NPU i.MX 95 Neutron).
-    measured_edge_ms: dict[str, dict[str, float]] | None = None
-
-    # Optional: per-dtype capability taxonomy. When populated, describes
-    # what kernel path the silicon is CAPABLE of taking for each dtype —
-    # `tensor_native` / `tensor_compat` / `cuda_core` / `unsupported`.
-    # See sizer/precision.py for the taxonomy. Consumed by docs/UI to
-    # explain why measured silicon either runs a dtype successfully or
-    # errors out (e.g. 5090 INT8 = tensor_compat via sm80 IMMA binary
-    # compat; vLLM CUTLASS fresh-compile fails because SM120 lacks
-    # native INT8 tensor-core instructions). Build-time fallbacks (TRT
-    # FP8→FP16 without QDQ) are NOT captured here — that's per-engine.
-    capability_levels: dict[str, CapabilityLevel] | None = None
-
-    # Phase 2 compute-clamp calibration (per [backend] 2026-04-29 design
-    # doc). Used by project_vision()'s two-floor model:
-    #     edge_ms = max(bw_floor, compute_floor) + compute_overhead_ms
-    # where compute_floor = tc_ops_blackwell / (effective_tops × compute_util_factor).
-    # The util_factor calibration absorbs the Blackwell-HMMA → NPU-effective
-    # conversion at the i.MX 95 anchor (12 GOPs / 2 INT8 TOPS / 0.19 = 31.6
-    # ms ≈ measured 32 ms). Constants per tier-class:
-    #   Neutron-class (i.MX 95, Low-LP5-*): 0.19
-    #   Mid:                                0.45
-    #   High:                               0.50
-    #   5090 reference:                     0.85
-    # Default 1.0 means "compute clamp disabled" — preserves prior Phase 1
-    # behavior on tiers that haven't been calibrated yet.
-    compute_util_factor: float = 1.0
-    compute_overhead_ms: float = 1.0
-
-    # Tier family — groups Hardware by silicon platform so the projection-
-    # source badge can distinguish "same-class projection from a measured
-    # anchor in this family" (🟡) from "cross-class extrapolation with no
-    # anchor in this family" (🔴). Memory-upgrade variants of a base tier
-    # inherit the family (Mid + LPDDR6-14 stays in 'mid_high' since it's
-    # the same compute platform with a memory swap). Per [backend] 12:42
-    # spec; populated explicitly per tier.
-    tier_family: str = "unknown"
-
-    # LLM Phase 2 calibration constants (separate from vision's
-    # compute_util_factor per [backend] 2026-04-29 13:17 + 13:31; reuse
-    # of vision's constants for LLM was a latent bug PAI sizer hit at
-    # 33b0dfc — fixed in 0a5e94a). LLM prefill realizes ~0.10 of peak
-    # TOPS on Mid (calibrated from Skippy MoE Q4 1K-prompt anchor: 351
-    # ms TTFT = 6.5 GFLOPs/tok × 1024 / (200 BF16 TOPS × 0.10) ≈ 333 ms,
-    # within 5% of measured). Vision's util_factor 0.45 would under-
-    # predict LLM TTFT by ~4.5×. Decode realization defaults to 1.0
-    # (pure BW ceiling) — the Mid + MoE 0.66 realization is captured in
-    # the anchor's 37.85 tok/s itself; applying 0.66 globally would
-    # silently extrapolate MoE-class realization to dense-14B (model-
-    # class extrapolation, strict 🔴 territory).
-    llm_prefill_util_factor: float = 0.10
-    llm_decode_bw_realization: float = 1.0
-
-    # NPU_share default per [docs] 2026-04-29 14:38: the third factor in
-    # the BW-decomposition formula `effective_NPU_BW = peak_DRAM_BW ×
-    # NPU_share × kernel_util_factor`. 5090 has dedicated VRAM (no
-    # shared bus contention) → defaults 1.0. NPU tiers share the SoC
-    # memory bus with display / camera / audio paths → defaults 0.75
-    # for the typical-system case. Users can override via the sidebar
-    # selector to model idle SoC (1.0), moderate contention (0.5), or
-    # heavy contention (0.25). Affects BW-bound regimes only — compute-
-    # bound paths (LLM TTFT, vision compute_floor) are unaffected since
-    # TOPS doesn't share the memory bus.
-    npu_share_default: float = 0.75
-
-    @property
-    def effective_bandwidth_gbs(self) -> float:
-        return self.mem_bandwidth_gbs * self.bandwidth_efficiency
-
-    @property
-    def effective_tops_bf16(self) -> float:
-        return self.peak_tops_bf16 * self.compute_efficiency
-
-    def effective_tops(self, dtype: str) -> float:
-        """Dtype-aware effective TOPS.
-
-        `dtype` is one of 'int8', 'fp8', 'bf16', 'fp16'. FP16 falls back to
-        BF16 TOPS per the common-silicon convention that silicon supporting
-        one usually supports the other; the sizer doesn't track a separate
-        peak_tops_fp16.
-        """
-        peak = {
-            "int8": self.peak_tops_int8,
-            "fp8":  self.peak_tops_fp8,
-            "bf16": self.peak_tops_bf16,
-            "fp16": self.peak_tops_bf16,
-        }.get(dtype.lower(), self.peak_tops_bf16)
-        return peak * self.compute_efficiency
-
-    def capability_level(self, dtype: str) -> CapabilityLevel:
-        """Per-dtype kernel-path capability for this silicon.
-
-        When `capability_levels` is explicitly populated, returns the
-        declared level. Otherwise falls back to a peak-TOPS heuristic:
-        non-zero peak_tops for the dtype → 'tensor_native'; zero →
-        'unsupported'. The heuristic keeps old tier definitions working
-        without forcing every Hardware instance to declare levels.
-        """
-        dt = dtype.lower()
-        if self.capability_levels is not None and dt in self.capability_levels:
-            return self.capability_levels[dt]
-        peak = {
-            "int8": self.peak_tops_int8,
-            "fp8":  self.peak_tops_fp8,
-            "bf16": self.peak_tops_bf16,
-            "fp16": self.peak_tops_bf16,
-        }.get(dt, 0.0)
-        return "tensor_native" if peak > 0 else "unsupported"
-
-
-# Consumer Blackwell SM120 capability map — shared across RTX_5090 and
-# RTX_5090_REFERENCE since they're the same silicon. INT8 is
-# `tensor_compat` (not `tensor_native`) because SM120 dropped the new
-# INT8 tensor-core instructions that SM100 had, but sm80 IMMA kernels
-# (pre-compiled by TRT 10.16) still run correctly via CUDA binary
-# compatibility. ncu probe 2026-04-24 confirmed non-zero
-# sm__inst_executed_pipe_tensor.sum for the INT8 engine + kernel names
-# like 'sm80_xmma_fprop_implicit_gemm_i8f32_..._tensor16x8x32_*'. FP8 is
-# `tensor_native` because consumer Blackwell inherits FP8 tensor cores
-# from B200 — our TRT-10.16 FP8→FP16 fallback is a build-side QDQ issue,
-# not a hardware limitation.
-_SM120_BLACKWELL_CAPABILITY: dict[str, CapabilityLevel] = {
-    "int8": "tensor_compat",
-    "fp8":  "tensor_native",
-    "bf16": "tensor_native",
-    "fp16": "tensor_native",
-}
-
-# Edge-NPU Neutron-class (INT8-only silicon) capability map. Any
-# floating-point op either fails to load or falls through to the
-# host CPU at catastrophic slowdown — treated as `unsupported` here
-# since the sizer's BW/compute projection doesn't model host fallback.
-_NEUTRON_INT8_ONLY_CAPABILITY: dict[str, CapabilityLevel] = {
-    "int8": "tensor_native",
-    "fp8":  "unsupported",
-    "bf16": "unsupported",
-    "fp16": "unsupported",
-}
-
-# Full-dtype edge NPU (LP5X + Mid + High tiers all share this shape).
-_NPU_FULL_DTYPE_CAPABILITY: dict[str, CapabilityLevel] = {
-    "int8": "tensor_native",
-    "fp8":  "tensor_native",
-    "bf16": "tensor_native",
-    "fp16": "tensor_native",
-}
-
-
-# Reference: RTX 5090 — all Keyhole 5090 measurements happened here.
-RTX_5090 = Hardware(
-    name="NVIDIA RTX 5090",
-    peak_tops_bf16=209.0, peak_tops_int8=419.0, peak_tops_fp8=419.0,
-    mem_bandwidth_gbs=1792.0, mem_capacity_gb=32.0,
-    mem_bus_width_bits=512, mem_type="GDDR7", mem_data_rate_gtps=28.0,
-    compute_efficiency=0.70, bandwidth_efficiency=0.85,
-    tdp_watts=575.0,
-    capability_levels=_SM120_BLACKWELL_CAPABILITY,
-    compute_util_factor=0.85, tier_family="GDDR7-28",
-    npu_share_default=1.0,  # Dedicated VRAM, no shared SoC contention
-)
-
-# Edge NPU tiers — vendor benchmarks supplied for the LLM bake-off
-# (Qwen3-30B-A3B Q4_K_M, 1K prompt, short response). All four tiers use a
-# uniform bandwidth_efficiency=0.70 so cross-tier comparisons only reflect
-# hardware differences, not utilization assumptions.
-# Entry-tier NPU class (NXP i.MX 95 Neutron N3-1024S class): dense INT8
-# only, 2 TOPS. No native floating-point tensor ops — BF16/FP8 pipelines
-# either fail to load or fall through to CPU/GPU at massive slowdown.
-# TOPS is currently metadata-only in project_vision (edge ms is
-# bandwidth-bound), but tier cards match reality rather than overstate.
-#
-# 64-bit memory variant: 6.4 GT/s × 64b = 51.2 GB/s theoretical, 35.84 eff.
-# (The 32-bit variant of this same silicon class — 25.6 GB/s — is exposed
-# as the "NPU i.MX 95 (ground truth)" tier instead, since that's where
-# Kyle's real production measurement lives. Per 2026-04-29 redirect: a
-# synthetic "NPU Low-LP5-32bit" tier added confusion next to the measured
-# i.MX 95 entry with identical specs, so it was collapsed away.)
-NPU_LOW_LP5_64BIT = Hardware(
-    name="NPU Low-LP5-64bit",
-    peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
-    mem_bandwidth_gbs=51.2, mem_capacity_gb=16.0,
-    mem_bus_width_bits=64, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
-    tdp_watts=10.0,
-    measured_llm_q4_decode_tok_s=29.27,
-    measured_llm_ttft_1k_sec=1.67,
-    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
-    compute_util_factor=0.19, tier_family="Neutron-64-LP5",
-    # Per-cell anchor (matches PAI sizer e69237b shape). Vendor anchor —
-    # NOT Skippy-specific per [backend] 12:38 caveat. Filed under
-    # skippy_finetune since the legacy flat-field path treats it as the
-    # MoE-Q4 anchor; future anchor refinement should add a dedicated
-    # vendor key when we have model-specific Low-LP5-64bit measurements.
-    # 1024 / 1.67 = 613.2 tok/s prefill rate.
-    measured_llm={
-        "skippy_finetune": {
-            "Q4_K_M": {"decode_tok_s": 29.27, "prefill_tok_s": 613.2},
-        },
-    },
-)
-
-# LP5X variant at the same 64-bit bus as the LP4 entry: 2.1× theoretical
-# bandwidth (67.2 vs 32.0 GB/s) with no change to the compute silicon or
-# memory capacity. No vendor LLM benchmark for this variant — sizer projects
-# decode tok/s from bandwidth ratio against the LP4 measurement.
-NPU_LOW_LP5X = Hardware(
-    name="NPU Low-LP5X",
-    peak_tops_bf16=50.0, peak_tops_int8=100.0, peak_tops_fp8=100.0,
-    mem_bandwidth_gbs=67.2, mem_capacity_gb=16.0,
-    mem_bus_width_bits=64, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
-    tdp_watts=10.0,
-    capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
-    compute_util_factor=0.19, tier_family="LP5X-8.4-64b",
-    # First measured anchor in the 100-TOPS edge-NPU class (Kyle 2026-05-01).
-    # Vanilla yolov8n basic detection INT8 = 500 inferences/sec = 2.0 ms.
-    # Closes the largest measurement gap from yesterday's bake-off
-    # discussion ([backend] 13:31 / Kyle's "one anchor per silicon-class
-    # first" framing): previously every Low/Mid/High projection was
-    # cross-class extrapolation from i.MX 95 (2 TOPS) or 5090 (419 TOPS).
-    # This anchor validates compute_util_factor=0.19 + 1 ms overhead at
-    # this class within ~13% (prior projection was 461 FPS with
-    # vram_mb=55; measured 500 FPS implies ~47 MB DRAM streaming).
-    measured_edge_ms={
-        "yolov8n_trt_int8_coco128": {"1080p": 2.0},
-        # ResNet-50v1 INT8 224×224: 1125 inf/s = 0.889 ms (Kyle 2026-05-01).
-        # Constant-time at 224×224 input, so anchor applies at all three
-        # camera-resolution slots.
-        "resnet50v1_int8_224": {"720p": 0.889, "1080p": 0.889, "4K": 0.889},
-    },
-)
-
-NPU_MID = Hardware(
-    name="NPU Mid",
-    # NPU Mid is INT8-only silicon — no native floating-point tensor ops.
-    # Per [docs] 2026-04-29 14:58 correction: the actual measured chip is
-    # 200 TOPS INT8 only, NOT BF16/FP8/FP16 multi-precision as previously
-    # labeled. Existing Mid LLM anchor (37.85 tok/s / 351 ms TTFT) was
-    # measured on INT8/INT4 silicon, so the locked calibration constants
-    # (llm_prefill_util_factor=0.10, llm_decode_bw_realization default 1.0)
-    # are already INT8-native — only the spec label needs correcting.
-    peak_tops_bf16=0.0, peak_tops_int8=200.0, peak_tops_fp8=0.0,
-    mem_bandwidth_gbs=134.4, mem_capacity_gb=24.0,
-    mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
-    compute_efficiency=0.65, bandwidth_efficiency=0.70,
-    tdp_watts=25.0,
-    measured_llm_q4_decode_tok_s=37.85,
-    measured_llm_ttft_1k_sec=0.351,
-    # Reused from i.MX 95 / Low-LP5-64bit — same INT8-only capability
-    # shape (different silicon family but identical runtime behavior:
-    # int8 tensor_native, FP dtypes unsupported).
-    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
-    compute_util_factor=0.45, tier_family="LP5X-8.4-128b",
-    llm_prefill_util_factor=0.10,  # calibrated against the Mid TTFT 351 ms anchor
-    # Per-cell anchor mirroring the legacy flat fields. Skippy MoE Q4 measured
-    # 37.85 tok/s decode, 351 ms TTFT @ 1K ⇒ 1024 / 0.351 = 2917.4 tok/s
-    # prefill rate. Both fields kept populated (flat for hw_with_memory's
-    # back-compat BW-scaling on memory upgrades; dict for project_llm
-    # per-cell resolution).
-    measured_llm={
-        "skippy_finetune": {
-            "Q4_K_M": {"decode_tok_s": 37.85, "prefill_tok_s": 2917.4},
-        },
-    },
-)
-
-NPU_HIGH = Hardware(
-    name="NPU High",
-    # NPU High is FP-capable silicon: 200 TOPS BF16/FP16 with the standard
-    # 2× INT8 doubling on the same MAC hardware (200 FP16 → 400 INT8 on
-    # narrower datapath). Per [docs] 2026-04-29 16:08 spec — Kyle's
-    # Option (iii): "the chip we used to call Mid (multi-precision) is
-    # the chip we're now calling High; the chip we measured (INT8-only)
-    # is what's now called Mid." So today's High silicon IS the chip
-    # that produced the prior measured_llm_ttft_1k_sec=0.1755 reading
-    # (formerly attributed to "old High"); anchor stays valid.
-    #
-    # Same memory class as NPU Mid (128-bit LPDDR5X @ 8.4 GT/s = 134.4
-    # GB/s). High differentiates from Mid on COMPUTE FAMILY (FP-capable
-    # vs INT8-only) and CAPACITY (1.33× DRAM, 1.6× TDP), not memory BW.
-    # Memory upgrades (LPDDR5T, LPDDR6) are surfaced separately as
-    # upgrade-path overlays via MEMORY_UPGRADE_OPTIONS. Decode (BW-bound)
-    # matches Mid on stock memory; TTFT (compute-bound) reflects the
-    # FP-capable silicon's prefill time. The narrative is "Mid is edge
-    # INT8-only silicon. High is the inflection point where FP capability
-    # shows up — and the same silicon naturally delivers 2× INT8
-    # throughput."
-    peak_tops_bf16=200.0, peak_tops_int8=400.0, peak_tops_fp8=400.0,
-    mem_bandwidth_gbs=134.4, mem_capacity_gb=32.0,
-    mem_bus_width_bits=128, mem_type="LPDDR5X", mem_data_rate_gtps=8.4,
-    compute_efficiency=0.70, bandwidth_efficiency=0.70,
-    tdp_watts=40.0,
-    measured_llm_q4_decode_tok_s=37.85,
-    measured_llm_ttft_1k_sec=0.1755,
-    capability_levels=_NPU_FULL_DTYPE_CAPABILITY,
-    compute_util_factor=0.50, tier_family="LP5X-8.4-128b",
-    llm_prefill_util_factor=0.10,  # per [docs] 16:08 anchor: 1024 × 6.5 / (400 INT8 × 0.10) = 166 ms calc
-    # Per-cell anchor mirroring the legacy flat fields. Skippy MoE Q4 on
-    # High = same decode as Mid (BW-equal at stock per 0bcdbfd) but
-    # faster TTFT (175.5 ms = compute-bound benefit from 1.375× TOPS).
-    # 1024 / 0.1755 = 5835.3 tok/s prefill rate.
-    measured_llm={
-        "skippy_finetune": {
-            "Q4_K_M": {"decode_tok_s": 37.85, "prefill_tok_s": 5835.3},
-        },
-    },
-)
-
-# Ground-truth tier: NXP i.MX 95 (eIQ Neutron NPU). 2 TOPS INT8 dense
-# silicon, 32-bit LPDDR5 @ 6.4 GT/s. Kyle's production measurement on
-# the NXP eIQ toolchain, 2026-04-22: yolov8n-seg INT8 @ 1080p = 32 ms
-# (29.2 FPS), single stream, no LLM. compute_efficiency=0.19 is calibrated
-# from this measurement (12 GOPs / (2 TOPS × 0.19) = 31.6 ms ≈ 32 ms).
-# Use `measured_edge_ms` to return the exact production number for
-# workloads where we have real silicon data — otherwise projection
-# proceeds via the usual BW / compute clamp path.
-# Reference-class GPU tier. Same silicon spec as the RTX_5090 constant
-# above but carries measured_edge_ms for every pipeline we have a real
-# Blackwell-TRT bake-off measurement for. Reuses the Phase 1 override
-# path, so selecting this tier surfaces a 'measured silicon' banner
-# (same mechanism as NPU i.MX 95). Lets users see "what Kyle's little
-# monster can do" as the top end of the tier ladder.
-# Only the (pipeline, resolution) pairs with explicit entries hit the
-# override path; everything else falls through to the existing BW
-# projection so new pipelines don't silently break.
-RTX_5090_REFERENCE = Hardware(
-    name="RTX 5090 (reference, measured)",
-    peak_tops_bf16=209.0, peak_tops_int8=419.0, peak_tops_fp8=419.0,
-    mem_bandwidth_gbs=1792.0, mem_capacity_gb=32.0,
-    mem_bus_width_bits=512, mem_type="GDDR7", mem_data_rate_gtps=28.0,
-    compute_efficiency=0.70, bandwidth_efficiency=0.85,
-    tdp_watts=575.0,
-    capability_levels=_SM120_BLACKWELL_CAPABILITY,
-    compute_util_factor=0.85, tier_family="GDDR7-28",
-    npu_share_default=1.0,  # Dedicated VRAM, no shared SoC contention
-    compute_overhead_ms=0.3,
-    # 5090 + Skippy MoE Q4 anchor — measured via bakeoff_llm.py per
-    # [backend] 13:55. Sustained decode 249.8 tok/s; prefill 6228 tok/s
-    # @ 2K → 1024/6228 ≈ 0.165 s TTFT @ 1K. Without this anchor, project_llm
-    # falls through to the BW-ceiling cross-class fallback (~891 tok/s)
-    # — wildly optimistic since 5090 isn't BW-saturated on small-active
-    # MoE workloads. Adding the anchor flips 5090 + MoE Q4 from
-    # 🔴 cross_class to 🟢 measured_anchor.
-    measured_llm_q4_decode_tok_s=249.8,
-    measured_llm_ttft_1k_sec=0.165,
-    # Per-(model_key, quant) measured LLM anchors per [backend] 2026-05-01
-    # 20:08 weekend bake-off campaign. Source-of-truth for non-Skippy-MoE-Q4
-    # cells on 5090; project_llm consults this dict first when model_key is
-    # passed. Cross-app schema parity with PAI sizer's e69237b. Files in
-    # keyhole repo: data/output/bakeoff/llm_anchors/<model>/<quant>.json.
-    measured_llm={
-        "skippy_finetune": {  # Skippy MoE 30B-A3B Q4 fine-tune
-            "Q4_K_M": {"decode_tok_s": 249.8, "prefill_tok_s": 6228.0},
-        },
-        "qwen25_7b_dense": {
-            "Q4_K_M": {"decode_tok_s": 183.9, "prefill_tok_s": 7226.0},
-            "Q5_K_M": {"decode_tok_s": 170.0, "prefill_tok_s": 7215.0},
-            "Q8_0":   {"decode_tok_s": 137.2, "prefill_tok_s": 7478.0},
-        },
-        "qwen25_32b_dense": {
-            "Q4_K_M": {"decode_tok_s": 52.7,  "prefill_tok_s": 1936.0},
-            "Q5_K_M": {"decode_tok_s": 47.7,  "prefill_tok_s": 1888.0},
-            # No Q8_0 — won't fit on 5090's 32 GB VRAM.
-        },
-        # 14B Q4 dense — added 2026-05-07 per [docs] 10:18. Median over
-        # n=132 samples from kyle-qwen25-14b-v1-q4_k_m's v2-RAG run
-        # telemetry. Used as the perf-anchor for SKIPPY_14B_V4 via the
-        # measurement_alias mechanism (same architecture / quant — perf
-        # transfers verbatim regardless of fine-tune presence).
-        "qwen25_14b_dense": {
-            "Q4_K_M": {"decode_tok_s": 125.7, "prefill_tok_s": 5117.2},
-        },
-        # Cross-family 5090 anchors — [backend] 2026-05-07 23:08 bake-off
-        # via llama-cpp-python 0.3.20, n_ctx=16384. Replaces the 🟠
-        # cross_class fallback projection (332.79 tok/s for Llama at
-        # raw-TOPS × util_factor) with 🟢 measured cells. decode_tok_s
-        # is RAG 8K+2K decode (apples-to-apples vs the existing 7B Q4
-        # cell at 183.9). Source paths in the bake-off bundle:
-        # data/output/bakeoff/llm_anchors/{llama3.1-8b-dense,mistral-7b-v0.3-dense}/Q4_K_M.json
-        #
-        # Calibration finding: 7B-class dense Q4 Q4_K_M decode is family-
-        # invariant within ~7% on 5090 (Qwen 183.9 / Mistral 182.7 /
-        # Llama 171.0) — base-architecture choice is a quality decision
-        # at this hardware tier, not a perf decision. Differences track
-        # GGUF size (BW cost), not vendor.
-        "llama_3_1_8b_dense": {
-            "Q4_K_M": {"decode_tok_s": 171.0, "prefill_tok_s": 10162.0},
-        },
-        "mistral_7b_v03_dense": {
-            "Q4_K_M": {"decode_tok_s": 182.7, "prefill_tok_s": 10217.0},
-        },
-    },
-    measured_edge_ms={
-        # Backend 17:58 bake-off measurements (Blackwell TRT 10.16).
-        # Add more entries here as backend pulls them from data/output/
-        # bakeoff/*.json — override path is additive-only, no risk.
-        "yolov8n_only_fp8":           {"720p": 0.49, "1080p": 0.49, "4K": 0.51},
-        "yolov8n_trt_int8_coco128":   {"1080p": 0.62},
-        # ResNet-50v1 INT8 224×224 — measured via TRT INT8 PTQ on 5090
-        # ([backend] 4caa000, 2026-05-01). 0.325 ms p50 sustained = 3073
-        # inf/s. Constant across resolutions since model input is fixed
-        # at 224×224. Slope test vs Low-LP5X anchor (1125 FPS): measured
-        # ratio 2.73× ≈ Phase 2 first-principles prediction 2.78×.
-        "resnet50v1_int8_224":        {"720p": 0.325, "1080p": 0.325, "4K": 0.325},
-        "yolo_only_fp8":              {"720p": 0.68},  # yolo11s-seg FP8 TRT
-        "sam3_bf16":                  {"720p": 95.0, "1080p": 95.0, "4K": 95.0},
-        "efficientsam3_es_ev_s_bf16": {"720p": 27.0, "1080p": 44.0, "4K": 138.0},
-        # Composed YOLO+CLIP pipelines — stage-composed from backend's
-        # 2026-04-24 11:16 fresh CLIP rerun (TRT FP8 ViT-B/32) +
-        # yolo11s-seg/yolov8n-seg FP8 TRT per-resolution numbers from
-        # data/output/bakeoff/trt_yolo_edge_projection.json (backend
-        # 11:44), with empirical crop/copy overhead from hybrid_v2
-        # (resolution-bound, framework-indep):
-        #   crop_ms = 4.2 @ 720p / 8.1 @ 1080p / 30.2 @ 4K
-        # Formula: amortized = ((30-k)·yolo + k·(yolo+crop+clip)) / 30
-        # where k=30 for per-frame, k=1 for 1Hz (30 FPS stream).
-        "trt_fp8_1hz_clip":            {"720p": 0.87, "1080p": 1.00, "4K": 1.79},
-        "trt_fp8_every_frame":         {"720p": 6.33, "1080p": 10.03, "4K": 32.19},
-        "yolov8n_trt_fp8_1hz_clip":    {"720p": 0.68, "1080p": 0.80, "4K": 1.56},
-        "yolov8n_trt_fp8_every_frame": {"720p": 6.14, "1080p": 9.83, "4K": 31.96},
-        # ViT-alternatives bake-off (Kyle 2026-04-25 what-if). p50 ms from
-        # bakeoff_vit_alternatives.py on 5090, PyTorch FP16 except
-        # grounding_dino which ran fp32 (text-vision cross-attention
-        # couldn't be cleanly half-cast). 2 warmup + 10 timed frames per
-        # variant per resolution. Same `measured_edge_ms` override path
-        # the i.MX 95 ground-truth tier uses — picks the actual measurement
-        # over BW projection, fires the green "Measured silicon" banner,
-        # and bypasses the compiler-quality slider.
-        "rtdetr_l_pytorch_fp16":            {"720p": 14.82, "1080p": 15.21, "4K": 16.74},
-        "detr_resnet50_pytorch_fp16":       {"720p": 10.92, "1080p": 11.95, "4K": 10.97},
-        "owlv2_base_pytorch_fp16":          {"720p": 14.82, "1080p": 15.16, "4K": 14.92},
-        "grounding_dino_tiny_pytorch_fp32": {"720p": 69.87, "1080p": 69.80, "4K": 69.85},
-    },
-)
-
-NPU_IMX95_MEASURED = Hardware(
-    name="NPU i.MX 95 (ground truth)",
-    peak_tops_bf16=0.0, peak_tops_int8=2.0, peak_tops_fp8=0.0,
-    mem_bandwidth_gbs=25.6, mem_capacity_gb=16.0,
-    mem_bus_width_bits=32, mem_type="LPDDR5", mem_data_rate_gtps=6.4,
-    compute_efficiency=0.60, bandwidth_efficiency=0.70,
-    tdp_watts=10.0,
-    capability_levels=_NEUTRON_INT8_ONLY_CAPABILITY,
-    compute_util_factor=0.19, tier_family="Neutron-32-LP5",
-    measured_edge_ms={
-        "yolov8n_trt_int8_coco128": {"1080p": 32.0},
-    },
-)
-
-# Backwards-compat aliases — older scripts / CSV rows reference NPU_LOW
-# or NPU_LOW_LP5 (pre-split-into-32bit/64bit). Both resolve to the 64-bit
-# variant so previous FPS projections stay unchanged.
+# Backwards-compat aliases (older scripts / CSV rows reference NPU_LOW /
+# NPU_LOW_LP5 from before the LP5 32/64-bit split).
 NPU_LOW = NPU_LOW_LP5_64BIT
 NPU_LOW_LP5 = NPU_LOW_LP5_64BIT
 
-TIERS = {t.name: t for t in (NPU_IMX95_MEASURED,
-                              NPU_LOW_LP5_64BIT, NPU_LOW_LP5X,
-                              NPU_MID, NPU_HIGH, RTX_5090_REFERENCE)}
+
+# ─── Capability + measurement adapters ───
+# ratchet's Hardware doesn't carry keyhole's capability_level() method,
+# effective_tops_bf16 property, or measured_edge_ms field; these surface-side
+# helpers bridge keyhole's call sites onto ratchet's equivalents.
+
+# keyhole queries int8/fp8/bf16/fp16; ratchet conflates bf16/fp16 (+ adds q4_km).
+_DTYPE_TO_RATCHET_CAP_KEY = {
+    "int8": "int8", "fp8": "fp8", "bf16": "bf16/fp16", "fp16": "bf16/fp16",
+}
+
+# keyhole's catalog key for the Skippy MoE Q4 fine-tune — the implicit
+# tier-level LLM anchor (was the legacy measured_llm_q4_decode_tok_s flat
+# field; now in ratchet's measured_decode_overrides, re-attached by measured.py).
+_MOE_KEY = "skippy_finetune"
+
+
+def capability_level(hw: Hardware, dtype: str) -> CapabilityLevel:
+    """Per-dtype capability string for keyhole, sourced from ratchet's canonical
+    capability tables. ratchet's capability_levels is dict[str, CapabilityInfo]
+    keyed int8/fp8/'bf16/fp16'/q4_km; its CapabilityLevel enum .value matches
+    keyhole's string taxonomy. Falls back to a peak-TOPS heuristic when the
+    tier declares no table."""
+    cap_key = _DTYPE_TO_RATCHET_CAP_KEY.get(dtype.lower(), dtype.lower())
+    caps = hw.capability_levels
+    if caps is not None and cap_key in caps:
+        return caps[cap_key].level.value
+    peak = hw_peak_tops_for_dtype(hw, dtype)
+    return "tensor_native" if peak > 0 else "unsupported"
+
+
+def _measured_edge_ms(hw: Hardware, pipeline_key: str, resolution: str):
+    """keyhole's measured edge-ms float for (pipeline, resolution), read from
+    ratchet's measured_vision_overrides ({ms_per_inference, fps}); None if
+    absent. Replaces direct hw.measured_edge_ms access (re-attached by
+    measured.py)."""
+    mvo = hw.measured_vision_overrides
+    if not mvo:
+        return None
+    cell = mvo.get(pipeline_key, {}).get(resolution)
+    return cell.get("ms_per_inference") if cell else None
+
+
+def _has_vision_measurements(hw: Hardware) -> bool:
+    """True when the tier carries any measured vision overrides."""
+    return bool(hw.measured_vision_overrides)
+
+
+def _get_measured(hw: Hardware, model_key: str, quant: str):
+    """Per-cell LLM measurement (keyhole's model -> quant shape) on ratchet's
+    Hardware. ratchet's get_measured_llm_cell is workload-keyed and unused here."""
+    ml = hw.measured_llm
+    if not ml:
+        return None
+    return ml.get(model_key, {}).get(quant)
+
+
+# Importing measured runs attach_keyhole_anchors_to_ratchet_tiers() at module
+# load, populating the ratchet tier instances above with keyhole's LLM + vision
+# measurements before any projection. (measured.py imports only ratchet + stdlib
+# — no circular import back into npu_model.)
+from . import measured as _keyhole_measured  # noqa: E402,F401
+
 
 # Edge-anchor cap calibration constant (per [backend] 2026-05-04 16:19).
 # Used by the edge-anchor cap in project_vision to back-solve implied edge
@@ -541,89 +121,12 @@ MEMORY_TYPES = ("LPDDR4", "LPDDR5", "LPDDR5X", "LPDDR5T", "LPDDR6",
                 "GDDR6", "GDDR6X", "GDDR7", "HBM3")
 
 
-# Memory upgrade options offered as a sub-selector on NPU Mid + NPU High
-# (per [backend] 2026-04-28). Preview the bandwidth headroom each tier
-# would gain on a memory-only swap. Holds the existing 70%
-# bandwidth_efficiency uniformly across LPDDR5X/LPDDR5T/LPDDR6 — slightly
-# conservative for LPDDR6 (improved subchannel architecture typically
-# realizes 75-80% in practice per JEDEC), but keeps the comparison clean.
-#
-# Sorted ascending by data rate (= BW at fixed bus width):
-#   LPDDR5T @ 11.2 GT/s — Samsung's >10 GT/s LPDDR5-class extension; first
-#                         step beyond stock LPDDR5X @ 8.4 GT/s.
-#   LPDDR6 @ 12 GT/s    — first LPDDR6 spec rate.
-#   LPDDR6 @ 14 GT/s    — top-bin LPDDR6.
-#
-# Schema: list of (label, mem_type, mem_data_rate_gtps). Order in this
-# list matches the order in the sidebar selectbox.
-MEMORY_UPGRADE_OPTIONS: list[tuple[str, str, float]] = [
-    ("LPDDR5T @ 11.2 GT/s", "LPDDR5T", 11.2),
-    ("LPDDR6 @ 12 GT/s",    "LPDDR6",  12.0),
-    ("LPDDR6 @ 14 GT/s",    "LPDDR6",  14.0),
-]
-
-
-def hw_with_memory(hw: Hardware, mem_type: str, mem_data_rate_gtps: float,
-                    name_suffix: str | None = None) -> Hardware:
-    """Return a Hardware copy with the memory swapped (data-rate + type),
-    bandwidth recomputed from bus width × data rate / 8, and an annotated
-    name so downstream UI surfaces the variant.
-
-    BW-bound LLM decode tok/s is also scaled — `measured_llm_q4_decode_tok_s`
-    grows by the new/stock peak-BW ratio (active-param weights stream
-    through DRAM per token, BW-bound regime). TTFT (`measured_llm_ttft_1k_sec`)
-    stays at stock — prefill is compute-bound, not memory-bound, so a
-    memory-only swap shouldn't move it. Per [backend] 2026-04-29 bug
-    report against an earlier version of this function that left the
-    LLM decode field unchanged.
-
-    `measured_edge_ms` (vision override) and the per-dtype capability_levels
-    are silicon-intrinsic and stay unchanged. TOPS / capacity / TDP
-    are silicon-fixed and also stay unchanged. The `bw_projected` flag
-    is set to True so the UI can mark BW-scaled LLM numbers as
-    projections rather than vendor measurements.
-    """
-    new_bw = hw.mem_bus_width_bits * mem_data_rate_gtps / 8
-    new_name = hw.name if name_suffix is None else f"{hw.name} ({name_suffix})"
-    bw_ratio = new_bw / hw.mem_bandwidth_gbs if hw.mem_bandwidth_gbs > 0 else 1.0
-
-    # BW-scale the measured LLM decode tok/s. Decode is BW-bound on MoE
-    # 3B-active models — bytes per decoded token = active_size, fully
-    # streamed from DRAM per token, so tok/s scales linearly with
-    # effective BW (bandwidth_efficiency cancels: same 0.70 on both sides).
-    # Both legacy flat field AND new per-cell measured_llm dict are
-    # scaled — keeps the two anchor representations consistent through
-    # the memory-upgrade clone.
-    new_decode_tok_s = hw.measured_llm_q4_decode_tok_s
-    if hw.measured_llm_q4_decode_tok_s is not None:
-        new_decode_tok_s = hw.measured_llm_q4_decode_tok_s * bw_ratio
-
-    # Walk the per-cell dict and BW-scale every decode_tok_s entry.
-    # prefill_tok_s held at stock (prefill compute-bound, not memory-
-    # bound). Same scaling rule as the flat field.
-    new_measured_llm = None
-    if hw.measured_llm is not None:
-        new_measured_llm = {
-            model_key: {
-                quant: {
-                    **cell,
-                    "decode_tok_s": cell["decode_tok_s"] * bw_ratio,
-                }
-                for quant, cell in quant_dict.items()
-            }
-            for model_key, quant_dict in hw.measured_llm.items()
-        }
-
-    return replace(
-        hw,
-        name=new_name,
-        mem_type=mem_type,
-        mem_data_rate_gtps=mem_data_rate_gtps,
-        mem_bandwidth_gbs=new_bw,
-        measured_llm_q4_decode_tok_s=new_decode_tok_s,
-        measured_llm=new_measured_llm,
-        bw_projected=True,
-    )
+# MEMORY_UPGRADE_OPTIONS and hw_with_memory are now owned by ratchet (imported
+# at the top of this module). ratchet's hw_with_memory BW-scales the tier's
+# measured_decode_overrides (where keyhole's MoE anchors now live, re-attached
+# by measured.py) and holds prefill at stock — the same physics keyhole's local
+# version applied to its flat fields. The 5090 measured_llm bundle isn't a
+# memory-upgrade target (GDDR7, not an LPDDR swap), so it needs no scaling.
 
 
 def theoretical_bandwidth(bus_width_bits: int, data_rate_gtps: float) -> float:
@@ -1383,10 +886,9 @@ def project_vision(
         clamped_5090 = False
         ref_5090 = None
         if (phase2_used and hw.tier_family != "GDDR7-28"
-                and RTX_5090_REFERENCE.measured_edge_ms is not None
+                and _has_vision_measurements(RTX_5090_REFERENCE)
                 and pipeline.dram_per_forward_mb is not None):
-            ref_5090 = (RTX_5090_REFERENCE.measured_edge_ms
-                        .get(pipeline.key, {}).get(resolution))
+            ref_5090 = _measured_edge_ms(RTX_5090_REFERENCE, pipeline.key, resolution)
             if ref_5090 is not None:
                 bw_5090_eff = (RTX_5090_REFERENCE.effective_bandwidth_gbs
                                * RTX_5090_REFERENCE.npu_share_default)
@@ -1455,9 +957,9 @@ def project_vision(
                     continue
                 if ref_hw.tier_family == "GDDR7-28":
                     continue  # 5090 handled by separate cap above
-                if ref_hw.measured_edge_ms is None:
+                if not _has_vision_measurements(ref_hw):
                     continue
-                ref_ms = ref_hw.measured_edge_ms.get(pipeline.key, {}).get(resolution)
+                ref_ms = _measured_edge_ms(ref_hw, pipeline.key, resolution)
                 if ref_ms is None:
                     continue
                 # Anchors are measured at 100% NPU share (no SoC contention
@@ -1500,11 +1002,7 @@ def project_vision(
         # Mirrors the pattern project_llm() uses for measured_llm_q4_decode_tok_s.
         # Override only applies to the single-stream path — multi-stream batch
         # scaling falls through to the existing logic below.
-        measured_override_ms = None
-        if hw.measured_edge_ms is not None:
-            measured_override_ms = (
-                hw.measured_edge_ms.get(pipeline.key, {}).get(resolution)
-            )
+        measured_override_ms = _measured_edge_ms(hw, pipeline.key, resolution)
         if measured_override_ms is not None:
             per_stream_ms = measured_override_ms
 
@@ -1532,8 +1030,7 @@ def project_vision(
         elif phase2_used:
             same_family_anchor = any(
                 t.tier_family == hw.tier_family
-                and t.measured_edge_ms is not None
-                and pipeline.key in t.measured_edge_ms
+                and pipeline.key in (t.measured_vision_overrides or {})
                 for t in TIERS.values()
             )
             edge_ms_source = "same_class_anchor" if same_family_anchor else "cross_class"
@@ -1796,31 +1293,33 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         if prefill_rate and prefill_rate > 0:
             base_ttft = 1024.0 / prefill_rate
         else:
-            base_ttft = hw.measured_llm_ttft_1k_sec or 0.0
+            # Fall back to the tier's MoE anchor prefill (migrated to ratchet's
+            # measured_prefill_overrides) when this cell carries no prefill rate.
+            _moe_prefill = (hw.measured_prefill_overrides or {}).get(_MOE_KEY)
+            base_ttft = (1024.0 / _moe_prefill) if _moe_prefill else 0.0
         # NPU_share scaling on the BW-bound decode component. Source flag
         # stays 🟢 per orthogonal-axis convention (527fc9b); the tile
         # marker "(@ X% NPU)" surfaces the operating-point what-if.
         if share < 1.0:
             base_decode *= share
-    elif hw.measured_llm_q4_decode_tok_s is not None:
+    elif (hw.measured_decode_overrides or {}).get(_MOE_KEY) is not None:
+        # Tier-level Skippy-MoE-Q4 anchor — migrated from keyhole's legacy flat
+        # fields to ratchet's measured_decode_overrides / measured_prefill_overrides
+        # (re-attached by measured.py, keyed _MOE_KEY). Used as the implicit
+        # tier anchor for any model, scaled to other quants by byte ratio.
         if getattr(hw, "bw_projected", False):
-            # `hw_with_memory()` clone of an anchored tier — the
-            # measured_llm field was BW-scaled by the new/stock peak-BW
-            # ratio, holding TTFT at stock. Memory-upgrade overlay stays
-            # in the same memory class as its parent, so anchor is in
-            # within-class scaling territory.
+            # Memory-upgrade clone: ratchet's hw_with_memory BW-scaled the
+            # measured_decode_overrides for the upgraded bandwidth (within-
+            # class scaling), holding prefill at stock.
             llm_source = "same_class_anchor"
         else:
-            # Tier-level vendor anchor (not per-cell measurement). PAI
-            # sizer's 4-state taxonomy distinguishes these from per-cell
-            # 'measured' (which on keyhole would be RTX 5090 LLM bake-off
-            # cells — currently no LLM cells, only vision). Tier-level
-            # anchors in PAI's nomenclature: 'measured_anchor'.
+            # Tier-level vendor anchor (not a per-cell measurement) — PAI's
+            # 4-state taxonomy calls this 'measured_anchor'.
             llm_source = "measured_anchor"
-        # Use vendor-measured Q4_K_M and scale to other quants by byte ratio
         q4_bpp = BYTES_PER_PARAM["Q4_K_M"]
-        base_decode = hw.measured_llm_q4_decode_tok_s * (q4_bpp / bpp)
-        base_ttft = hw.measured_llm_ttft_1k_sec
+        base_decode = hw.measured_decode_overrides[_MOE_KEY] * (q4_bpp / bpp)
+        _moe_prefill = (hw.measured_prefill_overrides or {}).get(_MOE_KEY)
+        base_ttft = (1024.0 / _moe_prefill) if _moe_prefill else 0.0
         # NPU_share scaling on the anchored path: anchor was measured at
         # 100% NPU access (idle SoC). At < 100%, the BW-bound decode
         # scales linearly. Source classification stays 🟢 measured_anchor
