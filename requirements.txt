@@ -2,7 +2,10 @@
 # (retrofitted onto ratchet v0.2.4 — phase 3 of the engine consolidation)
 
 # Shared SoC sizing engine — canonical tiers, anchor loader, capability tables.
-ratchet>=0.2.4,<0.3.0
+# Installed from the public GitHub source repo (not PyPI — the name "ratchet"
+# on PyPI is an unrelated package). Pin to a git tag so deploys are
+# reproducible; bump this line when adopting a new ratchet release.
+ratchet @ git+https://github.com/kylefoxaustin/ratchet.git@v0.2.4
 
 streamlit>=1.40.0
 pandas>=2.2.0
