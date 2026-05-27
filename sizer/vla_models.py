@@ -157,6 +157,29 @@ class VLAModel:
     dtype_path_default: str = ""
     dtype_path_alt: str = ""
 
+    # HuggingFace repo path for weight loading (consumed by
+    # keyhole-backend's bakeoff_vla.py harness). Empty string means
+    # "needs verification before running the bake-off" — keeps catalog-
+    # driven data flow working even when the path hasn't been confirmed.
+    # Populated where the path is publicly documented (OpenVLA); left
+    # empty where the brief flagged verification still needed (NORA's
+    # default of "declare-lab/nora" is set per the next-session brief
+    # but treated as "verify on load" by the harness; π0.5, NORA-1.5,
+    # BitVLA need backend lookup before populating).
+    hf_repo: str = ""
+
+    # True when measured RTX 5090 anchor has been calibrated against
+    # this catalog entry's component-level FLOP estimates (i.e. the
+    # flops_per_call_g / arithmetic_intensity values in the component
+    # dataclasses have been refined from first-order estimates to
+    # measurement-anchored values). Default False until backend's
+    # bakeoff_vla.py harness lands the measurement and the sizer side
+    # absorbs the calibration. Flipping this to True is the credibility
+    # upgrade per the next-session brief — it gates whether the source
+    # taxonomy shows 🟡 same_class (calibrated) or 🟠 cross_class
+    # (uncalibrated projection).
+    measured_5090_calibrated: bool = False
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Module-level constant per VLA entry. Convention mirrors llm_models.py:
@@ -222,6 +245,7 @@ OPENVLA_7B_SINGLE = VLAModel(
     citation_year=2024,
     dtype_path_default="int8",
     dtype_path_alt="fp8",
+    hf_repo="openvla/openvla-7b",                   # publicly documented
 )
 
 
@@ -278,6 +302,7 @@ OPENVLA_7B_CACHED = VLAModel(
     citation_year=2026,                             # year of THIS projection variant
     dtype_path_default="int8",
     dtype_path_alt="fp8",
+    hf_repo="openvla/openvla-7b",                   # same underlying weights as the single-loop variant
 )
 
 
@@ -331,6 +356,7 @@ NORA_3B = VLAModel(
     citation_year=2025,
     dtype_path_default="int8",
     dtype_path_alt="fp8",
+    hf_repo="declare-lab/nora",                     # default per next-session brief; backend verifies
 )
 
 
