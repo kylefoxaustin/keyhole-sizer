@@ -911,10 +911,17 @@ def _maybe_anchor_overlay_cnn(r, pipeline_key, hw, tier_name):
 
     Returns r unchanged if no anchor matches; otherwise overrides
     `per_stream_ms` + `fps_per_stream` (n_streams=1 case).
+
+    Memory-upgrade clones (Mid+LPDDR6-14, etc.) BW-scale the measured
+    anchor — small edge CNNs (ResNet-50 INT8, YOLOv8n) are BW-bound on
+    LP5X-class silicon (weights stream through DRAM per inference), so
+    higher BW → proportionally faster ms_per_inference and higher fps.
+    Mirrors the LLM-side Amendment 5 fix (ratchet v0.2.3 / ADR 011);
+    pre-v1.1.1 the helper skipped memory upgrades entirely, dropping
+    the cell to cross-class projection and producing a measured→projection
+    discontinuity on the first upgrade tier.
     """
     if r is None or not isinstance(r, dict):
-        return r
-    if abs(getattr(hw, "mem_data_rate_gtps", 0.0) - 8.4) > 0.05:
         return r
     spec_cnn = _ANCHOR_CNN_PIPELINE_KEY_MAP.get(pipeline_key)
     if spec_cnn is None:
@@ -930,14 +937,21 @@ def _maybe_anchor_overlay_cnn(r, pipeline_key, hw, tier_name):
     anchor = load_cnn_anchor(spec_tier, spec_prec, spec_cnn)
     if anchor is None or anchor.source != "measured" or anchor.ms_per_inference <= 0:
         return r
+    # Memory-upgrade clones BW-scale the anchor. Stock tiers keep ratio 1.0.
+    # ms scales inversely with BW (lower ms = faster); fps scales directly.
+    bw_ratio = 1.0
+    if getattr(hw, "bw_projected", False) and getattr(hw, "stock_mem_bandwidth_gbs", None):
+        bw_ratio = hw.mem_bandwidth_gbs / hw.stock_mem_bandwidth_gbs
     r2 = dict(r)
-    r2["per_stream_ms"] = anchor.ms_per_inference
-    r2["fps_per_stream"] = anchor.fps if anchor.fps > 0 else (1000.0 / anchor.ms_per_inference)
+    r2["per_stream_ms"] = anchor.ms_per_inference / bw_ratio
+    base_fps = anchor.fps if anchor.fps > 0 else (1000.0 / anchor.ms_per_inference)
+    r2["fps_per_stream"] = base_fps * bw_ratio
     r2["edge_ms_source"] = "measured_silicon_anchor"
     r2["_silicon_anchor_meta"] = {
         "measured_date": anchor.measured_date,
         "spec_tier_precision": f"{spec_tier}_{spec_prec}",
         "spec_cnn_key": spec_cnn,
+        "bw_ratio_applied": round(bw_ratio, 3),
     }
     return r2
 
