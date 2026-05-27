@@ -1,6 +1,6 @@
 # keyhole-sizer
 
-[![version](https://img.shields.io/badge/version-v1.1.0-blue)](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v1.1.0)
+[![version](https://img.shields.io/badge/version-v1.1.1-blue)](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v1.1.1)
 [![streamlit](https://img.shields.io/badge/streamlit-live-FF4B4B)](https://keyhole-sizer.streamlit.app)
 [![engine](https://img.shields.io/badge/engine-ratchet%20v0.2.4-green)](https://github.com/kylefoxaustin/ratchet)
 
@@ -310,6 +310,7 @@ reachability identical).
 
 | Version | Date | Highlights |
 |---|---|---|
+| **v1.1.1** | 2026-05-27 | Amendment 5 mirrored onto the CNN/vision overlay (`_maybe_anchor_overlay_cnn`) — the deferred follow-up from v1.1.0. Pre-fix the helper dropped the CNN anchor on any memory-upgrade clone, producing a measured→projection discontinuity (first upgrade tier could read lower fps than stock). Post-fix the helper BW-scales the measured anchor by `mem_bandwidth_gbs / stock_mem_bandwidth_gbs` for `bw_projected` clones; ms scales inversely, fps scales directly. Stock tiers unchanged. `app.py` only (18 insertions, 4 deletions); auto-reload-safe on Streamlit Cloud. |
 | **v1.1.0** | 2026-05-23 | Retrofit onto shared [`ratchet`](https://github.com/kylefoxaustin/ratchet) engine v0.2.4 (phase 3 of cross-repo engine consolidation). Adopted ratchet for `Hardware` / `TIERS` / `hw_with_memory` / `MEMORY_UPGRADE_OPTIONS` / anchor loader / capability tables. Net –496 lines. Surface-side adapters bridge keyhole's UI conventions to ratchet's typed data. Per-tier anchors re-attached at import via `measured.py::attach_keyhole_anchors_to_ratchet_tiers()`. Two intended behavior diffs vs v1.0.0: (1) NPU Low-LP5-64bit TDP 10 → 20 W (display only, no projection impact, ratchet's Amendment-4 TDP ladder); (2) memory-upgrade LLM anchor now BW-scales (Amendment 5 bug fix — Mid + LPDDR6-14 climbs from 37.85 → 63.08 tok/s instead of dropping to cross-class). `requirements.txt` pins ratchet via `git+https` URL (PyPI's "ratchet" is an unrelated package). |
 | **v1.0.0** | 2026-05-18 | First tagged release. Recovery point ahead of cross-repo engine-extraction work. Captures: 17-entry LLM catalog with role icons, 23-pipeline coverage (incl. 4-bit-weight CNN variants), anchor-secrets system (9/9 LLM + 6/6 CNN reachable), 8-tab UX mirroring PAI sizer (Overview · Accuracy · Precision · Performance · Stream · Duty · KPIs · Detail), 4-state source taxonomy + NPU_share third factor + Phase 2 compute-clamp, 5-state workload-pattern multipliers, capability-levels taxonomy, measurement_alias mechanism, category_deltas dict-of-dicts schema. |
 
