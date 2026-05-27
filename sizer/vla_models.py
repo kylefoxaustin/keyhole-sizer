@@ -416,6 +416,7 @@ NORA_1P5 = VLAModel(
     citation_year=2025,
     dtype_path_default="int8+fp8",
     dtype_path_alt="int8+bf16",
+    hf_repo="declare-lab/nora-1.5",                 # verified by [backend] at 6577d99
 )
 
 
@@ -470,6 +471,7 @@ PI_0P5 = VLAModel(
     citation_year=2025,
     dtype_path_default="int8+bf16",
     dtype_path_alt="fp8+bf16",
+    hf_repo="lerobot/pi0_5",                        # verified by [backend] at 6577d99 (LeRobot hosts, not physical-intelligence/)
 )
 
 
