@@ -1,7 +1,8 @@
 # keyhole-sizer
 
-[![version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v1.0.0)
+[![version](https://img.shields.io/badge/version-v1.1.0-blue)](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v1.1.0)
 [![streamlit](https://img.shields.io/badge/streamlit-live-FF4B4B)](https://keyhole-sizer.streamlit.app)
+[![engine](https://img.shields.io/badge/engine-ratchet%20v0.2.4-green)](https://github.com/kylefoxaustin/ratchet)
 
 Interactive NPU sizing sandbox for the
 [Keyhole](https://github.com/kylefoxaustin/keyhole) edge-AI bake-off findings.
@@ -14,8 +15,21 @@ watch live FPS / tok/s / VRAM-fit / duty-cycle projections.
 **Companion app:**
 [personal-ai-assistant-sizer](https://github.com/kylefoxaustin/personal-ai-assistant-sizer)
 (LLM-only sizing for the Skippy assistant deployment). Both sizers share
-schema, source taxonomy, anchor-secrets mechanism, and tab structure — pick
-the one that matches your workload.
+schema, source taxonomy, anchor-secrets mechanism, tab structure, and — as
+of v1.1.0 — the same shared engine. Pick the one that matches your
+workload.
+
+**Engine:** As of v1.1.0 the canonical NPU tier registry, capability
+taxonomy, `hw_with_memory` memory-upgrade clones, anchor loader, and
+Hardware dataclass all live in the shared [`ratchet`](https://github.com/kylefoxaustin/ratchet)
+package (pinned to v0.2.4). Surface-side keyhole-sizer keeps its UI,
+projection layer, vision pipelines, LLM catalog, platform-budget, and
+KPI breakdown. The retrofit cut –496 lines net while keeping behavior
+parity on the canonical tiers + fixing the memory-upgrade anchor
+discontinuity (Mid + LPDDR6-14 now climbs from 37.85 → 63.08 tok/s
+instead of dropping to cross-class projection). See the
+[v1.1.0 release notes](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v1.1.0)
+for the full diff.
 
 If you've read the Keyhole deck and want to answer **"what if my NPU had
 a 96-bit bus instead of 128?"** or **"how many 480p streams can I run
@@ -45,6 +59,15 @@ streamlit run app.py
 
 Browser opens to `http://localhost:8501`. No GPU needed — this app is
 pure projection math on top of already-measured numbers.
+
+**Note on the ratchet engine dependency:** `requirements.txt` pulls
+ratchet from its public GitHub source repo (not PyPI — the name
+`ratchet` on PyPI is an unrelated project). The pin is `ratchet @
+git+https://github.com/kylefoxaustin/ratchet.git@v0.2.4`. Bumping
+ratchet means editing that tag in the URL and pushing. If you're
+running locally with ratchet as an editable install (`pip install -e
+~/path/to/ratchet`), pip prefers your editable over the git pin —
+useful for engine co-development.
 
 ## Deployment (Streamlit Community Cloud)
 
@@ -244,8 +267,9 @@ appropriate cells will flip from 🟠 projected to 🟢 measured. Cells
 without an anchor entry fall through to the projection path
 transparently.
 
-Coverage at v1.0.0: **9/9 LLM + 6/6 CNN spec cells** reachable from the
-headline tiles.
+Coverage at v1.1.0: **9/9 LLM + 6/6 CNN spec cells** reachable from the
+headline tiles (unchanged from v1.0.0 — the retrofit kept anchor
+reachability identical).
 
 ## Limitations
 
@@ -286,6 +310,7 @@ headline tiles.
 
 | Version | Date | Highlights |
 |---|---|---|
+| **v1.1.0** | 2026-05-23 | Retrofit onto shared [`ratchet`](https://github.com/kylefoxaustin/ratchet) engine v0.2.4 (phase 3 of cross-repo engine consolidation). Adopted ratchet for `Hardware` / `TIERS` / `hw_with_memory` / `MEMORY_UPGRADE_OPTIONS` / anchor loader / capability tables. Net –496 lines. Surface-side adapters bridge keyhole's UI conventions to ratchet's typed data. Per-tier anchors re-attached at import via `measured.py::attach_keyhole_anchors_to_ratchet_tiers()`. Two intended behavior diffs vs v1.0.0: (1) NPU Low-LP5-64bit TDP 10 → 20 W (display only, no projection impact, ratchet's Amendment-4 TDP ladder); (2) memory-upgrade LLM anchor now BW-scales (Amendment 5 bug fix — Mid + LPDDR6-14 climbs from 37.85 → 63.08 tok/s instead of dropping to cross-class). `requirements.txt` pins ratchet via `git+https` URL (PyPI's "ratchet" is an unrelated package). |
 | **v1.0.0** | 2026-05-18 | First tagged release. Recovery point ahead of cross-repo engine-extraction work. Captures: 17-entry LLM catalog with role icons, 23-pipeline coverage (incl. 4-bit-weight CNN variants), anchor-secrets system (9/9 LLM + 6/6 CNN reachable), 8-tab UX mirroring PAI sizer (Overview · Accuracy · Precision · Performance · Stream · Duty · KPIs · Detail), 4-state source taxonomy + NPU_share third factor + Phase 2 compute-clamp, 5-state workload-pattern multipliers, capability-levels taxonomy, measurement_alias mechanism, category_deltas dict-of-dicts schema. |
 
 ## License
