@@ -214,6 +214,22 @@ class VLAModel:
     # the 5090 util cancels in the ratio. None until a 5090 bake-off lands.
     measured_5090_components: dict | None = None
 
+    # PHYSICAL per-stage GFLOP (hardware-independent, 2·P·T matmul rule, real
+    # params counted off the loaded model by [backend]). Keys: vision, prefill,
+    # decode_per_tok, total. This is the un-corrupted FLOP truth that retires
+    # the effective-FLOP-at-5090-util footgun — distinct from the per-component
+    # flops_per_call_g (which conflate stages and were first-order/back-solved).
+    # A future from-physics projection should consume THIS + measured_5090_util.
+    physical_flops_g: dict | None = None
+
+    # Measured RTX 5090 achieved util per stage = physical_flops / measured_p50
+    # / 209 TFLOPS bf16 peak (the sizer's roofline value). Keys: vision, prefill,
+    # decode. The real fraction-of-peak each stage hits — calibration gold:
+    # batch-1 ViTs are NOT compute-saturated (~0.11-0.29, not the CNN-calibrated
+    # 0.85), and decode ≈ 0.003-0.005 IS the bandwidth wall quantified (decode
+    # does ~0.3% of peak compute — pure weight-streaming).
+    measured_5090_util: dict | None = None
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Module-level constant per VLA entry. Convention mirrors llm_models.py:
@@ -239,24 +255,29 @@ OPENVLA_7B_SINGLE = VLAModel(
     components={
         "vision_encoder": VLAComponent(
             name="vision_encoder",
-            params_b=0.6,                           # SigLIP-L 400M + DINOv2-L 300M fused
-            flops_per_call_g=80.0,                  # fused conv-heavy forward at 224×224
+            params_b=0.731,                         # SigLIP+DINOv2 fused (real count, dd46b14)
+            flops_per_call_g=374.0,                 # physical (2·P·T); was 80 first-order
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=100.0,             # conv-heavy median
+            arithmetic_intensity=100.0,             # compute-bound — AI non-binding
         ),
         "llm_backbone": VLAComponent(
             name="llm_backbone",
-            params_b=6.4,                           # Llama-2 7B minus vision projection adapter
-            flops_per_call_g=90.0,                  # ~7 action tokens × 2 × 6.4B
+            params_b=6.74,                          # Llama-2 7B body (real count, dd46b14)
+            # physical prefill 3811 GF over the TRUE 280-token seqlen (24 text +
+            # 256 vision injected as embeddings) — naive 2·P·T on the ~24 text
+            # input_ids undercounts ~10×; [backend] hooks the real seqlen.
+            flops_per_call_g=3811.0,                # physical prefill (decode per-tok in physical_flops_g)
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=3.0,               # transformer decode median
+            arithmetic_intensity=1.0,               # bf16 decode ≈ 1.0 ops/byte; decode 13.74 GF/tok @ 0.5% util
         ),
         "action_head": VLAComponent(
             name="action_head",
-            params_b=0.0,                           # discrete token via LLM lm_head — no separate head
-            flops_per_call_g=0.0,                   # cost is in llm_backbone
+            params_b=0.131,                         # lm_head (real count); + 71M projector
+            # NO standalone action FLOP: 7 discrete 256-bin tokens decode THROUGH
+            # the LLM body + lm_head (counted in decode), not a separate head.
+            flops_per_call_g=0.0,
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=3.0,               # nominal — degenerate
+            arithmetic_intensity=1.0,
         ),
     },
     architecture="single_loop",
@@ -276,6 +297,17 @@ OPENVLA_7B_SINGLE = VLAModel(
         "vision_ms": 6.23,
         "llm_prefill_ms": 40.38,
         "decode_ms_per_token": 13.32,
+    },
+    physical_flops_g={                              # [backend] dd46b14, 2·P·T, true 280-tok prefill seqlen
+        "vision": 374.0,
+        "prefill": 3811.0,
+        "decode_per_tok": 13.74,
+        "total": 4281.0,
+    },
+    measured_5090_util={                            # achieved fraction-of-peak on 5090 (209 TF bf16)
+        "vision": 0.29,
+        "prefill": 0.43,                            # 7B prefill over 280 tokens — most compute-bound stage
+        "decode": 0.005,                            # bandwidth wall
     },
     notes=(
         "Native architecture is autoregressive. Discretized 7-DOF actions "
@@ -363,69 +395,53 @@ OPENVLA_7B_CACHED = VLAModel(
 
 
 # NORA 3B — single-loop, edge-tuned (Hung et al arxiv Apr 2025).
-# Compute-friendly baseline. Total 3.0B = ~0.5B vision (Qwen2.5-VL ViT)
-# + ~2.0B LLM + 0.5B action head.
+# Compute-friendly baseline. Real params (counted off the loaded model by
+# [backend]): vision 669M + llm_body 3.09B + lm_head 315M = 3.76B total
+# (above the paper's 3.0B "backbone" figure).
 #
-# ── 5090-CALIBRATED COMPONENTS (keyhole 49068ec, bf16/sdpa, n=20) ──────────
-# Per-component wall-clock split from forward-hook CUDA events around the
-# Qwen2.5-VL vision tower (paired per-trial; llm_prefill = VLM-total − vision):
-#   vision_encoder forward : 13.83 ms p50  (46% — compute-bound ViT, fixed cost)
-#   llm_prefill            : 16.11 ms p50  (54% — 94 input tokens, compute-bound)
-#   action-token decode    :  9.48 ms/token (BW-bound; 5 tokens/action)
+# ── 5090 CALIBRATION (keyhole 49068ec latency split + dd46b14 physical FLOP) ──
+# Per-stage wall-clock (forward-hook CUDA events, bf16/sdpa, n=20):
+#   vision  13.83 ms | llm_prefill 16.11 ms | decode 9.72 ms/token (BW-bound)
+# PHYSICAL GFLOP (2·P·T, hardware-independent) + measured 5090 achieved util:
+#   vision  342 GF @ 11% util | prefill 581 GF @ 16% | decode 6.81 GF/tok @ 0.3%
+# These live structurally in physical_flops_g + measured_5090_util below.
 #
-# FLOP/AI back-solved against the sizer's OWN 5090 roofline constants
-# (RTX_5090_REFERENCE: peak_bf16=209 TFLOPS, eff_BW=1523 GB/s, vision
-# compute_util_factor=0.85, llm_prefill_util_factor=0.10) so the numbers stay
-# self-consistent with how Phase 3 will project. Derivation:
-#   compute regime: gops = measured_ms × peak_bf16 × util
-#   BW regime:      AI   = FLOP_per_token / bytes_per_token
-#
-# CAVEAT — these flops_per_call_g are EFFECTIVE GFLOP at the 5090's util
-# factors, not physical FLOP (one latency measurement can't separate FLOP
-# from util). The vision figure in particular bakes in compute_util_factor
-# 0.85 (CNN-calibrated; a ViT likely realizes lower, so physical FLOP is
-# lower and effective util lower). When Phase 3 projects onto an NPU it must
-# scale by the TOPS ratio HOLDING util constant (or re-derive util per
-# silicon) — applying a different NPU util to these effective FLOPs would
-# double-count the util gap. The un-corrupted anchors are the measured
-# latencies above + measured_5090_prefill_ms; treat those as ground truth.
+# FOOTGUN RESOLVED: an earlier back-solve stored EFFECTIVE GFLOP at an assumed
+# 0.85 vision util (vision ~2458 GF) — an artifact, since a batch-1 ViT really
+# hits ~11% util, so physical is 342 GF (~7× lower). The component
+# flops_per_call_g below are now the PHYSICAL per-stage figures; treat
+# physical_flops_g as authoritative. (These are not consumed for this model —
+# it projects via the 🔵 calibrated latency-anchor path — but are now honest.)
 NORA_3B = VLAModel(
     key="nora_3b",
     display_name="NORA 3B (single-loop)",
     components={
         "vision_encoder": VLAComponent(
             name="vision_encoder",
-            params_b=0.5,                           # Qwen2.5-VL ViT
-            # 5090-calibrated: 13.83 ms × 209 TFLOPS × 0.85 util. Paper-derived
-            # 50 GFLOP was ~49× too low (compute floor 0.28 ms << measured).
-            flops_per_call_g=2458.0,                # effective @ 5090 vision util 0.85
+            params_b=0.669,                         # Qwen2.5-VL ViT (real count, dd46b14)
+            flops_per_call_g=342.0,                 # physical (was 2458 effective-@-0.85-util artifact)
             dtype_required=("int8", "fp8", "bf16"),
             arithmetic_intensity=100.0,             # compute-bound — AI non-binding
         ),
         "llm_backbone": VLAComponent(
             name="llm_backbone",
-            params_b=2.0,                           # Qwen2.5-VL 3B base minus ViT
-            # 5090-calibrated per-VLM-call total: prefill 337 GFLOP
-            # (16.11 ms × 209 × 0.10 prefill util; analytic 2×2.0B×94tok=376
-            # predicts 18 ms — agreement validates the 0.10 constant) + 5 action
-            # tokens × 2×2.0B = 20 GFLOP decode. Was 28 (decode-only, omitted prefill).
-            flops_per_call_g=357.0,                 # prefill 337 (compute) + decode 20 (BW)
+            params_b=3.09,                          # Qwen2.5-VL 3B body (real count, dd46b14)
+            flops_per_call_g=581.0,                 # physical prefill (decode is per-tok in physical_flops_g)
             dtype_required=("int8", "fp8", "bf16"),
-            # 5090-calibrated decode AI: 2×2.0B FLOP/tok ÷ 6.0 GB/tok measured =
-            # 0.67 ops/byte. Was 3.0 (~4.5× too high). Decode realizes only 42%
-            # of the bf16 BW floor under stock HF generate() (the headroom gap).
-            arithmetic_intensity=0.67,              # decode is BW-bound; binding knob
+            # Physical bf16 decode AI = 2·P FLOP/tok ÷ 2·P bytes/tok = 1.0 (any
+            # bf16 decode is ~1.0 ops/byte; halves to 0.5 at int8). decode = 6.81
+            # GF/tok @ 0.3% util — the BW wall (pure weight-streaming).
+            arithmetic_intensity=1.0,
         ),
         "action_head": VLAComponent(
             name="action_head",
-            params_b=0.5,                           # FAST+ tokenizer head
-            # NOT separately calibrated: NORA is single-loop autoregressive — the
-            # FAST+ action tokens are generated THROUGH the LLM decode (measured
-            # as part of llm_prefill+decode above), not a standalone head forward.
-            # Left at first-order estimate; do not double-count against llm_backbone.
-            flops_per_call_g=30.0,
+            params_b=0.315,                         # lm_head (tied to embeddings); real count
+            # NO standalone action FLOP: NORA is single-loop autoregressive — FAST+
+            # action tokens decode THROUGH the LLM body + lm_head (counted in the
+            # decode term), not a separate head. Per [backend] dd46b14 (no double-count).
+            flops_per_call_g=0.0,
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=3.0,
+            arithmetic_intensity=1.0,
         ),
     },
     architecture="single_loop",
@@ -452,6 +468,17 @@ NORA_3B = VLAModel(
         "vision_ms": 13.83,
         "llm_prefill_ms": 16.11,
         "decode_ms_per_token": 9.72,
+    },
+    physical_flops_g={                              # [backend] dd46b14, 2·P·T, hardware-independent
+        "vision": 342.0,
+        "prefill": 581.0,
+        "decode_per_tok": 6.81,
+        "total": 965.0,                             # vision + prefill + 6 decode tokens
+    },
+    measured_5090_util={                            # achieved fraction-of-peak on 5090 (209 TF bf16)
+        "vision": 0.11,
+        "prefill": 0.16,
+        "decode": 0.003,                            # the bandwidth wall, quantified
     },
     notes=(
         "3B-parameter VLA on Qwen2.5-VL-3B backbone. Designed for real-time "
