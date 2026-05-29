@@ -186,15 +186,33 @@ class VLAModel:
     # (uncalibrated projection).
     measured_5090_calibrated: bool = False
 
-    # Measured RTX 5090 VLM-forward (prefill) p50 in ms — the calibrated
-    # PREFILL component, distinct from measured_5090_ms_per_action (which is
-    # the full end-to-end per-action latency when calibrated). This is the
-    # number that reproduces a paper's published forward-pass anchor (e.g.
-    # NORA's "33 ms / 30 Hz" matches the VLM forward, NOT the e2e). The gap
-    # between prefill and e2e is action-token decode overhead under stock HF
-    # generate() — optimization headroom (no CUDA graphs / static KV cache /
-    # torch.compile), not measurement error. None until a 5090 bake-off lands.
+    # Measured RTX 5090 VLM-forward (prefill) p50 in ms — vision + LLM prefill
+    # combined, distinct from measured_5090_ms_per_action (the full end-to-end
+    # per-action latency when calibrated). For some models this reproduces a
+    # published forward-pass anchor (e.g. NORA's "33 ms / 30 Hz" matches the
+    # VLM forward, NOT the e2e). The gap between VLM-forward and e2e is
+    # action-token decode under stock HF generate() — optimization headroom
+    # (no CUDA graphs / static KV cache / torch.compile), not measurement
+    # error. None until a 5090 bake-off lands.
     measured_5090_prefill_ms: float | None = None
+
+    # Number of autoregressive action tokens decoded per action (single-loop
+    # models). Drives e2e = vlm_forward + n_action_tokens × decode_ms/token.
+    # NORA=5 (FAST+, measured), OpenVLA=7 (7-DOF discrete, measured), BitVLA=8
+    # (pending verification). For dual-loop models this field is NOT the
+    # binding metric (flow-matching emits action chunks via K denoising steps,
+    # not AR tokens) — Phase 3b uses denoising-step semantics instead.
+    n_action_tokens: int = 7
+
+    # Measured RTX 5090 per-component latency split (when measured_5090_calibrated).
+    # Keys: vision_ms, llm_prefill_ms, decode_ms_per_token. The two forward
+    # components are compute-bound (vision scales by compute_util_factor,
+    # llm_prefill by llm_prefill_util_factor — different ratios across silicon,
+    # so they MUST be stored separately); decode is BW-bound. project_vla's
+    # 🔵 calibrated path scales these measured LATENCIES (not FLOPs) by the
+    # per-component compute/BW ratio to a target tier — footgun-free, since
+    # the 5090 util cancels in the ratio. None until a 5090 bake-off lands.
+    measured_5090_components: dict | None = None
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -246,12 +264,33 @@ OPENVLA_7B_SINGLE = VLAModel(
     vlm_hz_min=10.0, vlm_hz_max=10.0,
     action_hz_min=10.0, action_hz_max=10.0,
     source_paper="Kim et al RSS 2024",
-    measured_5090_ms_per_action=73.0,               # IndexBox 4090 measurement; 5090 estimate ~50 ms
+    # MEASURED on RTX 5090 (bf16/sdpa, n=20, transformers 4.40.1) by [backend]
+    # 2026-05-29, keyhole b2e7397. End-to-end p50 = 126.50 ms (7.9 Hz); VLM-
+    # forward 46.60 ms = vision 6.23 (13%) + LLM prefill 40.38 (87%); decode
+    # 13.32 ms/token. Was 73.0 (an RTX 4090 IndexBox bench, not 5090).
+    measured_5090_ms_per_action=126.50,
+    measured_5090_prefill_ms=46.60,                 # VLM-forward (vision + LLM prefill)
+    measured_5090_calibrated=True,
+    n_action_tokens=7,                              # 7-DOF discrete, measured (reviewer's "8" superseded)
+    measured_5090_components={
+        "vision_ms": 6.23,
+        "llm_prefill_ms": 40.38,
+        "decode_ms_per_token": 13.32,
+    },
     notes=(
         "Native architecture is autoregressive. Discretized 7-DOF actions "
         "through Llama 2 tokenizer (256 bins per dim). Each forward = vision + "
-        "LLM decode for action tokens. No cached intent. Measured 73 ms/action "
-        "on RTX 4090 per IndexBox; 5090 estimate ~50 ms."
+        "LLM decode for action tokens. No cached intent. MEASURED on RTX 5090 "
+        "stock HF: e2e 126.50 ms/action (7.9 Hz), VLM-forward 46.60 ms (vision "
+        "6.23 + prefill 40.38), peak VRAM 14.41 GB (weights 14.09 = 7.5B "
+        "confirmed). Note the cited 73 ms is an OPTIMIZED RTX 4090 IndexBox "
+        "bench; our higher stock-HF 5090 number is optimization headroom + "
+        "stack/GPU difference, not a slower GPU. ENV: OpenVLA runs correctly "
+        "ONLY under transformers==4.40.1 — under >=4.57 it silently drops "
+        "pixel_values (vision fires 0x, action image-invariant); requires a "
+        "pinned venv. Component FLOPs left at first-order pending backend's "
+        "analytical physical-FLOP attribution (the calibrated path uses the "
+        "measured latencies above, not these FLOPs)."
     ),
     libero_success_pct=76.5,
     inference_dram_gb_bf16=15.0,
@@ -261,7 +300,7 @@ OPENVLA_7B_SINGLE = VLAModel(
     citation_year=2024,
     dtype_path_default="int8",
     dtype_path_alt="fp8",
-    hf_repo="openvla/openvla-7b",                   # publicly documented
+    hf_repo="openvla/openvla-7b",                   # publicly documented; verified firsthand by [backend]
 )
 
 
@@ -303,6 +342,7 @@ OPENVLA_7B_CACHED = VLAModel(
     action_hz_min=15.0, action_hz_max=60.0,
     source_paper="projection variant; no published artifact",
     measured_5090_ms_per_action=None,               # projection only
+    n_action_tokens=7,                              # same weights as single-loop variant
     notes=(
         "Synthetic projection: OpenVLA with hypothetical cache wrapper "
         "running VLM at 2 Hz and re-using semantic embedding for action "
@@ -404,6 +444,15 @@ NORA_3B = VLAModel(
     measured_5090_ms_per_action=79.22,
     measured_5090_prefill_ms=30.63,
     measured_5090_calibrated=True,
+    n_action_tokens=5,                              # FAST+, measured (5 tokens + EOS)
+    # Per-component split from keyhole 49068ec (run-2 VLM-forward 29.85 ms;
+    # decode/token from the run-1 e2e that set measured_5090_ms_per_action).
+    # ~1% run-to-run vs the 79.22 e2e; well within noise.
+    measured_5090_components={
+        "vision_ms": 13.83,
+        "llm_prefill_ms": 16.11,
+        "decode_ms_per_token": 9.72,
+    },
     notes=(
         "3B-parameter VLA on Qwen2.5-VL-3B backbone. Designed for real-time "
         "edge deployment. FAST+ tokenizer for action sequences. Single-loop "
@@ -467,6 +516,7 @@ NORA_1P5 = VLAModel(
     action_hz_min=20.0, action_hz_max=60.0,
     source_paper="same group arxiv Nov 2025",
     measured_5090_ms_per_action=None,
+    n_action_tokens=5,                              # placeholder — dual-loop emits chunks via denoising; Phase 3b semantics differ
     notes=(
         "NORA + flow-matching action expert coupled via layer-wise "
         "self-attention. Action expert ~800M params. Dual-loop native: "
@@ -523,6 +573,7 @@ PI_0P5 = VLAModel(
     action_hz_min=30.0, action_hz_max=50.0,
     source_paper="Physical Intelligence Apr 2025",
     measured_5090_ms_per_action=None,
+    n_action_tokens=10,                             # placeholder — 10 actions/chunk via denoising; Phase 3b semantics differ
     notes=(
         "VLM=PaliGemma-3B (frozen during inference), action expert=Gemma-300M "
         "flow-matching. 10-step denoising per action, 10 actions per chunk. "
@@ -579,7 +630,8 @@ BITVLA = VLAModel(
     vlm_hz_min=30.0, vlm_hz_max=30.0,
     action_hz_min=30.0, action_hz_max=30.0,
     source_paper="arxiv Mar 2026",
-    measured_5090_ms_per_action=12.0,
+    measured_5090_ms_per_action=12.0,               # paper figure (not a firsthand 5090 measurement)
+    n_action_tokens=8,                              # pending verification (reviewer estimate)
     notes=(
         "Fully native 1.58-bit (ternary weights {-1,0,+1}) plus INT8 "
         "activations. NO FP required anywhere. Architecturally single-loop "
