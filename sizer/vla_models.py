@@ -323,8 +323,32 @@ OPENVLA_7B_CACHED = VLAModel(
 
 
 # NORA 3B — single-loop, edge-tuned (Hung et al arxiv Apr 2025).
-# Compute-friendly baseline; 8.3 GB inference per paper. Total 3.0B =
-# ~0.5B vision (Qwen2.5-VL ViT) + ~2.0B LLM + 0.5B action head.
+# Compute-friendly baseline. Total 3.0B = ~0.5B vision (Qwen2.5-VL ViT)
+# + ~2.0B LLM + 0.5B action head.
+#
+# ── 5090-CALIBRATED COMPONENTS (keyhole 49068ec, bf16/sdpa, n=20) ──────────
+# Per-component wall-clock split from forward-hook CUDA events around the
+# Qwen2.5-VL vision tower (paired per-trial; llm_prefill = VLM-total − vision):
+#   vision_encoder forward : 13.83 ms p50  (46% — compute-bound ViT, fixed cost)
+#   llm_prefill            : 16.11 ms p50  (54% — 94 input tokens, compute-bound)
+#   action-token decode    :  9.48 ms/token (BW-bound; 5 tokens/action)
+#
+# FLOP/AI back-solved against the sizer's OWN 5090 roofline constants
+# (RTX_5090_REFERENCE: peak_bf16=209 TFLOPS, eff_BW=1523 GB/s, vision
+# compute_util_factor=0.85, llm_prefill_util_factor=0.10) so the numbers stay
+# self-consistent with how Phase 3 will project. Derivation:
+#   compute regime: gops = measured_ms × peak_bf16 × util
+#   BW regime:      AI   = FLOP_per_token / bytes_per_token
+#
+# CAVEAT — these flops_per_call_g are EFFECTIVE GFLOP at the 5090's util
+# factors, not physical FLOP (one latency measurement can't separate FLOP
+# from util). The vision figure in particular bakes in compute_util_factor
+# 0.85 (CNN-calibrated; a ViT likely realizes lower, so physical FLOP is
+# lower and effective util lower). When Phase 3 projects onto an NPU it must
+# scale by the TOPS ratio HOLDING util constant (or re-derive util per
+# silicon) — applying a different NPU util to these effective FLOPs would
+# double-count the util gap. The un-corrupted anchors are the measured
+# latencies above + measured_5090_prefill_ms; treat those as ground truth.
 NORA_3B = VLAModel(
     key="nora_3b",
     display_name="NORA 3B (single-loop)",
@@ -332,20 +356,33 @@ NORA_3B = VLAModel(
         "vision_encoder": VLAComponent(
             name="vision_encoder",
             params_b=0.5,                           # Qwen2.5-VL ViT
-            flops_per_call_g=50.0,
+            # 5090-calibrated: 13.83 ms × 209 TFLOPS × 0.85 util. Paper-derived
+            # 50 GFLOP was ~49× too low (compute floor 0.28 ms << measured).
+            flops_per_call_g=2458.0,                # effective @ 5090 vision util 0.85
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=100.0,
+            arithmetic_intensity=100.0,             # compute-bound — AI non-binding
         ),
         "llm_backbone": VLAComponent(
             name="llm_backbone",
             params_b=2.0,                           # Qwen2.5-VL 3B base minus ViT
-            flops_per_call_g=28.0,                  # ~7 action tokens × 2 × 2.0B
+            # 5090-calibrated per-VLM-call total: prefill 337 GFLOP
+            # (16.11 ms × 209 × 0.10 prefill util; analytic 2×2.0B×94tok=376
+            # predicts 18 ms — agreement validates the 0.10 constant) + 5 action
+            # tokens × 2×2.0B = 20 GFLOP decode. Was 28 (decode-only, omitted prefill).
+            flops_per_call_g=357.0,                 # prefill 337 (compute) + decode 20 (BW)
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=3.0,
+            # 5090-calibrated decode AI: 2×2.0B FLOP/tok ÷ 6.0 GB/tok measured =
+            # 0.67 ops/byte. Was 3.0 (~4.5× too high). Decode realizes only 42%
+            # of the bf16 BW floor under stock HF generate() (the headroom gap).
+            arithmetic_intensity=0.67,              # decode is BW-bound; binding knob
         ),
         "action_head": VLAComponent(
             name="action_head",
             params_b=0.5,                           # FAST+ tokenizer head
+            # NOT separately calibrated: NORA is single-loop autoregressive — the
+            # FAST+ action tokens are generated THROUGH the LLM decode (measured
+            # as part of llm_prefill+decode above), not a standalone head forward.
+            # Left at first-order estimate; do not double-count against llm_backbone.
             flops_per_call_g=30.0,
             dtype_required=("int8", "fp8", "bf16"),
             arithmetic_intensity=3.0,
