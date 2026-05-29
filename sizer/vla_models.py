@@ -130,6 +130,12 @@ class VLAModel:
     # Provenance
     source_paper: str
     measured_5090_ms_per_action: float | None   # None = projection-only entry
+                                                # When measured_5090_calibrated,
+                                                # this is the END-TO-END p50 (prefill
+                                                # + action-token decode + EOS) under
+                                                # stock HF generate() — the honest
+                                                # per-action latency, not the paper's
+                                                # idealized prefill anchor.
     notes: str
 
     # ── Optional catalog metadata ──────────────────────────────────────
@@ -179,6 +185,16 @@ class VLAModel:
     # taxonomy shows 🟡 same_class (calibrated) or 🟠 cross_class
     # (uncalibrated projection).
     measured_5090_calibrated: bool = False
+
+    # Measured RTX 5090 VLM-forward (prefill) p50 in ms — the calibrated
+    # PREFILL component, distinct from measured_5090_ms_per_action (which is
+    # the full end-to-end per-action latency when calibrated). This is the
+    # number that reproduces a paper's published forward-pass anchor (e.g.
+    # NORA's "33 ms / 30 Hz" matches the VLM forward, NOT the e2e). The gap
+    # between prefill and e2e is action-token decode overhead under stock HF
+    # generate() — optimization headroom (no CUDA graphs / static KV cache /
+    # torch.compile), not measurement error. None until a 5090 bake-off lands.
+    measured_5090_prefill_ms: float | None = None
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -340,13 +356,27 @@ NORA_3B = VLAModel(
     vlm_hz_min=30.0, vlm_hz_max=30.0,
     action_hz_min=30.0, action_hz_max=30.0,
     source_paper="Hung et al arxiv Apr 2025",
-    measured_5090_ms_per_action=33.0,
+    # MEASURED on RTX 5090 (bf16 / sdpa, n=20, warmup=5, torch 2.11.0+cu130,
+    # transformers 5.5.4) by [backend] 2026-05-29, harness on origin/main at
+    # 27342e8. End-to-end p50 = 79.22 ms (p95 81.37) = prefill + 5 FAST+
+    # action tokens + EOS @ 12.6 Hz. The paper's "33 ms / 30 Hz" reproduces
+    # our VLM-FORWARD (prefill) p50 of 30.63 ms — see measured_5090_prefill_ms.
+    # The prefill→e2e gap (~9.72 ms/token decode over 5 tokens, ~3× the bf16
+    # BW floor) is optimization headroom under stock HF generate() (no CUDA
+    # graphs / static KV cache / torch.compile), NOT measurement error.
+    measured_5090_ms_per_action=79.22,
+    measured_5090_prefill_ms=30.63,
+    measured_5090_calibrated=True,
     notes=(
         "3B-parameter VLA on Qwen2.5-VL-3B backbone. Designed for real-time "
-        "edge deployment. Inference fits in 8.3 GB GPU memory (paper). FAST+ "
-        "tokenizer for action sequences. Single-loop autoregressive — no "
-        "cached intent in the published model. Used as the compute-friendly "
-        "baseline."
+        "edge deployment. FAST+ tokenizer for action sequences. Single-loop "
+        "autoregressive — no cached intent in the published model. Used as the "
+        "compute-friendly baseline. MEASURED on RTX 5090: end-to-end 79.22 ms/"
+        "action (p50) under stock HF generate(); VLM-forward prefill 30.63 ms "
+        "reproduces the paper's 33 ms anchor (calibration confirmed at the "
+        "prefill). Peak VRAM 7.13 GB (weights 7.11 GB) — implies ~3.56B real "
+        "loaded params incl. the Qwen2.5-VL vision tower, above the 3.0B "
+        "backbone figure; the paper's 8.3 GB likely includes context overhead."
     ),
     libero_success_pct=72.1,
     inference_dram_gb_bf16=6.0,
@@ -356,7 +386,7 @@ NORA_3B = VLAModel(
     citation_year=2025,
     dtype_path_default="int8",
     dtype_path_alt="fp8",
-    hf_repo="declare-lab/nora",                     # default per next-session brief; backend verifies
+    hf_repo="declare-lab/nora",                     # verified firsthand by [backend] 2026-05-29
 )
 
 
