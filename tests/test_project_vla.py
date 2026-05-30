@@ -225,6 +225,80 @@ def test_npu_share_slows_bw_bound_decode():
     assert contended < full                         # less BW → slower
 
 
+# ── Phase 3c: multi-camera + fleet ──────────────────────────────────────────
+
+from sizer.project_vla import project_vla_sensitivity  # noqa: E402
+
+PI05 = VLA_MODELS["pi_0p5"]
+
+
+def test_pi05_default_is_measured_3cam_and_1cam_scales_vision_down():
+    """π0.5's measured anchor is 3-camera, so the default projection IS 3-camera
+    (measured headline); n_cameras=1 down-scales vision ~3× (linear assumption)."""
+    d3 = project_vla(PI05, RTX_5090_REFERENCE)                 # default → measured 3
+    assert d3["n_cameras"] == 3 and d3["vla_source"] == "measured"
+    d1 = project_vla(PI05, RTX_5090_REFERENCE, n_cameras=1)
+    assert abs(d3["vision_ms"] / d1["vision_ms"] - 3.0) < 0.01  # 3-cam ≈ 3× 1-cam
+    assert d3["mode"] == "multi_camera" and d1["mode"] == "single"
+    assert d3["vision_ms_per_camera"] == d3["vision_ms"] / 3
+
+
+def test_openvla_2cam_infeasible_native_max_1():
+    r = project_vla(OPENVLA, NPU_HIGH, n_cameras=2)
+    assert r["runs"] is False
+    assert "supports max 1 camera" in r["reason"]
+
+
+def test_fleet_memory_gate_and_per_robot_throttle():
+    """fleet_size = N independent instances time-sharing one NPU: per-robot rate
+    = single / N, memory = N × per-instance, overflow → INFEASIBLE."""
+    ok = project_vla(NORA, NPU_HIGH, fleet_size=4)
+    assert ok["runs"] is True and ok["mode"] == "fleet"
+    assert ok["fleet_memory_gb"] == ok["dram_gb"] * 4
+    assert abs(ok["action_hz"] - ok["per_instance_action_hz"] / 4) < 1e-6
+    assert ok["aggregate_action_hz"] == ok["per_instance_action_hz"]
+    big = project_vla(NORA, NPU_HIGH, fleet_size=100)
+    assert big["runs"] is False and "exceeds" in big["reason"]
+
+
+def test_pi05_fleet_multi_camera_combinatorial():
+    r = project_vla(PI05, NPU_HIGH, n_cameras=3, fleet_size=2)
+    assert r["runs"] is True and r["mode"] == "fleet_multi_camera"
+    assert r["n_cameras"] == 3 and r["fleet_size"] == 2
+    assert abs(r["ms_per_action"] - r["per_instance_ms_per_action"] * 2) < 1e-6
+
+
+def test_offmeasured_camera_count_downgrades_to_cross_class():
+    """Scaling to a camera count other than the measured one is linear-assumed →
+    badge drops to 🟠 with a reason; the measured count stays calibrated."""
+    r2 = project_vla(PI05, NPU_HIGH, n_cameras=2)               # measured at 3
+    assert r2["vla_source"] == "cross_class"
+    assert "assumed linear" in r2["vla_source_reason"]
+    r3 = project_vla(PI05, NPU_HIGH, n_cameras=3)               # the measured count
+    assert r3["vla_source"] == "calibrated" and "vla_source_reason" not in r3
+
+
+def test_sensitivity_matrix_covers_camera_x_fleet_grid():
+    rows = project_vla_sensitivity(PI05, NPU_HIGH,
+                                   n_cameras_options=(1, 2, 3),
+                                   fleet_size_options=(1, 2))
+    assert len(rows) == 6
+    assert {(r["n_cameras"], r["fleet_size"]) for r in rows} == {
+        (1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)}
+
+
+def test_bitvla_measured_at_2cam_runs_on_int8_mid_fleet():
+    """BitVLA: measured at 2 cameras (default), int_only → runs on INT8-only Mid
+    even as a fleet. Because its measured default is 2 cams, any fleet is
+    inherently fleet_multi_camera (vision_scale stays 1.0 → calibrated, no
+    🟠 downgrade)."""
+    r = project_vla(BITVLA, NPU_MID, fleet_size=3)
+    assert r["n_cameras"] == 2                                  # measured default
+    assert r["runs"] is True and r["mode"] == "fleet_multi_camera"
+    assert r["vla_source"] == "calibrated"                      # 2 == measured, not downgraded
+    assert r["fleet_memory_gb"] == r["dram_gb"] * 3
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -283,6 +283,28 @@ class VLAModel:
     # H — there is no decode term and no FP gate. None until an OFT bake-off lands.
     measured_5090_oft: dict | None = None
 
+    # ── Phase 3c: multi-camera + fleet modeling ─────────────────────────────
+    # How many camera feeds this VLA's architecture natively supports. π0.5 = 3,
+    # BitVLA = 2 (LIBERO agentview + wrist), the rest = 1. project_vla rejects
+    # n_cameras > this with runs:False (use fleet_size replication instead — a
+    # 3-camera-stitched panorama on a 1-camera model is out-of-distribution).
+    max_cameras_native: int = 1
+
+    # The camera count the measured 5090 anchor was captured at — the BASELINE
+    # for per-camera vision scaling. CRITICAL: for π0.5 (3) and BitVLA (2) the
+    # stored vision_ms is ALREADY a multi-camera measurement, so per-camera cost
+    # = measured vision_ms / measured_n_cameras (NOT / n_cameras). project_vla
+    # defaults n_cameras to THIS value, so the default projection reproduces the
+    # measured headline; other camera counts scale linearly and drop to 🟠.
+    measured_n_cameras: int = 1
+
+    # True when the LLM/action cost does NOT scale with camera count (only the
+    # vision encoder fires once per camera; the LLM consumes the fused tokens
+    # once). True for all natively-multi-camera VLAs measured so far; vacuous for
+    # single-camera models (n always = 1). project_vla scales ONLY vision by
+    # n_cameras when this holds.
+    llm_backbone_invariant_to_n_cameras: bool = True
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Module-level constant per VLA entry. Convention mirrors llm_models.py:
@@ -806,6 +828,11 @@ PI_0P5 = VLAModel(
     dtype_path_default="int8+bf16",
     dtype_path_alt="fp8+bf16",
     hf_repo="lerobot/pi05_base",                    # [backend] 0fa4474 fixed lerobot/pi0_5 (404) → lerobot/pi05_base
+    # Multi-camera (Phase 3c): π0.5 natively supports up to 3 cameras; the 5090
+    # measurement was captured at 3 (vision_ms 14.563 = SigLIP ×3 cams). So 3 is
+    # the calibrated default; n_cameras 1/2 are linear down-scales (🟠).
+    max_cameras_native=3,
+    measured_n_cameras=3,
 )
 
 
@@ -918,6 +945,11 @@ BITVLA = VLAModel(
     dtype_path_default="int_only",
     dtype_path_alt="int_only",
     hf_repo="hongyuw/ft-bitvla-bitsiglipL-224px-libero_goal-bf16",  # LIBERO-goal FT checkpoint ([backend] 3317776)
+    # Multi-camera (Phase 3c): the LIBERO checkpoint takes 2 cameras (agentview +
+    # wrist); the 5090 measurement was captured at 2 (vision_ms 22.558 = ×2 cams).
+    # So 2 is the calibrated default; n_cameras=1 is a linear down-scale (🟠).
+    max_cameras_native=2,
+    measured_n_cameras=2,
 )
 
 

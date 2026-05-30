@@ -133,25 +133,52 @@ def _dram_gb_for_dtype(vla: VLAModel, exec_dtype: str) -> float | None:
     return getattr(vla, field, None)
 
 
+def _vla_mode(n_cameras: int, fleet_size: int) -> str:
+    multi, fleet = n_cameras > 1, fleet_size > 1
+    if multi and fleet:
+        return "fleet_multi_camera"
+    return "fleet" if fleet else ("multi_camera" if multi else "single")
+
+
 def project_vla(
     vla: VLAModel,
     hw: Hardware,
     *,
     dtype: str | None = None,
     n_action_tokens: int | None = None,
+    n_cameras: int | None = None,
+    fleet_size: int = 1,
     npu_share: float | None = None,
     reference: Hardware = RTX_5090_REFERENCE,
 ) -> dict:
-    """Project single-loop VLA per-action latency + action rate on `hw`.
+    """Project VLA per-action latency + action rate on `hw`.
 
-    Returns a dict (mirrors project_llm's shape). For dual-loop architectures
-    returns `{"deferred": True, ...}` — Phase 3b. For a model/dtype that won't
-    run on `hw` returns `{"runs": False, ...}` with a reason.
+    Returns a dict (mirrors project_llm's shape). Dispatches on architecture:
+    single_loop / oft_parallel_chunk / dual_loop. Dual-loop without a measured
+    anchor returns `{"deferred": True, ...}`; a model/dtype/config that won't run
+    returns `{"runs": False, ...}` with a reason.
+
+    Phase 3c — multi-camera + fleet:
+      • `n_cameras` (default = `vla.measured_n_cameras`, so the default projection
+        reproduces the measured headline): scales ONLY the vision encoder by
+        `n_cameras / measured_n_cameras` (LLM/action are shared per
+        `llm_backbone_invariant_to_n_cameras`). `> max_cameras_native` → runs:False
+        (use fleet replication, not stitched panorama). A camera count other than
+        the measured one drops the badge to 🟠 (linear-assumed, `vla_source_reason`).
+      • `fleet_size`: N independent instances time-sharing ONE NPU (serial /
+        round-robin, conservative). Per-robot rate = single-instance / N;
+        `aggregate_action_hz` = single-instance; memory = N × per-instance →
+        `fleet_memory_gb`; fleet-memory overflow → runs:False.
     """
     share = npu_share if npu_share is not None else hw.npu_share_default
     share = max(share, 1e-6)
     n_tok = n_action_tokens if n_action_tokens is not None else vla.n_action_tokens
     exec_dtype = _resolve_exec_dtype(vla, dtype)
+    # Default camera count = the count the measured anchor was captured at, so an
+    # un-parameterized call reproduces the measured/calibrated headline (π0.5=3,
+    # BitVLA=2). Anything else is a linear scale off that baseline.
+    if n_cameras is None:
+        n_cameras = vla.measured_n_cameras
 
     base = {
         "vla": vla.key,
@@ -160,17 +187,110 @@ def project_vla(
         "architecture": vla.architecture,
         "n_action_tokens": n_tok,
         "npu_share": share,
+        "n_cameras": n_cameras,
+        "fleet_size": fleet_size,
     }
+    mode = _vla_mode(n_cameras, fleet_size)
 
-    # ── architecture dispatch ───────────────────────────────────────────────
+    # ── Phase 3c gates: camera count + fleet validity ───────────────────────
+    if n_cameras < 1 or fleet_size < 1:
+        return {**base, "mode": mode, "runs": False,
+                "reason": "n_cameras and fleet_size must both be >= 1"}
+    if n_cameras > vla.max_cameras_native:
+        return {**base, "mode": mode, "runs": False,
+                "reason": (f"{vla.display_name} supports max "
+                           f"{vla.max_cameras_native} camera(s) natively; "
+                           f"{n_cameras} requested — multi-camera beyond native "
+                           f"support needs fleet_size replication, not n_cameras "
+                           f"(a stitched panorama is out-of-distribution).")}
+    vision_scale = n_cameras / vla.measured_n_cameras
+
+    # ── architecture dispatch (each returns a per-instance result dict) ─────
     if vla.architecture == "oft_parallel_chunk":
-        return _project_oft_parallel(vla, hw, base, share=share, reference=reference)
-    if vla.architecture != "single_loop":
-        return _project_dual_loop(vla, hw, base, share=share, reference=reference)
+        result = _project_oft_parallel(vla, hw, base, share=share,
+                                       reference=reference, vision_scale=vision_scale)
+    elif vla.architecture != "single_loop":
+        result = _project_dual_loop(vla, hw, base, share=share,
+                                    reference=reference, vision_scale=vision_scale)
+    else:
+        result = _project_single_loop(vla, hw, base, share=share, n_tok=n_tok,
+                                      exec_dtype=exec_dtype, reference=reference,
+                                      vision_scale=vision_scale)
 
+    return _finalize_vla(result, vla=vla, hw=hw, n_cameras=n_cameras,
+                         fleet_size=fleet_size, vision_scale=vision_scale, mode=mode)
+
+
+def _finalize_vla(r, *, vla, hw, n_cameras, fleet_size, vision_scale, mode):
+    """Apply Phase 3c multi-camera badge logic + fleet replication to a
+    per-instance result, and stamp the camera/fleet/mode fields. Safe on
+    won't-run / deferred dicts (just stamps the fields, no scaling)."""
+    r = {**r, "n_cameras": n_cameras, "fleet_size": fleet_size, "mode": mode}
+    if not r.get("runs"):
+        return r
+
+    # Multi-camera scaling to a count other than the measured one is linear-
+    # assumed → drop a measured/calibrated badge to 🟠 (the vision-encoder
+    # ×N assumption isn't validated at this count).
+    if vision_scale != 1.0 and r.get("vla_source") in ("measured", "calibrated"):
+        r["vla_source"] = "cross_class"
+        r["vla_source_reason"] = (
+            f"multi-camera scaling assumed linear (measured at "
+            f"{vla.measured_n_cameras} cam, projecting {n_cameras})")
+
+    vm = r.get("vision_ms")
+    if vm is not None:
+        r["vision_ms_per_camera"] = vm / n_cameras if n_cameras else vm
+        r["total_vision_ms"] = vm                       # already ×vision_scale in-branch
+
+    # Fleet: N independent instances time-share ONE NPU (serial/round-robin —
+    # conservative, no cross-instance batching benefit). Per-robot rate =
+    # single-instance / N; aggregate NPU throughput = single-instance.
+    per_ms, per_hz = r["ms_per_action"], r["action_hz"]
+    r["per_instance_ms_per_action"] = per_ms
+    r["per_instance_action_hz"] = per_hz
+    r["aggregate_action_hz"] = per_hz
+    if fleet_size > 1:
+        r["ms_per_action"] = per_ms * fleet_size
+        r["action_hz"] = per_hz / fleet_size
+
+    dg = r.get("dram_gb")
+    if dg is not None:
+        r["fleet_memory_gb"] = dg * fleet_size
+        fits = (r["fleet_memory_gb"] + 0.5) < hw.mem_capacity_gb
+        r["fits_in_memory"] = fits
+        if not fits:
+            r["runs"] = False
+            r["reason"] = (f"fleet of {fleet_size} × {dg:.1f} GB = "
+                           f"{r['fleet_memory_gb']:.1f} GB exceeds {hw.name} "
+                           f"capacity {hw.mem_capacity_gb:.0f} GB")
+    return r
+
+
+def project_vla_sensitivity(
+    vla: VLAModel,
+    hw: Hardware,
+    *,
+    n_cameras_options=(1,),
+    fleet_size_options=(1,),
+    **kwargs,
+) -> list[dict]:
+    """Sweep project_vla over the n_cameras × fleet_size grid (one result dict
+    per combination). Defaults (1,)×(1,) keep single-instance behavior so
+    existing callers don't break. Extra kwargs (dtype, npu_share, reference, …)
+    pass straight through to project_vla."""
+    rows = []
+    for nc in n_cameras_options:
+        for fs in fleet_size_options:
+            rows.append(project_vla(vla, hw, n_cameras=nc, fleet_size=fs, **kwargs))
+    return rows
+
+
+def _project_single_loop(vla, hw, base, *, share, n_tok, exec_dtype, reference,
+                         vision_scale=1.0):
+    """Single-loop autoregressive: vision + LLM prefill + n_action_tokens × decode.
+    (vision_scale always 1.0 in practice — single-loop models are 1-camera.)"""
     # ── dtype runnability gate ──────────────────────────────────────────────
-    # Each component must accept the execution dtype, and the silicon must have
-    # nonzero peak at it (catches e.g. a bf16-only model on Mid, which is INT8-only).
     for comp in vla.components.values():
         if exec_dtype not in comp.dtype_required:
             return {**base, "runs": False,
@@ -182,7 +302,6 @@ def project_vla(
         return {**base, "runs": False,
                 "reason": f"{hw.name} has no {exec_dtype} compute (peak_tops=0)"}
 
-    # ── memory gate ─────────────────────────────────────────────────────────
     dram_gb = _dram_gb_for_dtype(vla, exec_dtype)
     fits = None if dram_gb is None else (dram_gb + 0.5) < hw.mem_capacity_gb
 
@@ -191,16 +310,17 @@ def project_vla(
 
     if vla.measured_5090_calibrated and comp_meas:
         if is_reference:
-            # 🟢 measured — return the measured component latencies verbatim.
-            # ms_per_action uses the authoritative measured e2e headline
-            # (composing from components differs ~1% due to run-to-run).
+            # 🟢 measured — measured component latencies. ms_per_action uses the
+            # authoritative measured e2e headline at the measured camera count;
+            # recompose only if vision was rescaled (multi-camera what-if).
             vla_source, regime = "measured", "single_loop_measured"
-            vision_ms = comp_meas["vision_ms"]
+            vision_ms = comp_meas["vision_ms"] * vision_scale
             prefill_ms = comp_meas["llm_prefill_ms"]
             decode_ms_tok = comp_meas["decode_ms_per_token"]
-            ms_per_action = (vla.measured_5090_ms_per_action
-                             if vla.measured_5090_ms_per_action is not None
-                             else vision_ms + prefill_ms + n_tok * decode_ms_tok)
+            if vision_scale == 1.0 and vla.measured_5090_ms_per_action is not None:
+                ms_per_action = vla.measured_5090_ms_per_action
+            else:
+                ms_per_action = vision_ms + prefill_ms + n_tok * decode_ms_tok
         else:
             # 🔵 calibrated — latency-anchor scaling. Vision + LLM-prefill are
             # compute-bound (scale by their respective effective-compute ratios,
@@ -212,7 +332,7 @@ def project_vla(
 
             ref_vis_eff = ref_peak * reference.compute_util_factor
             tgt_vis_eff = peak * hw.compute_util_factor
-            vision_ms = comp_meas["vision_ms"] * (ref_vis_eff / tgt_vis_eff)
+            vision_ms = comp_meas["vision_ms"] * (ref_vis_eff / tgt_vis_eff) * vision_scale
 
             ref_pf_eff = ref_peak * reference.llm_prefill_util_factor
             tgt_pf_eff = peak * hw.llm_prefill_util_factor
@@ -234,7 +354,7 @@ def project_vla(
         vision = vla.components["vision_encoder"]
         llm = vla.components["llm_backbone"]
 
-        vision_ms = vision.flops_per_call_g / (peak * hw.compute_util_factor)
+        vision_ms = vision.flops_per_call_g / (peak * hw.compute_util_factor) * vision_scale
         prefill_ms = llm.flops_per_call_g / (peak * hw.llm_prefill_util_factor)
         # decode bytes/token from AI: bytes = decode_flops / AI; decode_flops/tok
         # ≈ 2 × active LLM params (GPT-style matmul). BW-bound time = bytes / BW.
@@ -322,13 +442,16 @@ def _denoise_edge_step(dl: dict, hw: Hardware, share: float,
 
 
 def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
-                       share: float, reference: Hardware) -> dict:
+                       share: float, reference: Hardware,
+                       vision_scale: float = 1.0) -> dict:
     """Project dual-loop (flow-matching) per-action latency + action rate.
 
     Slow loop (VLM backbone, once/chunk) is 🔵 calibrated (latency-anchor scaled
     like single-loop's vision+prefill). Fast loop (denoise) is launch-bound: the
     measured step is carried UNCHANGED as the eager ceiling (headline) + a physics
     floor as headroom — never BW-scaled. FP-required head is a hard gate.
+    `vision_scale` (Phase 3c) = n_cameras / measured_n_cameras — scales only the
+    vision term (π0.5 measured at 3 cameras; LLM/denoise are camera-invariant).
     """
     dl = vla.measured_5090_dual_loop
     comp_meas = vla.measured_5090_components
@@ -377,14 +500,21 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
     eager_step_ms, floor_step_ms = _denoise_edge_step(dl, hw, share, reference)
 
     if is_reference:
-        # 🟢 measured — return the measured topology verbatim.
+        # 🟢 measured — measured topology verbatim at the measured camera count;
+        # recompose (dropping the small embed/proj overhead in the stored chunk)
+        # only when vision was rescaled for a multi-camera what-if.
         vla_source, regime = "measured", "dual_loop_measured"
-        vision_ms = comp_meas["vision_ms"]
+        vision_ms = comp_meas["vision_ms"] * vision_scale
         prefill_ms = comp_meas["llm_prefill_ms"]
-        vlm_backbone_ms = dl["vlm_backbone_ms"]
         expert_dtype = _REFERENCE_DTYPE               # measured at bf16
-        ms_per_action = dl["amortized_ms_per_action"]  # authoritative measured amortization
-        chunk_latency_ms = dl["chunk_latency_ms"]
+        if vision_scale == 1.0:
+            vlm_backbone_ms = dl["vlm_backbone_ms"]
+            ms_per_action = dl["amortized_ms_per_action"]  # authoritative measured amortization
+            chunk_latency_ms = dl["chunk_latency_ms"]
+        else:
+            vlm_backbone_ms = vision_ms + prefill_ms
+            chunk_latency_ms = vlm_backbone_ms + N * eager_step_ms
+            ms_per_action = chunk_latency_ms / H
     else:
         # 🔵 calibrated VLM backbone (compute-bound, latency-anchor scaled) +
         # decomposed fast loop (launch_const survives, BW fraction scales).
@@ -393,7 +523,7 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
 
         ref_vis_eff = ref_peak * reference.compute_util_factor
         tgt_vis_eff = vlm_peak * hw.compute_util_factor
-        vision_ms = comp_meas["vision_ms"] * (ref_vis_eff / tgt_vis_eff)
+        vision_ms = comp_meas["vision_ms"] * (ref_vis_eff / tgt_vis_eff) * vision_scale
 
         ref_pf_eff = ref_peak * reference.llm_prefill_util_factor
         tgt_pf_eff = vlm_peak * hw.llm_prefill_util_factor
@@ -449,7 +579,8 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
 # ── OFT parallel-chunk (Phase 3b) ───────────────────────────────────────────
 
 def _project_oft_parallel(vla: VLAModel, hw: Hardware, base: dict, *,
-                          share: float, reference: Hardware) -> dict:
+                          share: float, reference: Hardware,
+                          vision_scale: float = 1.0) -> dict:
     """Project OFT parallel-chunk (BitVLA) per-action latency + action rate.
 
     ONE prefill-shaped VLM forward → H actions read in parallel by an
@@ -457,6 +588,8 @@ def _project_oft_parallel(vla: VLAModel, hw: Hardware, base: dict, *,
     are compute-bound → latency-anchor scaled like single-loop's vision+prefill.
     NO decode term, NO FP gate (int_only runs on INT8-only silicon). The measured
     anchor is the bf16-dense reality; ternary-kernel speedups are NOT applied here.
+    `vision_scale` (Phase 3c) = n_cameras / measured_n_cameras — BitVLA measured
+    at 2 cameras, so vision_ms scales off that baseline; LLM is camera-invariant.
     """
     of = vla.measured_5090_oft
     if not (vla.measured_5090_calibrated and of):
@@ -487,12 +620,13 @@ def _project_oft_parallel(vla: VLAModel, hw: Hardware, base: dict, *,
     is_reference = (hw.name == reference.name and hw.tier_family == reference.tier_family)
 
     if is_reference:
-        # 🟢 measured — return the measured forward split + amortized verbatim.
+        # 🟢 measured — measured forward split (recomposes exactly at the measured
+        # camera count; vision rescaled for a multi-camera what-if).
         vla_source, regime = "measured", "oft_parallel_chunk_measured"
-        vision_ms = of["vision_ms"]
+        vision_ms = of["vision_ms"] * vision_scale
         llm_forward_ms = of["llm_forward_ms"]
-        forward_ms = of["forward_ms"]
-        ms_per_action = of["ms_per_action"]
+        forward_ms = vision_ms + llm_forward_ms
+        ms_per_action = forward_ms / H
     else:
         # 🔵 calibrated — both stages compute-bound, latency-anchor scaled (vision
         # by compute_util_factor, llm_forward by llm_prefill_util_factor — the
@@ -502,7 +636,7 @@ def _project_oft_parallel(vla: VLAModel, hw: Hardware, base: dict, *,
 
         ref_vis_eff = ref_peak * reference.compute_util_factor
         tgt_vis_eff = peak * hw.compute_util_factor
-        vision_ms = of["vision_ms"] * (ref_vis_eff / tgt_vis_eff)
+        vision_ms = of["vision_ms"] * (ref_vis_eff / tgt_vis_eff) * vision_scale
 
         ref_pf_eff = ref_peak * reference.llm_prefill_util_factor
         tgt_pf_eff = peak * hw.llm_prefill_util_factor
