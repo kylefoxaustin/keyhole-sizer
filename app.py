@@ -39,6 +39,8 @@ from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
     QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
 )
+from sizer.vla_models import VLA_MODELS, VLA_TRACKS
+from sizer.project_vla import project_vla
 from ratchet.anchors import load_llm_anchor, load_cnn_anchor
 
 
@@ -232,6 +234,119 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
     else:
         stages.append(("NLQ / LLM\n(off)", False))
     return stages
+
+
+# ── VLA (robot control-loop) projection rendering ───────────────────────────
+# The 3-state taxonomy badge (matches project_vla's vla_source). 🟢 measured =
+# this hw IS the 5090 reference; 🔵 calibrated = 5090-anchored latencies scaled
+# cross-class (footgun-free); 🟠 cross_class = uncalibrated roofline.
+_VLA_SOURCE_BADGE = {
+    "measured":    ("🟢", "measured",
+                    "RTX 5090 measured — this hardware IS the reference"),
+    "calibrated":  ("🔵", "calibrated",
+                    "5090-anchored latencies scaled to this tier (cross-class, footgun-free)"),
+    "cross_class": ("🟠", "cross_class",
+                    "first-principles roofline — model not calibrated"),
+}
+
+
+def _render_vla(vla, hw, npu_share):
+    """Self-contained VLA projection section — independent of the vision+LLM
+    platform budget. Branches the breakdown on the action-generation topology
+    (single-loop AR / OFT parallel-chunk / dual-loop flow-matching)."""
+    st.markdown("---")
+    st.header("🤖 VLA — robot control-loop projection")
+    st.caption(
+        "A vision-language-action manipulation loop on the selected NPU. This is "
+        "a distinct robotics workload — **not** part of the video+LLM platform "
+        "budget above/below — so it's sized on its own."
+    )
+    r = project_vla(vla, hw, npu_share=npu_share)
+
+    if r.get("deferred"):
+        st.info(f"**{vla.display_name}** — projection deferred: {r['reason']}")
+        return
+    if not r.get("runs"):
+        st.error(
+            f"**{vla.display_name} won't run on {hw.name}.**  \n{r['reason']}"
+        )
+        return
+
+    icon, label, tip = _VLA_SOURCE_BADGE.get(
+        r["vla_source"], ("", r.get("vla_source", "?"), ""))
+    st.caption(
+        f"{icon} **{label}** · {vla.display_name} · `{r['architecture']}` · "
+        f"exec dtype `{r.get('expert_dtype') or r['dtype']}` — {tip}"
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric(
+        "Control rate", f"{r['action_hz']:.1f} Hz",
+        delta=f"{r['ms_per_action']:.1f} ms/action", delta_color="off",
+        help="Actions per second the loop sustains — the robot-control headline. "
+             "Targets: ~30 Hz responsive teleop-class, ~10 Hz usable.",
+    )
+    _fit = r.get("fits_in_memory")
+    c2.metric(
+        "Memory fit",
+        "✓ fits" if _fit else ("✗ spills" if _fit is False else "—"),
+        delta=(f"{r['dram_gb']:.1f} GB / {hw.mem_capacity_gb:.0f} GB"
+               if r.get("dram_gb") is not None else None),
+        delta_color="off",
+    )
+
+    regime = r["regime"]
+    if regime.startswith("single_loop"):
+        c3.metric(
+            "AR decode", f"{r['decode_ms_per_token']:.1f} ms/tok",
+            delta=f"{r['n_action_tokens']} action tokens", delta_color="off",
+            help="Autoregressive action-token decode — BW-bound on edge memory.",
+        )
+        st.caption(
+            f"VLM forward **{r['vlm_forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} "
+            f"+ prefill {r['llm_prefill_ms']:.1f}) + {r['n_action_tokens']}×"
+            f"{r['decode_ms_per_token']:.1f} ms AR decode. Single-loop AR decode is "
+            f"the hard bandwidth wall on edge — High ≈ Mid because both are decode-BW-bound."
+        )
+    elif regime.startswith("dual_loop"):
+        c3.metric(
+            "Fast-loop only", f"{r['fast_loop_only_hz']:.0f} Hz",
+            delta=f"chunk of {r['action_chunk_length']} actions", delta_color="off",
+            help="Action rate if the VLM context is reused/pipelined across chunks "
+                 "(the published 'action expert at N Hz' regime).",
+        )
+        st.caption(
+            f"VLM backbone **{r['vlm_backbone_ms']:.1f} ms** once/chunk + "
+            f"{r['num_denoise_steps']}×{r['denoise_step_ms']:.1f} ms denoise "
+            f"(**{r['denoise_bottleneck']}**), amortized over {r['action_chunk_length']} "
+            f"actions. Chunk size is the amortization knob."
+        )
+        if r.get("action_hz_optimized_floor"):
+            st.caption(
+                f"⬆ **Optimized-kernel floor (headroom):** up to "
+                f"{r['action_hz_optimized_floor']:.0f} Hz amortized / "
+                f"{r['fast_loop_only_hz_optimized_floor']:.0f} Hz fast-loop with "
+                f"CUDA-graphs/fusion/compile (the eager number above is the conservative headline)."
+            )
+    elif regime.startswith("oft"):
+        c3.metric(
+            "Parallel chunk", f"{r['action_chunk_length']} actions",
+            delta=f"1 forward {r['forward_ms']:.1f} ms", delta_color="off",
+            help="OFT reads all action positions in parallel from a single "
+                 "prefill-shaped forward — no autoregressive token loop.",
+        )
+        st.caption(
+            f"One parallel forward **{r['forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} "
+            f"+ LLM {r['llm_forward_ms']:.1f}) → {r['action_chunk_length']} actions in "
+            f"parallel. Prefill-shaped, compute-bound — **avoids the AR decode "
+            f"bandwidth-wall**, which is why OFT is fast."
+        )
+
+    if vla.libero_success_pct is not None:
+        st.caption(f"LIBERO success (accuracy proxy): **{vla.libero_success_pct:.0f}%**")
+    with st.expander("ℹ️ Model notes + projection method"):
+        st.markdown(vla.notes)
+
 
 # ───────────────────────── Sidebar: hardware + workload ─────────────────────────
 
@@ -755,17 +870,77 @@ with st.sidebar:
         answer_kind = "short"
         llm_model_key = DEFAULT_LLM_MODEL_KEY
 
+    st.markdown("---")
+    st.header("VLA workload (robot control)")
+    vla_enabled = st.toggle(
+        "Enable VLA (Vision-Language-Action)",
+        value=False,
+        help="Project a robot manipulation control loop (vision → language → "
+             "action) on the selected NPU. Independent of the video+LLM platform "
+             "budget — VLAs are a distinct robotics workload. Three action-"
+             "generation topologies: single-loop autoregressive, OFT parallel-"
+             "chunk, and dual-loop flow-matching.",
+        key="vla_enabled",
+    )
+    if vla_enabled:
+        # Narrative tracks (intentionally overlap — same model can appear in
+        # several). Pick a track, then a model within it. Mirrors the vision
+        # track→pipeline picker. VLA_TRACKS key validity is asserted at import
+        # in vla_models.py, so no orphan check needed here.
+        _VLA_TRACK_LABELS = [
+            ("Single-loop autoregressive", "autoregressive"),
+            ("Dual-loop / cached",         "dual_loop"),
+            ("Integer-friendly",           "integer_friendly"),
+            ("FP-required (flow-matching)", "fp_required"),
+        ]
+        _vla_track_label = st.radio(
+            "VLA track",
+            options=[t[0] for t in _VLA_TRACK_LABELS],
+            index=0,
+            help="Narrative grouping; tracks overlap intentionally. The 5 "
+                 "measured models span single-loop AR (BW-walled on edge), OFT "
+                 "parallel-chunk (compute-bound, runs on INT8-only tiers), and "
+                 "dual-loop flow-matching (FP-required head, chunk-amortized).",
+            key="vla_track",
+        )
+        _vla_track_key = next(
+            k for lbl, k in _VLA_TRACK_LABELS if lbl == _vla_track_label)
+        _vla_keys = VLA_TRACKS[_vla_track_key]
+        vla_model_key = st.selectbox(
+            "VLA model",
+            options=_vla_keys,
+            format_func=lambda k: VLA_MODELS[k].display_name,
+            key=f"vla_model__{_vla_track_key}",
+        )
+        vla_model = VLA_MODELS[vla_model_key]
+        st.caption(
+            f"{vla_model.source_paper} · `{vla_model.architecture}`"
+            + (f" · LIBERO {vla_model.libero_success_pct:.0f}%"
+               if vla_model.libero_success_pct is not None else "")
+        )
+    else:
+        vla_model_key = None
+        vla_model = None
+
 # ───────────────────────── Main area ─────────────────────────
 
 # Degenerate state: nothing to size. Bail with a friendly nudge before
 # any projections or layout would attempt to render with no inputs.
-if not vision_enabled and not llm_enabled:
+if not vision_enabled and not llm_enabled and not vla_enabled:
     st.info(
-        "👈 Toggle **Enable vision pipeline** or **Enable generative LLM** "
-        "in the sidebar to start sizing. The app projects whichever workloads "
-        "are enabled — either alone, or both sharing the same silicon."
+        "👈 Toggle **Enable vision pipeline**, **Enable generative LLM**, or "
+        "**Enable VLA** in the sidebar to start sizing. The app projects "
+        "whichever workloads are enabled — alone, or sharing the same silicon."
     )
     st.stop()
+
+# VLA renders as its own independent section (not part of the vision+LLM
+# platform budget). Render it first; if VLA is the ONLY enabled workload, stop
+# here — the vision/LLM rendering path below assumes vision or llm is on.
+if vla_enabled and vla_model is not None:
+    _render_vla(vla_model, hw, npu_share)
+    if not vision_enabled and not llm_enabled:
+        st.stop()
 
 # ── Private NPU + CNN anchor hot-swap helpers — 2026-05-14 ─────────────
 # Per [docs] 2026-05-14 13:24 + spec at personal-ai-framework
