@@ -263,14 +263,17 @@ def _vla_rate_control(label, lo, hi, default, key, help_):
     return val, (abs(val - default) > 1e-9)
 
 
-def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default):
+def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default,
+                n_cameras=None, fleet_size=1, camera_mode="native"):
     """Self-contained VLA projection section — independent of the vision+LLM
     platform budget. Branches the breakdown on the action-generation topology
     (single-loop AR / OFT parallel-chunk / dual-loop flow-matching).
 
     `off_default` True means the user moved an operating-rate slider off the
     model's measured/published default → the calibrated projection no longer
-    anchors to this operating point, so the source badge drops to 🟠 (what-if)."""
+    anchors to this operating point, so the source badge drops to 🟠 (what-if).
+    Phase 3c: n_cameras / fleet_size / camera_mode drive the multi-camera + fleet
+    cost shapes (native vision[+prefill]×N / stitched flat / fleet ×N)."""
     st.markdown("---")
     st.header("🤖 VLA — robot control-loop projection")
     st.caption(
@@ -278,7 +281,8 @@ def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default):
         "a distinct robotics workload — **not** part of the video+LLM platform "
         "budget above/below — so it's sized on its own."
     )
-    r = project_vla(vla, hw, npu_share=npu_share)
+    r = project_vla(vla, hw, npu_share=npu_share, n_cameras=n_cameras,
+                    fleet_size=fleet_size, camera_mode=camera_mode)
 
     if r.get("deferred"):
         st.info(f"**{vla.display_name}** — projection deferred: {r['reason']}")
@@ -289,9 +293,12 @@ def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default):
         )
         return
 
-    # Operating-rate slider moved off the measured default → the calibrated
-    # number anchors to the default operating point only; relabel 🟠 what-if.
-    if off_default and r["vla_source"] in ("measured", "calibrated"):
+    # Source badge. The projection may already have dropped to 🟠 for a
+    # multi-camera what-if (vla_source_reason); an off-default operating rate is
+    # an additional what-if. Either → 🟠, prefer the projection's own reason.
+    if r["vla_source"] == "cross_class" and r.get("vla_source_reason"):
+        icon, label, tip = "🟠", "cross_class (what-if)", r["vla_source_reason"]
+    elif off_default and r["vla_source"] in ("measured", "calibrated"):
         icon, label, tip = ("🟠", "cross_class (what-if)",
                             "operating point moved off the measured default — "
                             "no longer a calibrated projection")
@@ -302,25 +309,38 @@ def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default):
         f"{icon} **{label}** · {vla.display_name} · `{r['architecture']}` · "
         f"exec dtype `{r.get('expert_dtype') or r['dtype']}` — {tip}"
     )
+    # Camera + fleet configuration line.
+    _cam_desc = (f"{r['n_cameras']}-camera stitched panorama"
+                 if camera_mode == "stitched"
+                 else f"{r['n_cameras']} camera(s) native")
     st.caption(
-        f"Operating point: VLM **{vlm_hz:.0f} Hz** · action **{action_hz:.0f} Hz**"
-        + ("  (measured default)" if not off_default else "  ⚠ off-default")
+        f"Config: {_cam_desc} · fleet of **{r['fleet_size']}** "
+        f"(`{r['mode']}`) · VLM {vlm_hz:.0f} Hz / action {action_hz:.0f} Hz"
+        + ("  ⚠ off-default" if off_default else "")
     )
 
     c1, c2, c3 = st.columns(3)
+    _fleet = r["fleet_size"] > 1
     c1.metric(
-        "Control rate", f"{r['action_hz']:.1f} Hz",
-        delta=f"{r['ms_per_action']:.1f} ms/action", delta_color="off",
-        help="Actions per second the loop sustains — the robot-control headline. "
-             "Targets: ~30 Hz responsive teleop-class, ~10 Hz usable.",
+        "Control rate" + (" / robot" if _fleet else ""),
+        f"{r['action_hz']:.1f} Hz",
+        delta=(f"{r['aggregate_action_hz']:.1f} Hz aggregate ({r['fleet_size']}×)"
+               if _fleet else f"{r['ms_per_action']:.1f} ms/action"),
+        delta_color="off",
+        help="Actions/sec the loop sustains. For a fleet this is the PER-ROBOT "
+             "rate (instances time-share the NPU); the delta shows aggregate "
+             "throughput. Targets: ~30 Hz responsive, ~10 Hz usable.",
     )
     _fit = r.get("fits_in_memory")
+    _mem = r.get("fleet_memory_gb") if _fleet else r.get("dram_gb")
     c2.metric(
-        "Memory fit",
+        "Memory fit" + (" (fleet)" if _fleet else ""),
         "✓ fits" if _fit else ("✗ spills" if _fit is False else "—"),
-        delta=(f"{r['dram_gb']:.1f} GB / {hw.mem_capacity_gb:.0f} GB"
-               if r.get("dram_gb") is not None else None),
+        delta=(f"{_mem:.1f} GB / {hw.mem_capacity_gb:.0f} GB"
+               if _mem is not None else None),
         delta_color="off",
+        help=("Fleet residency = fleet_size × per-instance weights, all resident."
+              if _fleet else None),
     )
 
     regime = r["regime"]
@@ -369,6 +389,9 @@ def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default):
             f"parallel. Prefill-shaped, compute-bound — **avoids the AR decode "
             f"bandwidth-wall**, which is why OFT is fast."
         )
+
+    if r.get("stitched_quality_caveat"):
+        st.warning(f"📐 {r['stitched_quality_caveat']}")
 
     # Target (slider) vs projected achievable — the honest "can this tier keep
     # up?" check. action_hz here is the desired operating rate; r['action_hz']
@@ -976,11 +999,58 @@ with st.sidebar:
             "whether the selected tier can sustain it.",
         )
         vla_off_default = _vlm_off or _act_off
+
+        # ── Phase 3c: multi-camera + fleet (the three measured cost shapes) ──
+        st.markdown("**Cameras & fleet**")
+        vla_camera_mode = st.radio(
+            "Camera config",
+            options=["native", "stitched"],
+            index=0,
+            format_func=lambda m: {"native": "Native feeds",
+                                   "stitched": "Stitched panorama"}[m],
+            horizontal=True,
+            help="Native = N separate camera feeds (vision — and for π0.5 also "
+                 "LLM prefill — scale with N; capped at the model's trained max). "
+                 "Stitched = N cameras combined into ONE downscaled panorama: "
+                 "flat compute (measured on OpenVLA) but resolution-per-camera "
+                 "degrades (out-of-distribution).",
+            key=f"vla_camera_mode__{vla_model_key}",
+        )
+        if vla_camera_mode == "stitched":
+            vla_n_cameras = st.slider(
+                "Cameras (stitched into one panorama)", 1, 6,
+                max(vla_model.measured_n_cameras, 1),
+                help="Stitched is flat-cost regardless of N — they share one "
+                     "downscaled input tensor. The quality caveat is in the projection.",
+                key=f"vla_ncam_stitch__{vla_model_key}")
+        elif vla_model.max_cameras_native > 1:
+            vla_n_cameras = st.slider(
+                "Cameras (native feeds)", 1, vla_model.max_cameras_native,
+                vla_model.measured_n_cameras,
+                help=f"{vla_model.display_name.split(' (')[0]} natively supports up "
+                     f"to {vla_model.max_cameras_native}. Measured at "
+                     f"{vla_model.measured_n_cameras} → other counts are 🟠 linear-assumed.",
+                key=f"vla_ncam_nat__{vla_model_key}")
+        else:
+            vla_n_cameras = 1
+            st.caption(
+                f"Native cameras: **1** — {vla_model.display_name.split(' (')[0]} "
+                f"is single-camera. Switch to *Stitched* for a multi-camera panorama.")
+        vla_fleet_size = st.slider(
+            "Fleet size (robots / instances)", 1, 8, 1,
+            help="N independent VLA instances time-sharing this NPU (a robot "
+                 "fleet, or multi-arm). Per-robot rate = single / N; memory = "
+                 "N × per-instance (overflow → won't fit).",
+            key=f"vla_fleet__{vla_model_key}",
+        )
     else:
         vla_model_key = None
         vla_model = None
         vla_vlm_hz = vla_action_hz = None
         vla_off_default = False
+        vla_n_cameras = None
+        vla_fleet_size = 1
+        vla_camera_mode = "native"
 
 # ───────────────────────── Main area ─────────────────────────
 
@@ -999,7 +1069,9 @@ if not vision_enabled and not llm_enabled and not vla_enabled:
 # here — the vision/LLM rendering path below assumes vision or llm is on.
 if vla_enabled and vla_model is not None:
     _render_vla(vla_model, hw, npu_share,
-                vla_vlm_hz, vla_action_hz, vla_off_default)
+                vla_vlm_hz, vla_action_hz, vla_off_default,
+                n_cameras=vla_n_cameras, fleet_size=vla_fleet_size,
+                camera_mode=vla_camera_mode)
     if not vision_enabled and not llm_enabled:
         st.stop()
 

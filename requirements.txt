@@ -20,3 +20,8 @@ openpyxl>=3.1.0
 # change forces an env reinstall = full process restart, clearing the stale
 # sys.modules cache the same way a dashboard reboot does. Needed because the
 # dashboard reboot was blocked by a GitHub OAuth 500. No dependency changes.
+# 2026-05-30: re-bumped — the multi-camera UI (app.py) calls the Phase 3c engine
+# (n_cameras/fleet_size/camera_mode in project_vla, landed in b9a9293+03986a8
+# AFTER the last full restart). app.py hot-reloads but those sizer/*.py changes
+# would stay cached → TypeError on the live app. This bump forces the restart so
+# the 3c engine + multi-cam UI load atomically. No dependency changes.
