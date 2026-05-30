@@ -228,7 +228,41 @@ class VLAModel:
     # batch-1 ViTs are NOT compute-saturated (~0.11-0.29, not the CNN-calibrated
     # 0.85), and decode ≈ 0.003-0.005 IS the bandwidth wall quantified (decode
     # does ~0.3% of peak compute — pure weight-streaming).
+    #
+    # For DUAL-LOOP models this also carries the fast-loop diagnosis:
+    #   denoise_step (≈0.0007 = 0.07% peak FLOP), denoise_step_bw_util
+    #   (≈0.016 = 1.6% peak BW), and denoise_bottleneck = "launch/overhead-bound".
+    #   The denoise step is NEITHER compute- NOR bandwidth-bound — it is
+    #   kernel-dispatch-bound in stock eager HF. This is WHY project_vla must NOT
+    #   bandwidth-scale the measured fast-loop latency to edge (see project_vla's
+    #   dual-loop branch): unlike single-loop AR decode (a hard BW-wall), the
+    #   fast loop is silicon-independent in eager mode and has large optimization
+    #   headroom (CUDA graphs / fusion / compile).
     measured_5090_util: dict | None = None
+
+    # Measured RTX 5090 DUAL-LOOP topology anchor (when architecture is
+    # dual_loop_* AND measured_5090_calibrated). The slow VLM backbone runs ONCE
+    # per action chunk; a separate flow-matching action expert runs
+    # `num_denoise_steps` denoise steps to emit an `action_chunk_length`-action
+    # chunk. project_vla's dual-loop branch consumes this. Keys:
+    #   vlm_backbone_ms          — slow-loop p50 (= measured_5090_components
+    #                              vision_ms + llm_prefill_ms)
+    #   denoise_step_ms          — fast-loop per-step p50 (LAUNCH-BOUND — see below)
+    #   num_denoise_steps        — N denoise steps per chunk
+    #   action_chunk_length      — H actions emitted per chunk
+    #   chunk_latency_ms         — vlm_backbone + N×denoise_step
+    #   amortized_ms_per_action  — chunk_latency / H (the honest control latency)
+    #   control_hz_amortized     — 1000 / amortized_ms_per_action
+    #   fast_loop_only_hz        — H / denoise_loop (VLM reused/pipelined — the
+    #                              published "~40 Hz action expert" regime)
+    #   denoise_bottleneck       — "launch/overhead-bound" (carried to the result
+    #                              so the UI/deck can render the headroom caveat)
+    # CRITICAL: denoise_step_ms is launch/dispatch-bound, NOT silicon-bound. The
+    # dual-loop projection carries it UNCHANGED to edge as the eager ceiling
+    # (launch-bound ⇒ silicon-independent), and computes an optimized physics
+    # floor separately — it does NOT bandwidth-scale it (that footgun would
+    # produce ~340 ms/step nonsense on edge). None until a dual-loop bake-off lands.
+    measured_5090_dual_loop: dict | None = None
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -505,34 +539,57 @@ NORA_3B = VLAModel(
 
 # NORA-1.5 — dual-loop native, flow-matching action expert.
 # Action expert REQUIRES FP per QuantVLA findings (INT8 on diffusion
-# head breaks task success). Total 3.3B = 0.5B vision + 2.0B LLM + 0.8B
-# flow-matching expert.
+# head breaks task success).
+#
+# ── 5090 CALIBRATION (keyhole 4caf501 dual-loop measurement + physical FLOP) ──
+# Same Qwen2.5-VL-3B backbone as NORA-3B + a separate flow-matching expert.
+# Real params (counted off the loaded model by [backend], measured total 3.99B
+# — the CSV's 3.3B and 800M action-expert figure both OVER/under-count):
+#   vision 668.7M | llm_body 3089.6M | lm_head 314.8M | action_expert 228.4M
+# Two corrections vs the original first-order entry: action expert 800M→228.4M
+# (echoes the NORA-3B vision 2458→342 over-count footgun); total 3.3B→3.99B.
+#
+# DUAL-LOOP topology (vla_summary_nora_1p5.json): the VLM backbone runs ONCE per
+# chunk (26.5 ms = vision 13.34 / prefill 13.22) → frozen KV cache; the action
+# expert then runs N=10 flow-matching denoise steps (15.78 ms/step → 156.2 ms
+# loop) to emit a 5-action chunk. chunk 182.8 ms → amortized 36.6 ms/action =
+# 27.4 Hz; fast-loop-only 32.0 Hz (the published "~40 Hz expert" regime).
+#
+# ⚠️ FAST LOOP IS NOT BW-WALLED (the categorical difference from single-loop):
+# the denoise step is neither compute-bound (0.07% peak FLOP) NOR bandwidth-bound
+# (1.6% peak BW, eff 29 GB/s) — it is KERNEL-LAUNCH/DISPATCH-bound in stock eager
+# HF (36 tiny expert layers, custom-Python MoT attention over 5 tokens). It has
+# large optimization headroom (CUDA graphs / fusion / compile). project_vla's
+# dual-loop branch carries it UNCHANGED to edge (launch-bound ⇒ silicon-
+# independent) as the eager ceiling and computes a separate physics floor — it
+# does NOT bandwidth-scale it. See measured_5090_dual_loop + measured_5090_util.
 NORA_1P5 = VLAModel(
     key="nora_1p5",
     display_name="NORA-1.5 (flow-matching dual-loop)",
     components={
         "vision_encoder": VLAComponent(
             name="vision_encoder",
-            params_b=0.5,
-            flops_per_call_g=50.0,
+            params_b=0.669,                         # Qwen2.5-VL ViT (real count, 4caf501)
+            flops_per_call_g=342.37,                # physical (2·P·T)
             dtype_required=("int8", "fp8", "bf16"),
-            arithmetic_intensity=100.0,
+            arithmetic_intensity=100.0,             # compute-bound — AI non-binding
         ),
         "llm_backbone": VLAComponent(
             name="llm_backbone",
-            params_b=2.0,
-            flops_per_call_g=28.0,
+            params_b=3.09,                          # Qwen2.5-VL 3B body (real count, 4caf501)
+            flops_per_call_g=640.02,                # physical prefill over 94-tok seqlen
             dtype_required=("int8", "fp8", "bf16"),
             arithmetic_intensity=3.0,
         ),
         "action_head": VLAComponent(
             name="action_head",
-            params_b=0.8,                           # flow-matching expert
-            # 10 denoising steps × 2 × 0.8B per step = 16 GFLOPS chunk
-            # cost; conservative 50 GFLOPS factoring per-step overhead.
-            flops_per_call_g=50.0,
+            params_b=0.2284,                        # flow-matching expert (real 228.4M; was 800M over-count)
+            # 10 denoise steps × 2.28 GF/step = 22.84 GF/chunk (physical, 2·P·T
+            # matmul lower bound — cross-attention over the VLM KV omitted).
+            flops_per_call_g=22.84,
             # FP-only — INT8 quantization of diffusion head breaks task
-            # success per QuantVLA findings (CSV notes).
+            # success per QuantVLA findings. A HARD GATE: eliminates INT8-only
+            # silicon (e.g. NPU Mid) entirely.
             dtype_required=("fp8", "bf16"),
             arithmetic_intensity=20.0,              # diffusion DiT median
         ),
@@ -542,15 +599,63 @@ NORA_1P5 = VLAModel(
     vlm_hz_min=1.0, vlm_hz_max=5.0,
     action_hz_min=20.0, action_hz_max=60.0,
     source_paper="same group arxiv Nov 2025",
+    # Dual-loop has no single AR "per-action" measurement; the binding headline
+    # is the amortized chunk metric in measured_5090_dual_loop. Kept None here
+    # (this field is the single-loop AR e2e); set measured_5090_calibrated so the
+    # dual-loop projection path activates.
     measured_5090_ms_per_action=None,
-    n_action_tokens=5,                              # placeholder — dual-loop emits chunks via denoising; Phase 3b semantics differ
+    measured_5090_calibrated=True,
+    n_action_tokens=5,                              # = action_chunk_length H; dual-loop emits chunks via denoising, not AR tokens
+    # VLM-backbone per-stage split (slow loop) — consumed by the dual-loop 🔵
+    # calibrated path exactly like single-loop's vision+prefill (compute-bound,
+    # latency-anchor scaled). No decode_ms_per_token: dual-loop has no AR decode.
+    measured_5090_components={
+        "vision_ms": 13.339,
+        "llm_prefill_ms": 13.217,
+    },
+    measured_5090_dual_loop={                       # [backend] 4caf501, RTX 5090 bf16 n=20
+        "vlm_backbone_ms": 26.513,
+        "denoise_step_ms": 15.775,                  # LAUNCH-BOUND — carried unchanged to edge, never BW-scaled
+        "num_denoise_steps": 10,
+        "action_chunk_length": 5,
+        "chunk_latency_ms": 182.757,
+        "amortized_ms_per_action": 36.551,
+        "control_hz_amortized": 27.36,
+        "fast_loop_only_hz": 32.0,
+        "denoise_bottleneck": "launch/overhead-bound",
+        "denoise_step_effective_bw_gbs": 29.0,      # 1.6% peak BW — fast loop is mostly launch, tiny BW fraction
+    },
+    physical_flops_g={                              # [backend] 4caf501, 2·P·T, hardware-independent
+        "vision": 342.37,
+        "prefill": 640.02,
+        "denoise_step": 2.2838,
+        "denoise_total": 22.838,                    # N=10 steps
+        "action_chunk_total": 1005.23,             # vlm backbone + denoise loop
+        "per_action": 201.046,                      # action_chunk_total / H=5
+    },
+    measured_5090_util={                            # achieved fraction-of-peak on 5090 (209 TF bf16 / 1792 GB/s)
+        "vision": 0.1228,
+        "prefill": 0.2317,
+        "denoise_step": 0.0007,                     # 0.07% peak FLOP — NOT compute-bound
+        "denoise_step_bw_util": 0.0162,             # 1.6% peak BW (eff 29 GB/s) — NOT bandwidth-bound
+        "denoise_bottleneck": "launch/overhead-bound",
+    },
     notes=(
         "NORA + flow-matching action expert coupled via layer-wise "
-        "self-attention. Action expert ~800M params. Dual-loop native: "
-        "VLM at ~3 Hz, flow-matching action expert at 40 Hz. Action expert "
-        "REQUIRES FP (BF16 or FP8) — INT8 quantization of diffusion head "
-        "breaks task success per QuantVLA findings. INT8 path for VLM "
-        "stages only."
+        "self-attention. Same Qwen2.5-VL-3B backbone as NORA-3B + a separate "
+        "228M flow-matching expert (CSV's 800M over-counts). Dual-loop native: "
+        "VLM backbone once/chunk (26.5 ms), action expert 10 denoise steps "
+        "(15.8 ms/step) → 5-action chunk. MEASURED on RTX 5090 (bf16, n=20): "
+        "amortized 36.6 ms/action = 27.4 Hz; fast-loop-only 32.0 Hz (the "
+        "published ~40 Hz expert regime). Peak VRAM 7.62 GB. Action expert "
+        "REQUIRES FP (BF16 or FP8) — INT8 of the diffusion head breaks task "
+        "success per QuantVLA findings; a HARD GATE that eliminates INT8-only "
+        "silicon (NPU Mid won't run it). CRITICAL: the denoise step is "
+        "launch/dispatch-bound (0.07% FLOP, 1.6% BW), NOT bandwidth-walled like "
+        "single-loop AR decode — large optimization headroom, so edge projection "
+        "carries it unchanged (eager ceiling) + a physics floor, never BW-scaled. "
+        "ENV: runs under transformers==4.54.1 (pinned venv — the MoT attention "
+        "reads the legacy tuple KV cache newer transformers broke)."
     ),
     libero_success_pct=79.4,
     inference_dram_gb_bf16=7.5,
@@ -564,33 +669,54 @@ NORA_1P5 = VLAModel(
 )
 
 
-# π0.5 — Physical Intelligence; dual-system PaliGemma + Gemma-300M
-# flow-matching expert. Native bf16 per HF config. Action head requires FP.
+# π0.5 — Physical Intelligence; dual-system PaliGemma (gemma_2b) + Gemma expert
+# flow-matching. The AMORTIZATION EXTREME of the catalog: one VLM forward feeds a
+# 50-action chunk → 367 Hz amortized (vs NORA-1.5's chunk of 5 → 27 Hz). Action
+# head requires FP. Native bf16-AMP (float32 master weights) per the lerobot path.
+#
+# ── 5090 CALIBRATION (keyhole 0fa4474 dual-loop measurement + physical FLOP) ──
+# Real params (counted off the loaded model by [backend]): vision 412.4M +
+# llm_body 2508.5M + action_expert 430.4M = 4143.4M total (CSV's expert 300M
+# under-counts; measured ~430M). Same dual-loop topology as NORA-1.5: PaliGemma
+# VLM prefix runs ONCE over 915 tokens (3 cameras + long prompt) → KV cache, then
+# the Gemma expert runs N=10 denoise steps → 50-action chunk.
+#
+# 5090 (bf16-AMP, n=20): VLM backbone 52.8 ms (SigLIP vision 14.6 ×3 cameras +
+# gemma_2b prefill 38.2) + denoise 7.2 ms/step ×10 → 73.3 ms loop → 136 ms chunk
+# → amortized 2.72 ms/action = 367 Hz; fast-loop-only 682 Hz. Peak VRAM 20.9 GB.
+#
+# ⚠️ DENOISE BOTTLENECK DIFFERS FROM NORA-1.5 — data-driven, do NOT reuse the
+# launch-bound label: π0.5's denoise is "mixed (partial-BW + launch overhead)"
+# — compute 2.9% / BW 13.4% (eff 238 GB/s). The 430M expert over 50 tokens
+# streams REAL weight bytes, so on a lower-BW edge part π0.5's fast loop degrades
+# MORE than NORA-1.5's. project_vla's launch+BW decomposition handles this from
+# the per-model denoise_step_effective_bw_gbs (no string-branch on the label).
+# 🔸 bf16-AMP keeps float32 (4-byte) master weights → the 13.4% BW util is an
+# UPPER bound; a true bf16-weight deploy ~halves it (→ more launch-leaning). AMP
+# is used because π0.5's expert hardcodes float32 time-embedding internals.
 PI_0P5 = VLAModel(
     key="pi_0p5",
     display_name="π0.5 (PaliGemma + Gemma action expert)",
     components={
         "vision_encoder": VLAComponent(
             name="vision_encoder",
-            params_b=0.4,                           # SigLIP-base inside PaliGemma
-            flops_per_call_g=40.0,
+            params_b=0.4124,                        # SigLIP inside PaliGemma (real count, 0fa4474)
+            flops_per_call_g=633.51,                # physical, ×3 cameras
             dtype_required=("int8", "fp8", "bf16"),
             arithmetic_intensity=100.0,
         ),
         "llm_backbone": VLAComponent(
             name="llm_backbone",
-            params_b=2.6,                           # Gemma-2B + PaliGemma overhead
-            flops_per_call_g=36.0,                  # ~7 action tokens × 2 × 2.6B
+            params_b=2.5085,                        # gemma_2b body (real count, 0fa4474)
+            flops_per_call_g=4590.61,               # physical prefill over 915-token seqlen (most compute-bound stage)
             dtype_required=("int8", "fp8", "bf16"),
             arithmetic_intensity=3.0,
         ),
         "action_head": VLAComponent(
             name="action_head",
-            params_b=0.3,                           # Gemma-300M flow-matching
-            # 10 denoising steps × 2 × 0.3B per step ≈ 6 GFLOPS; conservative
-            # 30 GFLOPS factoring per-step overhead + 10-action chunk.
-            flops_per_call_g=30.0,
-            dtype_required=("fp8", "bf16"),         # FP-required per HF config
+            params_b=0.4304,                        # Gemma flow-matching expert (real 430M; CSV's 300M under-counts)
+            flops_per_call_g=430.36,                # physical denoise total (N=10 steps over 50-action chunk)
+            dtype_required=("fp8", "bf16"),         # FP-required — hard gate on INT8-only silicon
             arithmetic_intensity=20.0,
         ),
     },
@@ -599,24 +725,68 @@ PI_0P5 = VLAModel(
     vlm_hz_min=1.0, vlm_hz_max=3.0,
     action_hz_min=30.0, action_hz_max=50.0,
     source_paper="Physical Intelligence Apr 2025",
-    measured_5090_ms_per_action=None,
-    n_action_tokens=10,                             # placeholder — 10 actions/chunk via denoising; Phase 3b semantics differ
+    measured_5090_ms_per_action=None,               # dual-loop headline is the amortized chunk metric
+    measured_5090_calibrated=True,
+    n_action_tokens=50,                             # = action_chunk_length H (50 actions/chunk via denoising)
+    measured_5090_components={                      # VLM-backbone split (slow loop)
+        "vision_ms": 14.563,                        # SigLIP ×3 cameras
+        "llm_prefill_ms": 38.244,                   # gemma_2b over 915 tokens
+    },
+    measured_5090_dual_loop={                       # [backend] 0fa4474, RTX 5090 bf16-AMP n=20
+        "vlm_backbone_ms": 52.807,
+        "denoise_step_ms": 7.217,
+        "num_denoise_steps": 10,
+        "action_chunk_length": 50,
+        "chunk_latency_ms": 136.161,
+        "amortized_ms_per_action": 2.723,
+        "control_hz_amortized": 367.21,
+        "fast_loop_only_hz": 681.73,
+        "denoise_bottleneck": "mixed (partial-BW + launch overhead)",
+        "denoise_step_effective_bw_gbs": 238.5,     # 13.4% peak BW — real weight traffic, scales on edge
+    },
+    physical_flops_g={                              # [backend] 0fa4474, 2·P·T, hardware-independent
+        "vision": 633.51,
+        "prefill": 4590.61,
+        "denoise_step": 43.0361,
+        "denoise_total": 430.361,                   # N=10 steps
+        "action_chunk_total": 5654.49,
+        "per_action": 113.09,                       # action_chunk_total / H=50
+    },
+    measured_5090_util={                            # achieved fraction-of-peak on 5090 (209 TF bf16 / 1792 GB/s)
+        "vision": 0.2081,
+        "prefill": 0.5743,                          # gemma_2b over 915 tokens — MOST compute-bound stage in the bake-off
+        "denoise_step": 0.0285,                     # 2.9% peak FLOP
+        "denoise_step_bw_util": 0.1331,             # 13.4% peak BW (eff 238 GB/s) — partial-BW, NOT pure launch
+        "denoise_bottleneck": "mixed (partial-BW + launch overhead)",
+        "weight_bytes_per_param": 4.0,              # bf16-AMP float32 master weights → BW util is an UPPER bound
+    },
     notes=(
-        "VLM=PaliGemma-3B (frozen during inference), action expert=Gemma-300M "
-        "flow-matching. 10-step denoising per action, 10 actions per chunk. "
-        "Native bfloat16 per HF config (action_expert_variant=gemma_300m, "
-        "dtype=bfloat16). Max 3 cameras; produces 50 Hz control output. "
-        "Strong open-world generalization. Flow-matching head requires FP."
+        "VLM=PaliGemma (gemma_2b, frozen during inference), action expert=Gemma "
+        "flow-matching (~430M). 10-step denoising, 50 actions per chunk, 3 "
+        "cameras, action_dim 32. THE AMORTIZATION EXTREME: one VLM forward over "
+        "a 50-action chunk → MEASURED 367 Hz amortized on RTX 5090 (chunk 136 ms; "
+        "fast-loop-only 682 Hz) — vs NORA-1.5's chunk of 5 → 27 Hz. Same chunk "
+        "latency class (~135 vs 183 ms) but 10× the actions per VLM forward; chunk "
+        "size is the amortization knob. Flow-matching head REQUIRES FP (bf16/fp8) "
+        "— hard gate eliminates INT8-only silicon. Denoise is 'mixed (partial-BW "
+        "+ launch overhead)' (13.4% BW), NOT pure launch-bound like NORA-1.5 — so "
+        "it degrades more on low-BW edge; the projection scales the BW fraction "
+        "per-model. bf16-AMP (float32 master weights) → measured BW util is an "
+        "upper bound. ENV: runs ONLY in a pinned venv (Python 3.12, lerobot 0.5.2 "
+        "from git main — PyPI 0.4.4 hard-gates pi05 on unshipped patched-transformers)."
     ),
     libero_success_pct=None,                        # paper doesn't report LIBERO
-    inference_dram_gb_bf16=6.6,
-    inference_dram_gb_int8=3.3,
-    inference_dram_gb_int4=1.65,
+    # Footprint estimates from real 4.14B params: bf16 ≈ 2 B/param. Measured peak
+    # VRAM 20.9 GB (weights 15.45 GB) is the bf16-AMP float32-master figure — an
+    # upper bound; a true bf16-weight deploy is ~half.
+    inference_dram_gb_bf16=8.3,
+    inference_dram_gb_int8=4.15,
+    inference_dram_gb_int4=2.07,
     arxiv_id="2504.16054",
     citation_year=2025,
     dtype_path_default="int8+bf16",
     dtype_path_alt="fp8+bf16",
-    hf_repo="lerobot/pi0_5",                        # verified by [backend] at 6577d99 (LeRobot hosts, not physical-intelligence/)
+    hf_repo="lerobot/pi05_base",                    # [backend] 0fa4474 fixed lerobot/pi0_5 (404) → lerobot/pi05_base
 )
 
 

@@ -76,11 +76,115 @@ def test_bitvla_is_cross_class_and_runs():
     assert r["action_hz"] > 0
 
 
-def test_dual_loop_models_defer_to_phase3b():
-    for key in ("nora_1p5", "pi_0p5", "openvla_7b_cached"):
-        r = project_vla(VLA_MODELS[key], NPU_MID)
-        assert r.get("deferred") is True
-        assert "Phase 3b" in r["reason"]
+def test_uncalibrated_dual_loop_still_defers():
+    """Dual-loop models WITHOUT a measured topology anchor still defer — the
+    projection needs measured_5090_dual_loop, not just the architecture flag.
+    (openvla_7b_cached is the synthetic projection-only entry; NORA-1.5 and π0.5
+    are now both calibrated.)"""
+    r = project_vla(VLA_MODELS["openvla_7b_cached"], NPU_HIGH)
+    assert r.get("deferred") is True
+    assert "dual-loop anchor" in r["reason"]
+
+
+# ── Phase 3b: NORA-1.5 dual-loop (flow-matching action expert) ──────────────
+
+NORA15 = VLA_MODELS["nora_1p5"]
+
+
+def test_nora15_on_5090_reproduces_dual_loop_measurement():
+    r = project_vla(NORA15, RTX_5090_REFERENCE)
+    assert r["runs"] and r["vla_source"] == "measured"
+    assert r["regime"] == "dual_loop_measured"
+    assert 36.0 <= r["ms_per_action"] <= 37.0       # amortized 36.55
+    assert 27.0 <= r["action_hz"] <= 28.0           # 27.4 Hz
+    assert abs(r["fast_loop_only_hz"] - 32.0) < 0.5  # published ~40 Hz regime
+    assert r["num_denoise_steps"] == 10
+    assert r["action_chunk_length"] == 5
+
+
+def test_nora15_fp_required_head_is_hard_gate_on_int8_only_mid():
+    """The FP-required flow-matching head eliminates INT8-only silicon entirely.
+    NPU Mid has fp8=bf16=0, so NORA-1.5 cannot run — the QuantVLA hard gate."""
+    r = project_vla(NORA15, NPU_MID)
+    assert r["runs"] is False
+    assert "FP" in r["reason"] and "hard gate" in r["reason"]
+
+
+def test_nora15_runs_on_high_via_fp8_expert():
+    r = project_vla(NORA15, NPU_HIGH)
+    assert r["runs"] and r["vla_source"] == "calibrated"
+    assert r["expert_dtype"] == "fp8"               # High has fp8=400
+    assert r["vlm_dtype"] == "int8"                 # VLM stages int8
+    assert r["action_hz"] > 0
+
+
+def test_nora15_launch_bound_step_barely_degrades_on_edge():
+    """NORA-1.5's denoise is PURE launch-bound (1.6% BW), so the launch+BW
+    decomposition leaves the edge step ≈ the measured 5090 step — NOT the naive
+    full-BW-scaled value (≈ ref × 16 ≈ 250 ms/step nonsense)."""
+    ref = project_vla(NORA15, RTX_5090_REFERENCE)
+    high = project_vla(NORA15, NPU_HIGH)
+    assert high["denoise_projection"] == "eager_launch_plus_bw_decomp"
+    # launch_const dominates → within ~50% of the measured step, nowhere near 16×
+    assert high["denoise_step_ms"] < ref["denoise_step_ms"] * 1.6
+    assert high["denoise_step_ms"] >= ref["denoise_step_ms"]   # small BW penalty, never faster
+
+
+def test_nora15_optimized_floor_beats_eager_ceiling():
+    """Headroom is real: the compiled/fused physics floor is faster than the
+    launch-bound eager ceiling, and the headline uses the conservative eager."""
+    high = project_vla(NORA15, NPU_HIGH)
+    assert high["action_hz_optimized_floor"] > high["action_hz"]
+    assert high["denoise_step_ms_optimized_floor"] < high["denoise_step_ms"]
+
+
+def test_nora15_dual_loop_not_a_hard_bw_wall_unlike_single_loop():
+    """Contrast with the single-loop story: NORA-3B is BW-walled to <5 Hz on
+    edge; NORA-1.5's dual-loop on High clears that comfortably (the fast loop
+    has headroom, the slow VLM amortizes over the chunk)."""
+    nora3b_high = project_vla(NORA, NPU_HIGH)["action_hz"]
+    nora15_high = project_vla(NORA15, NPU_HIGH)["action_hz"]
+    assert nora15_high > nora3b_high
+
+
+# ── Phase 3b: π0.5 dual-loop (the amortization extreme + partial-BW fast loop) ──
+
+PI05 = VLA_MODELS["pi_0p5"]
+
+
+def test_pi05_on_5090_is_the_amortization_extreme():
+    """One VLM forward amortized over a 50-action chunk → ~367 Hz on the 5090,
+    an order of magnitude past NORA-1.5's chunk-of-5 → 27 Hz."""
+    r = project_vla(PI05, RTX_5090_REFERENCE)
+    assert r["runs"] and r["vla_source"] == "measured"
+    assert r["action_chunk_length"] == 50
+    assert 360.0 <= r["action_hz"] <= 375.0         # 367 Hz amortized
+    assert r["action_hz"] > project_vla(NORA15, RTX_5090_REFERENCE)["action_hz"] * 5
+
+
+def test_pi05_fp_required_head_hard_gate_on_mid():
+    r = project_vla(PI05, NPU_MID)
+    assert r["runs"] is False
+    assert "FP" in r["reason"] and "hard gate" in r["reason"]
+
+
+def test_pi05_partial_bw_step_degrades_more_than_nora15_on_edge():
+    """The data-driven distinction: π0.5's denoise is partial-BW (13.4%), so its
+    step degrades a LARGER multiple on a low-BW edge part than NORA-1.5's
+    near-pure-launch (1.6%) step. Branching is implicit in the decomposition —
+    the per-model effective-BW drives it, no label string-match."""
+    n15_ref = project_vla(NORA15, RTX_5090_REFERENCE)["denoise_step_ms"]
+    n15_hi = project_vla(NORA15, NPU_HIGH)["denoise_step_ms"]
+    p5_ref = project_vla(PI05, RTX_5090_REFERENCE)["denoise_step_ms"]
+    p5_hi = project_vla(PI05, NPU_HIGH)["denoise_step_ms"]
+    assert (p5_hi / p5_ref) > (n15_hi / n15_ref)    # π0.5 degrades by a larger factor
+
+
+def test_pi05_optimized_floor_is_headroom_over_eager():
+    r = project_vla(PI05, NPU_HIGH)
+    assert r["runs"] and r["vla_source"] == "calibrated"
+    assert r["action_hz_optimized_floor"] > r["action_hz"]
+    assert r["denoise_bottleneck"].startswith("mixed")
 
 
 def test_dtype_gate_bf16_on_int8_only_silicon():
@@ -108,8 +212,8 @@ if __name__ == "__main__":
             failed += 1
             print(f"FAIL  {fn.__name__}: {e}")
     # quick projection table for eyeballing
-    print("\n--- NORA / OpenVLA / BitVLA across tiers ---")
-    for vla in (NORA, OPENVLA, BITVLA):
+    print("\n--- NORA / OpenVLA / BitVLA / NORA-1.5 / π0.5 across tiers ---")
+    for vla in (NORA, OPENVLA, BITVLA, NORA15, PI05):
         for hw in (RTX_5090_REFERENCE, NPU_HIGH, NPU_MID, IMX95_MEASURED):
             r = project_vla(vla, hw)
             if r.get("deferred"):

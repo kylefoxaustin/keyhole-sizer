@@ -1,12 +1,9 @@
-"""VLA (Vision-Language-Action) projection — Phase 3a (single-loop).
+"""VLA (Vision-Language-Action) projection — Phase 3a (single-loop) + 3b (dual-loop).
 
 Projects per-action latency + action rate (Hz) for a `VLAModel` on a target
-`Hardware` tier. **Single-loop autoregressive only** (NORA, OpenVLA, BitVLA).
-Dual-loop (flow-matching action expert) is Phase 3b — deferred until a
-measured dual-loop anchor lands; this function returns a `deferred` result
-for any non-single-loop architecture rather than guessing.
+`Hardware` tier.
 
-Composition (single-loop, autoregressive):
+**Single-loop autoregressive** (NORA-3B, OpenVLA, BitVLA), composition:
 
     ms_per_action = vision_ms + llm_prefill_ms + n_action_tokens × decode_ms/token
     action_hz     = 1000 / ms_per_action
@@ -14,6 +11,35 @@ Composition (single-loop, autoregressive):
 This mirrors the existing engine: vision + LLM prefill are compute-bound
 forwards (cf. `project_vision`'s compute floor), action-token decode is
 BW-bound (cf. `project_llm`'s decode ceiling).
+
+**Dual-loop** (flow-matching action expert: NORA-1.5, π0.5) — Phase 3b. The VLM
+backbone runs ONCE per chunk → frozen KV cache; a separate action expert runs
+N denoise steps to emit an H-action chunk:
+
+    chunk_latency_ms        = vlm_backbone_ms + N × denoise_step_ms
+    ms_per_action           = chunk_latency_ms / H     (amortized control latency)
+    fast_loop_only_hz       = H / (N × denoise_step_ms) (VLM reused/pipelined)
+
+The two loops have CATEGORICALLY different physics, so they project differently:
+
+  • Slow loop (VLM backbone) — compute-bound (vision ~12% / prefill ~23% util on
+    the 5090). Genuinely silicon-dependent → latency-anchor scaled exactly like
+    single-loop's vision+prefill (🔵 calibrated).
+  • Fast loop (denoise step) — kernel-LAUNCH/dispatch-bound in stock eager HF
+    (0.07% peak FLOP, 1.6% peak BW). The bottleneck is host-side dispatch, NOT
+    silicon. So the measured step is carried UNCHANGED to edge as the **eager
+    ceiling** (launch-bound ⇒ silicon-independent ⇒ edge eager ≈ 5090 eager),
+    and a separate **physics floor** (roofline on the FP expert weights) gives
+    the optimized best case. It is NEVER bandwidth-scaled — doing so (the
+    single-loop AR-decode treatment) would produce ~340 ms/step nonsense and is
+    exactly the footgun [backend] flagged in 4caf501.
+
+  HARD GATE: flow-matching action experts REQUIRE FP (fp8/bf16) per QuantVLA —
+  INT8 of the diffusion head breaks task success. An INT8-only tier (NPU Mid:
+  fp8=bf16=0) therefore CANNOT run a dual-loop model at all → `runs: False`.
+
+Dual-loop models WITHOUT a measured anchor (π0.5, openvla_7b_cached) still
+defer — the projection needs the measured `measured_5090_dual_loop` topology.
 
 ## Three projection regimes (3-state taxonomy, ratified 2026-05-29)
 
@@ -122,12 +148,9 @@ def project_vla(
         "npu_share": share,
     }
 
-    # ── Phase 3a scope gate: single-loop only ──────────────────────────────
+    # ── architecture dispatch ───────────────────────────────────────────────
     if vla.architecture != "single_loop":
-        return {**base, "deferred": True,
-                "reason": (f"{vla.architecture} projection is Phase 3b (needs a "
-                           "measured dual-loop anchor: flow-matching action "
-                           "expert + duty-cycle + FP-required gate)")}
+        return _project_dual_loop(vla, hw, base, share=share, reference=reference)
 
     # ── dtype runnability gate ──────────────────────────────────────────────
     # Each component must accept the execution dtype, and the silicon must have
@@ -220,6 +243,188 @@ def project_vla(
         "decode_ms_per_token": decode_ms_tok,
         "ms_per_action": ms_per_action,
         "action_hz": action_hz,
+        "dram_gb": dram_gb,
+        "fits_in_memory": fits,
+    }
+
+
+# ── dual-loop (Phase 3b) ────────────────────────────────────────────────────
+
+def _resolve_expert_dtype(vla: VLAModel, hw: Hardware) -> str | None:
+    """Pick the FP execution dtype for the flow-matching action expert.
+
+    The expert REQUIRES FP (fp8/bf16) per QuantVLA. Prefer the dtype_path's FP
+    component, fall back to the other FP if the silicon only has one, return
+    None if the silicon has NEITHER (INT8-only tier → the hard FP gate fires).
+    """
+    path = (vla.dtype_path_default or "").lower()
+    preferred = "fp8" if "fp8" in path else ("bf16" if "bf16" in path else "fp8")
+    order = [preferred] + [d for d in ("fp8", "bf16") if d != preferred]
+    for d in order:
+        if hw_peak_tops_for_dtype(hw, d) > 0:
+            return d
+    return None
+
+
+def _denoise_edge_step(dl: dict, hw: Hardware, share: float,
+                       reference: Hardware) -> tuple[float, float]:
+    """Project one denoise step to `hw` via the launch+BW decomposition.
+
+    The fast loop is partly kernel-LAUNCH/dispatch-bound (silicon-independent)
+    and partly genuinely BW-bound. Naively BW-scaling the WHOLE measured step is
+    the footgun [backend] flagged (→ ~340 ms/step nonsense); carrying it whole
+    is right for a *pure* launch-bound step (NORA-1.5, 1.6% BW) but UNDER-projects
+    a partial-BW step (π0.5, 13.4% BW). So decompose, using the measured effective
+    traffic per step, and scale ONLY the BW-bound fraction by edge bandwidth:
+
+        bytes/step    = denoise_step_effective_bw_gbs × step_ms        (real traffic)
+        bw_floor_ref  = bytes/step ÷ reference effective BW            (BW-bound time @ ref)
+        launch_const  = max(step_ms − bw_floor_ref, 0)                 (silicon-independent)
+        edge_bw_floor = bytes/step ÷ (target effective BW × npu_share) (BW-bound time @ edge)
+
+    Returns (eager_edge_step, optimized_floor_step):
+      • eager = launch_const + edge_bw_floor  — conservative headline (stock eager:
+        launch overhead survives + the BW fraction degrades on slower memory).
+      • optimized_floor = edge_bw_floor       — compiled/fused best case (launch
+        eliminated; only the genuine BW wall remains) — the headroom.
+
+    No string-branching on `denoise_bottleneck`: a pure-launch step has tiny
+    bytes → edge ≈ launch_const (≈ unchanged), big headroom; a partial-BW step
+    has large bytes → edge_bw_floor dominates and scales hard. On the reference
+    (ratio=1, share=1) both reduce to the measured step exactly. The label is
+    carried to the result for the UI/deck, not used as control flow.
+    """
+    step_ms = dl["denoise_step_ms"]
+    eff_bw = dl.get("denoise_step_effective_bw_gbs")
+    if not eff_bw or eff_bw <= 0:
+        return step_ms, step_ms                          # no BW telemetry → treat as launch-bound
+    bytes_gb = eff_bw * step_ms / 1000.0                 # measured real traffic per step
+    bw_floor_ref = bytes_gb / reference.effective_bandwidth_gbs * 1000.0
+    launch_const = max(step_ms - bw_floor_ref, 0.0)      # silicon-independent overhead
+    edge_bw_floor = bytes_gb / max(hw.effective_bandwidth_gbs * share, 1e-6) * 1000.0
+    return launch_const + edge_bw_floor, edge_bw_floor
+
+
+def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
+                       share: float, reference: Hardware) -> dict:
+    """Project dual-loop (flow-matching) per-action latency + action rate.
+
+    Slow loop (VLM backbone, once/chunk) is 🔵 calibrated (latency-anchor scaled
+    like single-loop's vision+prefill). Fast loop (denoise) is launch-bound: the
+    measured step is carried UNCHANGED as the eager ceiling (headline) + a physics
+    floor as headroom — never BW-scaled. FP-required head is a hard gate.
+    """
+    dl = vla.measured_5090_dual_loop
+    comp_meas = vla.measured_5090_components
+
+    # Un-calibrated dual-loop (π0.5, openvla_7b_cached): no measured topology yet.
+    if not (vla.measured_5090_calibrated and dl and comp_meas):
+        return {**base, "deferred": True,
+                "reason": (f"{vla.architecture} projection needs a measured "
+                           "dual-loop anchor (measured_5090_dual_loop): "
+                           "flow-matching backbone-once + denoise-loop split. "
+                           "Phase 3b absorbs these per-model as bake-offs land.")}
+
+    H = dl["action_chunk_length"]
+    N = dl["num_denoise_steps"]
+    base = {**base, "n_action_tokens": H, "architecture": vla.architecture}
+
+    # ── VLM-stage dtype + runnability ────────────────────────────────────────
+    vlm_dtype = _resolve_exec_dtype(vla, None)        # int8 part of the path
+    for comp in ("vision_encoder", "llm_backbone"):
+        req = vla.components[comp].dtype_required
+        if vlm_dtype not in req:
+            return {**base, "runs": False,
+                    "reason": (f"VLM component '{comp}' requires {req}; "
+                               f"VLM dtype '{vlm_dtype}' not among them")}
+    vlm_peak = hw_peak_tops_for_dtype(hw, vlm_dtype)
+    if vlm_peak <= 0:
+        return {**base, "runs": False,
+                "reason": f"{hw.name} has no {vlm_dtype} compute (peak_tops=0)"}
+
+    # ── FP-required action-expert gate (the hard QuantVLA gate) ──────────────
+    expert_dtype = _resolve_expert_dtype(vla, hw)
+    if expert_dtype is None:
+        return {**base, "runs": False,
+                "reason": ("flow-matching action expert REQUIRES FP (fp8/bf16) "
+                           "per QuantVLA; "
+                           f"{hw.name} has neither (INT8-only) — the FP-required "
+                           "diffusion head is a hard gate that eliminates this tier")}
+
+    # ── memory gate (VLM-dtype footprint) ────────────────────────────────────
+    dram_gb = _dram_gb_for_dtype(vla, vlm_dtype)
+    fits = None if dram_gb is None else (dram_gb + 0.5) < hw.mem_capacity_gb
+
+    is_reference = (hw.name == reference.name and hw.tier_family == reference.tier_family)
+    # Fast loop: launch+BW decomposition (handles pure-launch NORA-1.5 AND
+    # partial-BW π0.5 without string-branching; reduces to measured on the ref).
+    eager_step_ms, floor_step_ms = _denoise_edge_step(dl, hw, share, reference)
+
+    if is_reference:
+        # 🟢 measured — return the measured topology verbatim.
+        vla_source, regime = "measured", "dual_loop_measured"
+        vision_ms = comp_meas["vision_ms"]
+        prefill_ms = comp_meas["llm_prefill_ms"]
+        vlm_backbone_ms = dl["vlm_backbone_ms"]
+        expert_dtype = _REFERENCE_DTYPE               # measured at bf16
+        ms_per_action = dl["amortized_ms_per_action"]  # authoritative measured amortization
+        chunk_latency_ms = dl["chunk_latency_ms"]
+    else:
+        # 🔵 calibrated VLM backbone (compute-bound, latency-anchor scaled) +
+        # decomposed fast loop (launch_const survives, BW fraction scales).
+        vla_source, regime = "calibrated", "dual_loop_calibrated_vlm_decomposed_expert"
+        ref_peak = hw_peak_tops_for_dtype(reference, _REFERENCE_DTYPE)
+
+        ref_vis_eff = ref_peak * reference.compute_util_factor
+        tgt_vis_eff = vlm_peak * hw.compute_util_factor
+        vision_ms = comp_meas["vision_ms"] * (ref_vis_eff / tgt_vis_eff)
+
+        ref_pf_eff = ref_peak * reference.llm_prefill_util_factor
+        tgt_pf_eff = vlm_peak * hw.llm_prefill_util_factor
+        prefill_ms = comp_meas["llm_prefill_ms"] * (ref_pf_eff / tgt_pf_eff)
+
+        vlm_backbone_ms = vision_ms + prefill_ms
+        chunk_latency_ms = vlm_backbone_ms + N * eager_step_ms
+        ms_per_action = chunk_latency_ms / H
+
+    action_hz = 1000.0 / ms_per_action if ms_per_action > 0 else 0.0
+    eager_loop_ms = N * eager_step_ms
+    fast_loop_only_hz = (H / (eager_loop_ms / 1000.0)) if eager_loop_ms > 0 else 0.0
+
+    # Optimized physics floor (headroom) — what the fast loop could hit compiled.
+    floor_loop_ms = N * floor_step_ms
+    floor_chunk_ms = vlm_backbone_ms + floor_loop_ms
+    floor_ms_per_action = floor_chunk_ms / H
+    floor_action_hz = 1000.0 / floor_ms_per_action if floor_ms_per_action > 0 else 0.0
+    floor_fast_loop_only_hz = (H / (floor_loop_ms / 1000.0)) if floor_loop_ms > 0 else 0.0
+
+    return {
+        **base,
+        "runs": True,
+        "vla_source": vla_source,
+        "regime": regime,
+        "vlm_dtype": vlm_dtype,
+        "expert_dtype": expert_dtype,
+        # slow loop (VLM backbone, once/chunk)
+        "vision_ms": vision_ms,
+        "llm_prefill_ms": prefill_ms,
+        "vlm_backbone_ms": vlm_backbone_ms,
+        # fast loop — eager ceiling (headline, launch-bound, silicon-independent)
+        "num_denoise_steps": N,
+        "action_chunk_length": H,
+        "denoise_step_ms": eager_step_ms,
+        "denoise_loop_ms": eager_loop_ms,
+        "denoise_bottleneck": dl.get("denoise_bottleneck"),
+        "denoise_projection": "measured" if is_reference else "eager_launch_plus_bw_decomp",
+        "chunk_latency_ms": chunk_latency_ms,
+        "ms_per_action": ms_per_action,
+        "action_hz": action_hz,
+        "fast_loop_only_hz": fast_loop_only_hz,
+        # fast loop — optimized physics floor (headroom; compiled/fused best case)
+        "denoise_step_ms_optimized_floor": floor_step_ms,
+        "ms_per_action_optimized_floor": floor_ms_per_action,
+        "action_hz_optimized_floor": floor_action_hz,
+        "fast_loop_only_hz_optimized_floor": floor_fast_loop_only_hz,
         "dram_gb": dram_gb,
         "fits_in_memory": fits,
     }
