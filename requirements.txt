@@ -14,3 +14,9 @@ plotly>=5.24.0
 # XLSX export with formatting (used by sizer/kpi_breakdown.py for the
 # KPI-breakdown download button — bold/alignment can't go through CSV).
 openpyxl>=3.1.0
+
+# 2026-05-29: rebuild trigger — force a full Streamlit Cloud restart to pick up
+# the VLA arc (Phases 3-5, sizer/*.py: vla_models, project_vla). A requirements
+# change forces an env reinstall = full process restart, clearing the stale
+# sys.modules cache the same way a dashboard reboot does. Needed because the
+# dashboard reboot was blocked by a GitHub OAuth 500. No dependency changes.
