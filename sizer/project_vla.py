@@ -41,6 +41,20 @@ The two loops have CATEGORICALLY different physics, so they project differently:
 Dual-loop models WITHOUT a measured anchor (π0.5, openvla_7b_cached) still
 defer — the projection needs the measured `measured_5090_dual_loop` topology.
 
+**OFT parallel-chunk** (BitVLA) — Phase 3b. ONE VLM forward over
+[image + prompt + H action-placeholder tokens + proprio] → an L1-regression head
+reads the action-position hidden states in PARALLEL → H actions from a single
+forward. NO autoregressive token loop, NO decode-per-token, NO AR-decode BW-wall:
+
+    ms_per_action = (vision_ms + llm_forward_ms) / H        (amortized over chunk)
+
+Both stages are PREFILL-shaped compute-bound forwards → latency-anchor scaled
+exactly like single-loop's vision+prefill (🔵 calibrated). This is WHY OFT is
+fast (BitVLA 65 Hz vs OpenVLA-7B's 7.9 Hz AR). No FP gate (BitVLA is int_only →
+runs on INT8-only silicon). NB: ternary-kernel speedups (bitblas/LUT, 0.2-byte
+weights) are a SEPARATE optimistic floor, not the measured bf16-dense reality —
+the projection uses the measured latencies; see the BitVLA catalog notes.
+
 ## Three projection regimes (3-state taxonomy, ratified 2026-05-29)
 
 Distinct from `project_llm`'s `same_class` semantics on purpose: the RTX 5090
@@ -149,6 +163,8 @@ def project_vla(
     }
 
     # ── architecture dispatch ───────────────────────────────────────────────
+    if vla.architecture == "oft_parallel_chunk":
+        return _project_oft_parallel(vla, hw, base, share=share, reference=reference)
     if vla.architecture != "single_loop":
         return _project_dual_loop(vla, hw, base, share=share, reference=reference)
 
@@ -425,6 +441,90 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
         "ms_per_action_optimized_floor": floor_ms_per_action,
         "action_hz_optimized_floor": floor_action_hz,
         "fast_loop_only_hz_optimized_floor": floor_fast_loop_only_hz,
+        "dram_gb": dram_gb,
+        "fits_in_memory": fits,
+    }
+
+
+# ── OFT parallel-chunk (Phase 3b) ───────────────────────────────────────────
+
+def _project_oft_parallel(vla: VLAModel, hw: Hardware, base: dict, *,
+                          share: float, reference: Hardware) -> dict:
+    """Project OFT parallel-chunk (BitVLA) per-action latency + action rate.
+
+    ONE prefill-shaped VLM forward → H actions read in parallel by an
+    L1-regression head. ms_per_action = (vision + llm_forward) / H. Both stages
+    are compute-bound → latency-anchor scaled like single-loop's vision+prefill.
+    NO decode term, NO FP gate (int_only runs on INT8-only silicon). The measured
+    anchor is the bf16-dense reality; ternary-kernel speedups are NOT applied here.
+    """
+    of = vla.measured_5090_oft
+    if not (vla.measured_5090_calibrated and of):
+        return {**base, "deferred": True,
+                "reason": (f"{vla.architecture} projection needs a measured OFT "
+                           "anchor (measured_5090_oft): parallel forward + "
+                           "chunk split. Phase 3b absorbs these as bake-offs land.")}
+
+    H = of["action_chunk_length"]
+    exec_dtype = base["dtype"]
+    base = {**base, "n_action_tokens": H, "architecture": vla.architecture}
+
+    # ── runnability (compute-bound forward, no FP gate) ──────────────────────
+    for comp in ("vision_encoder", "llm_backbone"):
+        req = vla.components[comp].dtype_required
+        if exec_dtype not in req:
+            return {**base, "runs": False,
+                    "reason": (f"component '{comp}' requires {req}; execution "
+                               f"dtype '{exec_dtype}' not among them")}
+    peak = hw_peak_tops_for_dtype(hw, exec_dtype)
+    if peak <= 0:
+        return {**base, "runs": False,
+                "reason": f"{hw.name} has no {exec_dtype} compute (peak_tops=0)"}
+
+    dram_gb = _dram_gb_for_dtype(vla, exec_dtype)
+    fits = None if dram_gb is None else (dram_gb + 0.5) < hw.mem_capacity_gb
+
+    is_reference = (hw.name == reference.name and hw.tier_family == reference.tier_family)
+
+    if is_reference:
+        # 🟢 measured — return the measured forward split + amortized verbatim.
+        vla_source, regime = "measured", "oft_parallel_chunk_measured"
+        vision_ms = of["vision_ms"]
+        llm_forward_ms = of["llm_forward_ms"]
+        forward_ms = of["forward_ms"]
+        ms_per_action = of["ms_per_action"]
+    else:
+        # 🔵 calibrated — both stages compute-bound, latency-anchor scaled (vision
+        # by compute_util_factor, llm_forward by llm_prefill_util_factor — the
+        # parallel forward is prefill-shaped). Amortize over the H-action chunk.
+        vla_source, regime = "calibrated", "oft_parallel_chunk_calibrated_latency_scaled"
+        ref_peak = hw_peak_tops_for_dtype(reference, _REFERENCE_DTYPE)
+
+        ref_vis_eff = ref_peak * reference.compute_util_factor
+        tgt_vis_eff = peak * hw.compute_util_factor
+        vision_ms = of["vision_ms"] * (ref_vis_eff / tgt_vis_eff)
+
+        ref_pf_eff = ref_peak * reference.llm_prefill_util_factor
+        tgt_pf_eff = peak * hw.llm_prefill_util_factor
+        llm_forward_ms = of["llm_forward_ms"] * (ref_pf_eff / tgt_pf_eff)
+
+        forward_ms = vision_ms + llm_forward_ms
+        ms_per_action = forward_ms / H
+
+    action_hz = 1000.0 / ms_per_action if ms_per_action > 0 else 0.0
+
+    return {
+        **base,
+        "runs": True,
+        "vla_source": vla_source,
+        "regime": regime,
+        "vision_ms": vision_ms,
+        "llm_forward_ms": llm_forward_ms,
+        "vlm_forward_ms": forward_ms,            # the full parallel forward (vision + llm)
+        "forward_ms": forward_ms,
+        "action_chunk_length": H,
+        "ms_per_action": ms_per_action,
+        "action_hz": action_hz,
         "dram_gb": dram_gb,
         "fits_in_memory": fits,
     }

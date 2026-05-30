@@ -69,11 +69,36 @@ def test_high_not_dramatically_faster_than_mid():
     assert abs(high - mid) / mid < 0.5             # within 50% — not a step change
 
 
-def test_bitvla_is_cross_class_and_runs():
+def test_bitvla_on_5090_reproduces_oft_measurement():
+    """BitVLA is OFT parallel-chunk (NOT single-loop AR): one prefill-shaped
+    forward → 8 actions in parallel, amortized to 65 Hz."""
+    r = project_vla(BITVLA, RTX_5090_REFERENCE)
+    assert r["runs"] and r["vla_source"] == "measured"
+    assert r["regime"] == "oft_parallel_chunk_measured"
+    assert r["architecture"] == "oft_parallel_chunk"
+    assert 15.0 <= r["ms_per_action"] <= 15.8       # forward 123 / 8 = 15.4
+    assert 64.0 <= r["action_hz"] <= 66.0           # 65 Hz
+    assert r["action_chunk_length"] == 8
+    assert "decode_ms_per_token" not in r           # no AR decode term in OFT
+
+
+def test_bitvla_oft_runs_on_int8_only_mid_no_fp_gate():
+    """BitVLA is the only int_only entry: no FP-required head, so it RUNS on
+    INT8-only Mid (where both dual-loop FP heads hit the hard gate)."""
     r = project_vla(BITVLA, NPU_MID)
-    assert r["runs"] and r["vla_source"] == "cross_class"
-    assert r["regime"] == "single_loop_cross_class_roofline"
+    assert r["runs"] and r["vla_source"] == "calibrated"
+    assert r["regime"] == "oft_parallel_chunk_calibrated_latency_scaled"
+    assert r["dtype"] == "int8"
     assert r["action_hz"] > 0
+
+
+def test_bitvla_oft_not_bw_walled_unlike_single_loop_ar():
+    """The OFT speed story: a prefill-shaped parallel forward avoids the AR
+    decode BW-wall, so BitVLA on Mid runs an order of magnitude faster than the
+    single-loop AR models that get BW-walled to <1 Hz there."""
+    bitvla_mid = project_vla(BITVLA, NPU_MID)["action_hz"]
+    openvla_mid = project_vla(OPENVLA, NPU_MID)["action_hz"]   # single-loop AR, BW-walled
+    assert bitvla_mid > openvla_mid * 10
 
 
 def test_uncalibrated_dual_loop_still_defers():

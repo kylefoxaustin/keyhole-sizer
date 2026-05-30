@@ -264,6 +264,25 @@ class VLAModel:
     # produce ~340 ms/step nonsense on edge). None until a dual-loop bake-off lands.
     measured_5090_dual_loop: dict | None = None
 
+    # Measured RTX 5090 OFT PARALLEL-CHUNK anchor (when architecture is
+    # "oft_parallel_chunk" AND measured_5090_calibrated). OpenVLA-OFT topology:
+    # ONE VLM forward over [image + prompt + H action-placeholder tokens +
+    # proprio] → an L1-regression head reads the action-position hidden states
+    # in PARALLEL → H actions from a single forward. NO autoregressive token
+    # loop, NO decode-per-token term, NO AR-decode BW-wall — the forward is
+    # PREFILL-shaped (compute-bound). This is WHY OFT is fast (BitVLA 65 Hz vs
+    # OpenVLA-7B AR 7.9 Hz). project_vla's oft branch consumes this. Keys:
+    #   forward_ms          — full parallel forward p50 (= vision_ms + llm_forward_ms)
+    #   vision_ms           — vision tower p50 (compute-bound, may be ×n_cameras)
+    #   llm_forward_ms      — the single parallel LLM forward p50 (prefill-shaped)
+    #   action_chunk_length — H actions emitted per forward
+    #   ms_per_action       — forward_ms / H (the amortized control latency)
+    #   action_hz           — 1000 / ms_per_action
+    # The oft projection scales vision_ms + llm_forward_ms (both compute-bound,
+    # latency-anchor scaled like single-loop's vision+prefill) and amortizes over
+    # H — there is no decode term and no FP gate. None until an OFT bake-off lands.
+    measured_5090_oft: dict | None = None
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Module-level constant per VLA entry. Convention mirrors llm_models.py:
@@ -790,61 +809,115 @@ PI_0P5 = VLAModel(
 )
 
 
-# BitVLA — fully integer (1.58-bit ternary backbone + INT8 activations).
-# Single-loop, no FP anywhere. Memory footprint identical across bit
-# widths (already maximally compressed).
+# BitVLA — ternary backbone, OFT PARALLEL-CHUNK (NOT single-loop AR).
+#
+# ── 5090 CALIBRATION (keyhole 3317776) — TWO corrections to the original entry ──
+# 1. ARCHITECTURE: the CSV said single_loop; the actual LIBERO checkpoint is
+#    OpenVLA-OFT. ONE VLM forward over [image×2 + prompt + 8 action-placeholder
+#    tokens + proprio] → an L1-regression head reads the action-position hidden
+#    states in PARALLEL → 8 actions from a single forward. No AR token loop, no
+#    decode-per-token, no AR-decode BW-wall — the forward is prefill-shaped
+#    (compute-bound, util 9-14%). This is WHY it's fast: 65 Hz vs OpenVLA-7B 7.9.
+# 2. TERNARY IS A MEMORY WIN ONLY (in this measured path): the HF "bf16"
+#    checkpoint runs ternary BitLinear as DENSE bf16 matmuls (weights stored
+#    bf16, 5.47 GB — NOT packed 1.58-bit/0.2-byte). Ternary buys nothing on
+#    compute/latency here; only the ~6 GB VRAM is the realized win. The paper's
+#    4.4× speedup / 0.2-byte decode-BW story REQUIRES bitblas/LUT ternary kernels
+#    NOT used here — treat that as a SEPARATE optimistic kernel-dependent floor
+#    (it assumes kernels we haven't measured), never the measured headline.
+#
+# Real params (counted off the loaded model, 3317776): vision 397.2M + ternary-
+# LLM 2412.8M = 2819.5M total (above the paper's nominal figure). bf16, n=20.
 BITVLA = VLAModel(
     key="bitvla",
-    display_name="BitVLA (ternary + INT8)",
+    display_name="BitVLA (ternary, OFT parallel-chunk)",
     components={
         "vision_encoder": VLAComponent(
             name="vision_encoder",
-            params_b=0.4,                           # SigLIP
-            flops_per_call_g=40.0,
+            params_b=0.3972,                        # bitSigLIP-L (real count, 3317776)
+            flops_per_call_g=406.73,                # physical, ×2 cameras
             dtype_required=("int8",),               # SigLIP runs INT8 fine
-            arithmetic_intensity=100.0,
+            arithmetic_intensity=100.0,             # compute-bound — AI non-binding
         ),
         "llm_backbone": VLAComponent(
             name="llm_backbone",
-            params_b=2.0,                           # custom ternary backbone
-            flops_per_call_g=28.0,
+            params_b=2.4128,                         # ternary backbone (real count, 3317776)
+            flops_per_call_g=2895.41,               # physical parallel forward (prefill-shaped, 600-tok prefix)
             dtype_required=("int8",),               # ternary weights, INT8 acts
-            # Lower AI than standard transformer — ternary weights are
-            # 0.2 bytes/param vs INT8's 1.0, so the same FLOPs move
-            # fewer bytes through DRAM. Conservative estimate.
+            # Ternary weights are nominally 0.2 byte/param vs INT8's 1.0 — but
+            # the MEASURED bf16-dense path does NOT realize this (weights stored
+            # bf16). The 0.2-byte / low-AI story is the optimistic kernel-dependent
+            # floor (bitblas/LUT), not the measured number. AI here is non-binding
+            # anyway: OFT forward is compute-bound, not decode-BW-bound.
             arithmetic_intensity=5.0,
         ),
         "action_head": VLAComponent(
             name="action_head",
-            params_b=0.5,
-            flops_per_call_g=30.0,
+            params_b=0.0,                           # L1-regression head reads action-position
+            flops_per_call_g=0.0,                   # hidden states (in the forward) — no standalone cost
             dtype_required=("int8",),
             arithmetic_intensity=3.0,
         ),
     },
-    architecture="single_loop",
-    default_vlm_hz=30.0, default_action_hz=30.0,
-    vlm_hz_min=30.0, vlm_hz_max=30.0,
-    action_hz_min=30.0, action_hz_max=30.0,
+    architecture="oft_parallel_chunk",
+    default_vlm_hz=65.0, default_action_hz=65.0,
+    vlm_hz_min=65.0, vlm_hz_max=65.0,
+    action_hz_min=65.0, action_hz_max=65.0,
     source_paper="arxiv Mar 2026",
-    measured_5090_ms_per_action=12.0,               # paper figure (not a firsthand 5090 measurement)
-    n_action_tokens=8,                              # pending verification (reviewer estimate)
+    measured_5090_ms_per_action=15.384,             # = forward 123.071 / 8 actions (amortized)
+    measured_5090_prefill_ms=123.071,               # the full OFT parallel forward (vision + LLM)
+    measured_5090_calibrated=True,
+    n_action_tokens=8,                              # = action_chunk_length H (8 actions / parallel forward)
+    measured_5090_components={                      # OFT forward split — NO decode_ms_per_token (no AR loop)
+        "vision_ms": 22.558,                        # bitSigLIP ×2 cameras
+        "llm_forward_ms": 100.513,                  # single parallel forward, prefill-shaped
+    },
+    measured_5090_oft={                             # [backend] 3317776, RTX 5090 bf16 n=20
+        "forward_ms": 123.071,
+        "vision_ms": 22.558,
+        "llm_forward_ms": 100.513,
+        "action_chunk_length": 8,
+        "ms_per_action": 15.384,
+        "action_hz": 65.0,
+    },
+    physical_flops_g={                              # [backend] 3317776, 2·P·T, hardware-independent
+        "vision": 406.73,
+        "llm_forward": 2895.41,                     # parallel forward (no decode_per_tok — no AR loop)
+        "action_forward_total": 3302.14,
+        "per_action": 412.77,                       # action_forward_total / H=8
+    },
+    measured_5090_util={                            # achieved fraction-of-peak on 5090 (209 TF bf16)
+        "vision": 0.0863,
+        "llm_forward": 0.1378,                      # prefill-shaped, compute-bound — NOT a decode BW-wall
+    },
     notes=(
-        "Fully native 1.58-bit (ternary weights {-1,0,+1}) plus INT8 "
-        "activations. NO FP required anywhere. Architecturally single-loop "
-        "— no cache layer. Paper reports 4.4x speedup and 11x memory "
-        "reduction vs full-precision. Memory footprint identical across "
-        "bit widths (already maximally compressed). Closest to "
-        "integer-only VLA published."
+        "Ternary backbone (1.58-bit weights {-1,0,+1}), bitSigLIP-L vision. "
+        "OFT PARALLEL-CHUNK (OpenVLA-OFT), NOT single-loop AR: ONE VLM forward "
+        "over [image×2 + prompt + 8 action tokens + proprio] → L1-regression head "
+        "reads action-position hiddens in PARALLEL → 8 actions/forward. No AR "
+        "loop, no decode-per-token, no BW-wall — prefill-shaped compute-bound "
+        "forward (util 9-14%). MEASURED on RTX 5090 (bf16, n=20): forward 123 ms "
+        "→ 15.4 ms/action = 65 Hz (vs OpenVLA-7B AR 7.9 Hz — the OFT speed story). "
+        "Peak VRAM 6.07 GB (weights 5.47) vs OpenVLA-7B 14.4 GB. ⚠️ TERNARY = "
+        "MEMORY WIN ONLY here: the HF bf16 checkpoint runs ternary BitLinear as "
+        "DENSE bf16 matmuls (weights stored bf16, NOT packed 0.2-byte), so the "
+        "4.4× speedup / 0.2-byte decode-BW story is NOT realized — it requires "
+        "bitblas/LUT kernels not used in this path. Treat that as a SEPARATE "
+        "optimistic kernel-dependent floor, not this measured number. The only "
+        "int_only catalog entry → runs on INT8-only silicon (NPU Mid) with NO FP "
+        "gate, unlike the dual-loop FP-required heads."
     ),
     libero_success_pct=68.0,
-    inference_dram_gb_bf16=1.5,
-    inference_dram_gb_int8=1.5,
-    inference_dram_gb_int4=1.5,                     # identical across widths
+    # bf16-stored weights 5.47 GB / peak VRAM 6.07 GB (measured). NOT the packed-
+    # ternary ~1.4 GB figure (that needs bitblas kernels, not this path).
+    inference_dram_gb_bf16=6.07,
+    inference_dram_gb_int8=3.0,                     # if int8-stored; packed-ternary would be ~1.4 (kernel-dependent)
+    inference_dram_gb_int4=1.5,
     arxiv_id="2603.xxxx",                           # placeholder per CSV
     citation_year=2026,
     dtype_path_default="int_only",
     dtype_path_alt="int_only",
+    hf_repo="hongyuw/ft-bitvla-bitsiglipL-224px-libero_goal-bf16",  # LIBERO-goal FT checkpoint ([backend] 3317776)
 )
 
 
