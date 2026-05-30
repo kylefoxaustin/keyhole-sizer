@@ -339,6 +339,36 @@ def test_bad_camera_mode_rejected():
     assert r["runs"] is False and "camera_mode" in r["reason"]
 
 
+# ── Camera FPS + DDR bandwidth demand (throughput metrics) ──────────────────
+
+def test_camera_fps_is_vlm_forward_rate():
+    """Camera FPS = vision-encoder invocations/sec = action_hz / actions-per-
+    forward (1 for single-loop AR; chunk length for dual-loop / OFT)."""
+    n3 = project_vla(NORA, NPU_HIGH)                       # single-loop: 1 action/forward
+    assert abs(n3["camera_fps"] - n3["action_hz"]) < 1e-6
+    p5 = project_vla(PI05, NPU_HIGH, n_cameras=3)          # dual-loop: chunk of 50
+    assert abs(p5["camera_fps"] - p5["action_hz"] / p5["action_chunk_length"]) < 1e-6
+    assert abs(p5["aggregate_camera_fps"] - p5["camera_fps"] * 3) < 1e-3   # ×n_cameras
+
+
+def test_ddr_bw_demand_present_and_positive():
+    r = project_vla(NORA, NPU_HIGH)
+    assert r["ddr_bw_demand_gbs"] > 0
+    assert r["ddr_bw_available_gbs"] == NPU_HIGH.effective_bandwidth_gbs * r["npu_share"]
+
+
+def test_fleet_costs_memory_not_bandwidth():
+    """Key insight: a fleet round-robins one NPU at the same total throughput, so
+    aggregate camera FPS and DDR demand are fleet-INDEPENDENT — only memory
+    residency multiplies."""
+    one = project_vla(NORA, NPU_HIGH, fleet_size=1)
+    four = project_vla(NORA, NPU_HIGH, fleet_size=4)
+    assert abs(one["ddr_bw_demand_gbs"] - four["ddr_bw_demand_gbs"]) < 1e-6
+    assert abs(one["aggregate_camera_fps"] - four["aggregate_camera_fps"]) < 1e-6
+    assert four["fleet_memory_gb"] == one["dram_gb"] * 4    # memory DOES scale
+    assert four["camera_fps"] < one["camera_fps"]           # per-robot FPS drops
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

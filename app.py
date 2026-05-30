@@ -343,6 +343,24 @@ def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default,
               if _fleet else None),
     )
 
+    # Perception rate + DDR bandwidth demand (Phase 3c throughput metrics).
+    _cam_fps = r.get("camera_fps")
+    if _cam_fps is not None:
+        _agg = r.get("aggregate_camera_fps", 0.0)
+        _ncam = r["n_cameras"]
+        _fleet_note = f" ×{r['fleet_size']} robots" if r["fleet_size"] > 1 else ""
+        _perc = (f"📷 Perception **{_cam_fps:.1f} FPS/camera** "
+                 f"({_agg:.0f} frames/s across {_ncam} cam{'s' if _ncam > 1 else ''}{_fleet_note})")
+        _bw = r.get("ddr_bw_demand_gbs")
+        if _bw is not None:
+            _avail = r.get("ddr_bw_available_gbs", 0.0)
+            _frac = (_bw / _avail * 100) if _avail else 0.0
+            _flag = " ⚠ over budget" if _bw > _avail else ""
+            _perc += (f"  ·  🚌 ~**{_bw:.0f} GB/s** avg DDR demand "
+                      f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}; "
+                      f"weight-streaming estimate — a fleet adds memory, not bandwidth)")
+        st.caption(_perc)
+
     regime = r["regime"]
     if regime.startswith("single_loop"):
         c3.metric(

@@ -298,7 +298,49 @@ def _finalize_vla(r, *, vla, hw, n_cameras, fleet_size, vision_scale, mode,
             r["reason"] = (f"fleet of {fleet_size} × {dg:.1f} GB = "
                            f"{r['fleet_memory_gb']:.1f} GB exceeds {hw.name} "
                            f"capacity {hw.mem_capacity_gb:.0f} GB")
+
+    _add_throughput_metrics(r, vla, hw)
     return r
+
+
+def _add_throughput_metrics(r, vla, hw):
+    """Camera FPS (perception rate) + average DDR bandwidth demand (GB/s).
+
+    Camera FPS = vision-encoder invocations/sec = action rate ÷ actions-per-VLM-
+    forward (1 for single-loop; the chunk length for dual-loop / OFT). Per-robot
+    uses the post-fleet rate; aggregate uses the NPU's total throughput × cameras.
+
+    DDR BW demand ≈ resident weight bytes × weight-passes/action × NPU action
+    throughput — a weight-streaming ESTIMATE (not a measured anchor). NB: a fleet
+    costs MEMORY (N× residency), NOT bandwidth — all instances round-robin one NPU
+    at the same total action throughput, each action streaming one model's weights.
+    So this is fleet-independent (uses per-instance/aggregate throughput)."""
+    chunk = r.get("action_chunk_length", 1) or 1
+    per_inst_hz = r.get("per_instance_action_hz", r.get("action_hz", 0.0))
+
+    # Camera FPS — vision fires once per VLM forward; chunk actions per forward.
+    r["camera_fps"] = r.get("action_hz", 0.0) / chunk            # per robot, per camera
+    r["aggregate_camera_fps"] = per_inst_hz / chunk * r.get("n_cameras", 1)
+
+    dg = r.get("dram_gb")
+    if dg is None:
+        return
+    reg = r.get("regime", "")
+    if reg.startswith("single_loop"):
+        passes = 1 + r.get("n_action_tokens", 1)                 # prefill + decode/token
+    elif reg.startswith("oft"):
+        passes = 1.0 / chunk                                     # one forward / chunk
+    elif reg.startswith("dual_loop"):
+        total_p = sum(c.params_b for c in vla.components.values()) or 1.0
+        expert_frac = vla.components["action_head"].params_b / total_p
+        passes = (1.0 + r.get("num_denoise_steps", 0) * expert_frac) / chunk
+    else:
+        passes = 1.0
+    # Aggregate NPU DDR demand (fleet-independent — fleet multiplies residency,
+    # not per-action weight streaming). Reported against effective BW × npu_share.
+    r["ddr_bw_demand_gbs"] = dg * passes * per_inst_hz
+    r["ddr_bw_available_gbs"] = hw.effective_bandwidth_gbs * r.get("npu_share", 1.0)
+    return
 
 
 def project_vla_sensitivity(
