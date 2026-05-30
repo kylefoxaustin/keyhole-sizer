@@ -250,10 +250,27 @@ _VLA_SOURCE_BADGE = {
 }
 
 
-def _render_vla(vla, hw, npu_share):
+def _vla_rate_control(label, lo, hi, default, key, help_):
+    """Render a VLA operating-rate control. When min==max==default the model is
+    architecturally fixed-rate (no scheduling freedom) → show a locked caption
+    instead of a slider (st.slider requires lo<hi). Returns (value, off_default).
+    """
+    if lo == hi == default:
+        st.caption(f"{label}: **{default:.0f} Hz** — fixed (no scheduling freedom)")
+        return float(default), False
+    val = st.slider(label, float(lo), float(hi), float(default),
+                    key=key, help=help_)
+    return val, (abs(val - default) > 1e-9)
+
+
+def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default):
     """Self-contained VLA projection section — independent of the vision+LLM
     platform budget. Branches the breakdown on the action-generation topology
-    (single-loop AR / OFT parallel-chunk / dual-loop flow-matching)."""
+    (single-loop AR / OFT parallel-chunk / dual-loop flow-matching).
+
+    `off_default` True means the user moved an operating-rate slider off the
+    model's measured/published default → the calibrated projection no longer
+    anchors to this operating point, so the source badge drops to 🟠 (what-if)."""
     st.markdown("---")
     st.header("🤖 VLA — robot control-loop projection")
     st.caption(
@@ -272,11 +289,22 @@ def _render_vla(vla, hw, npu_share):
         )
         return
 
-    icon, label, tip = _VLA_SOURCE_BADGE.get(
-        r["vla_source"], ("", r.get("vla_source", "?"), ""))
+    # Operating-rate slider moved off the measured default → the calibrated
+    # number anchors to the default operating point only; relabel 🟠 what-if.
+    if off_default and r["vla_source"] in ("measured", "calibrated"):
+        icon, label, tip = ("🟠", "cross_class (what-if)",
+                            "operating point moved off the measured default — "
+                            "no longer a calibrated projection")
+    else:
+        icon, label, tip = _VLA_SOURCE_BADGE.get(
+            r["vla_source"], ("", r.get("vla_source", "?"), ""))
     st.caption(
         f"{icon} **{label}** · {vla.display_name} · `{r['architecture']}` · "
         f"exec dtype `{r.get('expert_dtype') or r['dtype']}` — {tip}"
+    )
+    st.caption(
+        f"Operating point: VLM **{vlm_hz:.0f} Hz** · action **{action_hz:.0f} Hz**"
+        + ("  (measured default)" if not off_default else "  ⚠ off-default")
     )
 
     c1, c2, c3 = st.columns(3)
@@ -340,6 +368,16 @@ def _render_vla(vla, hw, npu_share):
             f"+ LLM {r['llm_forward_ms']:.1f}) → {r['action_chunk_length']} actions in "
             f"parallel. Prefill-shaped, compute-bound — **avoids the AR decode "
             f"bandwidth-wall**, which is why OFT is fast."
+        )
+
+    # Target (slider) vs projected achievable — the honest "can this tier keep
+    # up?" check. action_hz here is the desired operating rate; r['action_hz']
+    # is what the silicon sustains.
+    if action_hz > r["action_hz"] * 1.05:
+        st.caption(
+            f"⚠ Target action rate **{action_hz:.0f} Hz** exceeds the projected "
+            f"achievable **{r['action_hz']:.1f} Hz** on {hw.name} — the loop can't "
+            f"sustain the target here."
         )
 
     if vla.libero_success_pct is not None:
@@ -918,9 +956,31 @@ with st.sidebar:
             + (f" · LIBERO {vla_model.libero_success_pct:.0f}%"
                if vla_model.libero_success_pct is not None else "")
         )
+
+        # Operating-rate sliders. Locked (caption only) when the catalog marks
+        # the model architecturally fixed-rate (min==max==default); adjustable
+        # for dual-loop / cached models that have real scheduling freedom.
+        # Moving either off-default flips the projection badge to 🟠 (what-if) —
+        # the calibrated number anchors to the measured default operating point.
+        vla_vlm_hz, _vlm_off = _vla_rate_control(
+            "VLM rate", vla_model.vlm_hz_min, vla_model.vlm_hz_max,
+            vla_model.default_vlm_hz, f"vla_vlm_hz__{vla_model_key}",
+            "How often the vision-language backbone re-perceives. Fixed for "
+            "single-loop/OFT models; a scheduling knob for dual-loop (VLM at a "
+            "low rate, action expert faster).",
+        )
+        vla_action_hz, _act_off = _vla_rate_control(
+            "Action rate", vla_model.action_hz_min, vla_model.action_hz_max,
+            vla_model.default_action_hz, f"vla_action_hz__{vla_model_key}",
+            "Target control rate (actions/sec). The main-area projection shows "
+            "whether the selected tier can sustain it.",
+        )
+        vla_off_default = _vlm_off or _act_off
     else:
         vla_model_key = None
         vla_model = None
+        vla_vlm_hz = vla_action_hz = None
+        vla_off_default = False
 
 # ───────────────────────── Main area ─────────────────────────
 
@@ -938,7 +998,8 @@ if not vision_enabled and not llm_enabled and not vla_enabled:
 # platform budget). Render it first; if VLA is the ONLY enabled workload, stop
 # here — the vision/LLM rendering path below assumes vision or llm is on.
 if vla_enabled and vla_model is not None:
-    _render_vla(vla_model, hw, npu_share)
+    _render_vla(vla_model, hw, npu_share,
+                vla_vlm_hz, vla_action_hz, vla_off_default)
     if not vision_enabled and not llm_enabled:
         st.stop()
 
