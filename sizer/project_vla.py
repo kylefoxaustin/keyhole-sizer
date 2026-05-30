@@ -148,6 +148,7 @@ def project_vla(
     n_action_tokens: int | None = None,
     n_cameras: int | None = None,
     fleet_size: int = 1,
+    camera_mode: str = "native",
     npu_share: float | None = None,
     reference: Hardware = RTX_5090_REFERENCE,
 ) -> dict:
@@ -158,17 +159,23 @@ def project_vla(
     anchor returns `{"deferred": True, ...}`; a model/dtype/config that won't run
     returns `{"runs": False, ...}` with a reason.
 
-    Phase 3c — multi-camera + fleet:
-      • `n_cameras` (default = `vla.measured_n_cameras`, so the default projection
-        reproduces the measured headline): scales ONLY the vision encoder by
-        `n_cameras / measured_n_cameras` (LLM/action are shared per
-        `llm_backbone_invariant_to_n_cameras`). `> max_cameras_native` → runs:False
-        (use fleet replication, not stitched panorama). A camera count other than
-        the measured one drops the badge to 🟠 (linear-assumed, `vla_source_reason`).
+    Phase 3c — three MEASURED multi-camera cost shapes (keyhole e741760) + fleet:
+      • `camera_mode="native"` (default): N camera feeds into one model.
+        `n_cameras` defaults to `vla.measured_n_cameras` so the default call
+        reproduces the measured headline. Scales vision by
+        `n_cameras / measured_n_cameras`; and — when
+        `llm_backbone_invariant_to_n_cameras` is False (π0.5, MEASURED) — also
+        grows prefill by `llm_prefill_ms_per_camera` (256 image tokens/cam into
+        the prefix). `> max_cameras_native` → runs:False (use fleet, not native).
+        A camera count ≠ the measured one drops the badge to 🟠 (linear-assumed).
+      • `camera_mode="stitched"`: N cameras stitched into ONE downscaled panorama.
+        MEASURED FLAT on OpenVLA (fixed 224×224 tensor → vision cost constant in N).
+        Bypasses the native-camera gate; vision/prefill stay at the 1-instance
+        cost; `stitched_quality_caveat` flags the resolution-per-camera loss / OOD.
       • `fleet_size`: N independent instances time-sharing ONE NPU (serial /
-        round-robin, conservative). Per-robot rate = single-instance / N;
-        `aggregate_action_hz` = single-instance; memory = N × per-instance →
-        `fleet_memory_gb`; fleet-memory overflow → runs:False.
+        round-robin, conservative — MEASURED N× linear on NORA-3B). Per-robot rate
+        = single-instance / N; `aggregate_action_hz` = single-instance; memory =
+        N × per-instance → `fleet_memory_gb`; fleet-memory overflow → runs:False.
     """
     share = npu_share if npu_share is not None else hw.npu_share_default
     share = max(share, 1e-6)
@@ -189,21 +196,34 @@ def project_vla(
         "npu_share": share,
         "n_cameras": n_cameras,
         "fleet_size": fleet_size,
+        "camera_mode": camera_mode,
     }
     mode = _vla_mode(n_cameras, fleet_size)
 
-    # ── Phase 3c gates: camera count + fleet validity ───────────────────────
+    # ── Phase 3c gates: camera count + mode validity ────────────────────────
+    if camera_mode not in ("native", "stitched"):
+        return {**base, "mode": mode, "runs": False,
+                "reason": f"camera_mode must be 'native' or 'stitched', got '{camera_mode}'"}
     if n_cameras < 1 or fleet_size < 1:
         return {**base, "mode": mode, "runs": False,
                 "reason": "n_cameras and fleet_size must both be >= 1"}
-    if n_cameras > vla.max_cameras_native:
-        return {**base, "mode": mode, "runs": False,
-                "reason": (f"{vla.display_name} supports max "
-                           f"{vla.max_cameras_native} camera(s) natively; "
-                           f"{n_cameras} requested — multi-camera beyond native "
-                           f"support needs fleet_size replication, not n_cameras "
-                           f"(a stitched panorama is out-of-distribution).")}
-    vision_scale = n_cameras / vla.measured_n_cameras
+
+    if camera_mode == "stitched":
+        # N cameras → ONE downscaled panorama. MEASURED flat (fixed input tensor),
+        # so vision/prefill stay at the 1-instance cost; the model wasn't trained
+        # on panoramas → quality caveat. No native-camera gate (any N stitchable).
+        vision_scale = 1.0
+        prefill_n = vla.measured_n_cameras          # flat — no prefill growth
+    else:  # native
+        if n_cameras > vla.max_cameras_native:
+            return {**base, "mode": mode, "runs": False,
+                    "reason": (f"{vla.display_name} supports max "
+                               f"{vla.max_cameras_native} camera(s) natively; "
+                               f"{n_cameras} requested — beyond native support, use "
+                               f"fleet_size (N independent instances) or "
+                               f"camera_mode='stitched' (one downscaled panorama).")}
+        vision_scale = n_cameras / vla.measured_n_cameras
+        prefill_n = n_cameras
 
     # ── architecture dispatch (each returns a per-instance result dict) ─────
     if vla.architecture == "oft_parallel_chunk":
@@ -211,32 +231,46 @@ def project_vla(
                                        reference=reference, vision_scale=vision_scale)
     elif vla.architecture != "single_loop":
         result = _project_dual_loop(vla, hw, base, share=share,
-                                    reference=reference, vision_scale=vision_scale)
+                                    reference=reference, vision_scale=vision_scale,
+                                    prefill_n_cameras=prefill_n)
     else:
         result = _project_single_loop(vla, hw, base, share=share, n_tok=n_tok,
                                       exec_dtype=exec_dtype, reference=reference,
                                       vision_scale=vision_scale)
 
     return _finalize_vla(result, vla=vla, hw=hw, n_cameras=n_cameras,
-                         fleet_size=fleet_size, vision_scale=vision_scale, mode=mode)
+                         fleet_size=fleet_size, vision_scale=vision_scale, mode=mode,
+                         camera_mode=camera_mode)
 
 
-def _finalize_vla(r, *, vla, hw, n_cameras, fleet_size, vision_scale, mode):
+def _finalize_vla(r, *, vla, hw, n_cameras, fleet_size, vision_scale, mode,
+                  camera_mode="native"):
     """Apply Phase 3c multi-camera badge logic + fleet replication to a
     per-instance result, and stamp the camera/fleet/mode fields. Safe on
     won't-run / deferred dicts (just stamps the fields, no scaling)."""
-    r = {**r, "n_cameras": n_cameras, "fleet_size": fleet_size, "mode": mode}
+    r = {**r, "n_cameras": n_cameras, "fleet_size": fleet_size, "mode": mode,
+         "camera_mode": camera_mode}
     if not r.get("runs"):
         return r
 
-    # Multi-camera scaling to a count other than the measured one is linear-
-    # assumed → drop a measured/calibrated badge to 🟠 (the vision-encoder
-    # ×N assumption isn't validated at this count).
+    # Native multi-camera scaling to a count other than the measured one is
+    # linear-assumed → drop a measured/calibrated badge to 🟠 (the per-camera
+    # vision/prefill slopes aren't validated at this exact count).
     if vision_scale != 1.0 and r.get("vla_source") in ("measured", "calibrated"):
         r["vla_source"] = "cross_class"
         r["vla_source_reason"] = (
             f"multi-camera scaling assumed linear (measured at "
             f"{vla.measured_n_cameras} cam, projecting {n_cameras})")
+
+    # Stitched panorama: compute is MEASURED flat (OpenVLA), but the model wasn't
+    # trained on stitched inputs → flag the quality cost (resolution-per-camera
+    # loss, out-of-distribution). The latency badge stays as-is (flat is measured).
+    if camera_mode == "stitched" and n_cameras > 1:
+        r["stitched_quality_caveat"] = (
+            f"{n_cameras} cameras stitched into one downscaled panorama: compute "
+            f"is flat (≈1-camera, MEASURED on OpenVLA — fixed input tensor), but "
+            f"resolution-per-camera degrades and the model wasn't trained on "
+            f"panoramas (out-of-distribution; quality not modeled here).")
 
     vm = r.get("vision_ms")
     if vm is not None:
@@ -443,15 +477,17 @@ def _denoise_edge_step(dl: dict, hw: Hardware, share: float,
 
 def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
                        share: float, reference: Hardware,
-                       vision_scale: float = 1.0) -> dict:
+                       vision_scale: float = 1.0,
+                       prefill_n_cameras: int | None = None) -> dict:
     """Project dual-loop (flow-matching) per-action latency + action rate.
 
     Slow loop (VLM backbone, once/chunk) is 🔵 calibrated (latency-anchor scaled
     like single-loop's vision+prefill). Fast loop (denoise) is launch-bound: the
     measured step is carried UNCHANGED as the eager ceiling (headline) + a physics
     floor as headroom — never BW-scaled. FP-required head is a hard gate.
-    `vision_scale` (Phase 3c) = n_cameras / measured_n_cameras — scales only the
-    vision term (π0.5 measured at 3 cameras; LLM/denoise are camera-invariant).
+    Phase 3c: `vision_scale` = n_cameras/measured scales vision; `prefill_n_cameras`
+    grows prefill by `llm_prefill_ms_per_camera` when the LLM is NOT camera-
+    invariant (π0.5 — MEASURED, keyhole e741760: 256 image tokens/cam into prefix).
     """
     dl = vla.measured_5090_dual_loop
     comp_meas = vla.measured_5090_components
@@ -467,6 +503,14 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
     H = dl["action_chunk_length"]
     N = dl["num_denoise_steps"]
     base = {**base, "n_action_tokens": H, "architecture": vla.architecture}
+
+    # Phase 3c: measured prefill anchor, grown by the per-camera slope when the
+    # LLM is NOT camera-invariant (π0.5: each camera adds 256 image tokens to the
+    # prefix). Anchored at the measured count so the default (n=measured) is exact.
+    prefill_n = prefill_n_cameras if prefill_n_cameras is not None else vla.measured_n_cameras
+    prefill_meas = comp_meas["llm_prefill_ms"]
+    if not vla.llm_backbone_invariant_to_n_cameras and vla.llm_prefill_ms_per_camera > 0:
+        prefill_meas += (prefill_n - vla.measured_n_cameras) * vla.llm_prefill_ms_per_camera
 
     # ── VLM-stage dtype + runnability ────────────────────────────────────────
     vlm_dtype = _resolve_exec_dtype(vla, None)        # int8 part of the path
@@ -505,9 +549,9 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
         # only when vision was rescaled for a multi-camera what-if.
         vla_source, regime = "measured", "dual_loop_measured"
         vision_ms = comp_meas["vision_ms"] * vision_scale
-        prefill_ms = comp_meas["llm_prefill_ms"]
+        prefill_ms = prefill_meas
         expert_dtype = _REFERENCE_DTYPE               # measured at bf16
-        if vision_scale == 1.0:
+        if vision_scale == 1.0 and prefill_ms == comp_meas["llm_prefill_ms"]:
             vlm_backbone_ms = dl["vlm_backbone_ms"]
             ms_per_action = dl["amortized_ms_per_action"]  # authoritative measured amortization
             chunk_latency_ms = dl["chunk_latency_ms"]
@@ -527,7 +571,7 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
 
         ref_pf_eff = ref_peak * reference.llm_prefill_util_factor
         tgt_pf_eff = vlm_peak * hw.llm_prefill_util_factor
-        prefill_ms = comp_meas["llm_prefill_ms"] * (ref_pf_eff / tgt_pf_eff)
+        prefill_ms = prefill_meas * (ref_pf_eff / tgt_pf_eff)
 
         vlm_backbone_ms = vision_ms + prefill_ms
         chunk_latency_ms = vlm_backbone_ms + N * eager_step_ms

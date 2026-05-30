@@ -299,6 +299,46 @@ def test_bitvla_measured_at_2cam_runs_on_int8_mid_fleet():
     assert r["fleet_memory_gb"] == r["dram_gb"] * 3
 
 
+# ── Phase 3c corrections (keyhole e741760: measurement refuted 2 assumptions) ──
+
+def test_pi05_prefill_grows_with_cameras_not_invariant():
+    """MEASURED: π0.5's LLM is NOT camera-invariant — prefill grows ~6.612
+    ms/camera (256 image tokens/cam into the PaliGemma prefix). The vision-only
+    scaling assumption was refuted."""
+    p1 = project_vla(PI05, RTX_5090_REFERENCE, n_cameras=1)["llm_prefill_ms"]
+    p2 = project_vla(PI05, RTX_5090_REFERENCE, n_cameras=2)["llm_prefill_ms"]
+    p3 = project_vla(PI05, RTX_5090_REFERENCE, n_cameras=3)["llm_prefill_ms"]
+    assert p1 < p2 < p3                                   # prefill grows with N
+    assert abs((p2 - p1) - 6.612) < 0.01                  # measured slope
+    assert abs((p3 - p2) - 6.612) < 0.01
+
+
+def test_pi05_3cam_headline_unchanged_by_prefill_fix():
+    """Regression guard: the prefill-scaling correction must NOT move the
+    measured 3-camera headline (delta=0 at the measured count)."""
+    r = project_vla(PI05, RTX_5090_REFERENCE)             # default → 3 cams
+    assert r["vla_source"] == "measured"
+    assert 360.0 <= r["action_hz"] <= 375.0               # still ~367 Hz
+
+
+def test_openvla_stitched_is_flat_and_caveated():
+    """MEASURED: OpenVLA resizes every input to a fixed tensor → a stitched
+    panorama costs the SAME as 1 camera (flat), with a quality caveat. Bypasses
+    the native-camera gate that rejects native n_cameras>1."""
+    base = project_vla(OPENVLA, NPU_HIGH, n_cameras=1, camera_mode="stitched")
+    s3 = project_vla(OPENVLA, NPU_HIGH, n_cameras=3, camera_mode="stitched")
+    assert s3["runs"] is True and s3["camera_mode"] == "stitched"
+    assert abs(s3["ms_per_action"] - base["ms_per_action"]) < 1e-6   # flat in N
+    assert "stitched_quality_caveat" in s3
+    # native n=3 on the same 1-camera model is still rejected
+    assert project_vla(OPENVLA, NPU_HIGH, n_cameras=3)["runs"] is False
+
+
+def test_bad_camera_mode_rejected():
+    r = project_vla(NORA, NPU_HIGH, camera_mode="panorama")
+    assert r["runs"] is False and "camera_mode" in r["reason"]
+
+
 if __name__ == "__main__":
     import sys
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

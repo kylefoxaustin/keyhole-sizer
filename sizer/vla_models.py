@@ -298,12 +298,20 @@ class VLAModel:
     # measured headline; other camera counts scale linearly and drop to 🟠.
     measured_n_cameras: int = 1
 
-    # True when the LLM/action cost does NOT scale with camera count (only the
-    # vision encoder fires once per camera; the LLM consumes the fused tokens
-    # once). True for all natively-multi-camera VLAs measured so far; vacuous for
-    # single-camera models (n always = 1). project_vla scales ONLY vision by
-    # n_cameras when this holds.
+    # Whether the LLM cost is independent of camera count. ⚠️ MEASUREMENT REFUTED
+    # the brief's "True" assumption for π0.5 (keyhole e741760): each camera injects
+    # 256 image tokens into the PaliGemma prefix, so prefill GROWS with N. False
+    # for π0.5; True (vacuous) for single-camera + OFT models. When False, the
+    # projection scales prefill by `llm_prefill_ms_per_camera` in addition to
+    # scaling vision by n_cameras.
     llm_backbone_invariant_to_n_cameras: bool = True
+
+    # Measured prefill growth per added camera (ms), for native-multi-cam models
+    # where the LLM is NOT camera-invariant. π0.5 = 6.612 ms/cam (keyhole e741760;
+    # prefill N=1→22.3, N=2→29.6, N=3→35.5). 0.0 = invariant (no prefill scaling).
+    # Applied to the MEASURED prefill anchor before tier ratio-scaling:
+    #   prefill_at_N = measured_prefill + (N − measured_n_cameras) × this.
+    llm_prefill_ms_per_camera: float = 0.0
 
 
 # ───────────────────────────────────────────────────────────────────────
@@ -830,9 +838,14 @@ PI_0P5 = VLAModel(
     hf_repo="lerobot/pi05_base",                    # [backend] 0fa4474 fixed lerobot/pi0_5 (404) → lerobot/pi05_base
     # Multi-camera (Phase 3c): π0.5 natively supports up to 3 cameras; the 5090
     # measurement was captured at 3 (vision_ms 14.563 = SigLIP ×3 cams). So 3 is
-    # the calibrated default; n_cameras 1/2 are linear down-scales (🟠).
+    # the calibrated default; n_cameras 1/2 are linear down-scales (🟠). ⚠️ The
+    # LLM is NOT camera-invariant (keyhole e741760 refuted the brief): prefill
+    # grows 6.612 ms/camera (256 image tokens/cam into the PaliGemma prefix), so
+    # BOTH vision and prefill scale with N.
     max_cameras_native=3,
     measured_n_cameras=3,
+    llm_backbone_invariant_to_n_cameras=False,
+    llm_prefill_ms_per_camera=6.612,
 )
 
 
