@@ -9,6 +9,7 @@ Keyhole deck (see `scripts/bakeoff_*.py` in the parent project and
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 from ratchet import (
@@ -17,6 +18,7 @@ from ratchet import (
     RTX_5090_REFERENCE,
     hw_with_memory, MEMORY_UPGRADE_OPTIONS,
     hw_supports_dtype, hw_peak_tops_for_dtype,
+    make_custom_tier, resolve_floor_dtype,
 )
 
 from .precision import CapabilityLevel
@@ -107,6 +109,135 @@ def _get_measured(hw: Hardware, model_key: str, quant: str):
 # measurements before any projection. (measured.py imports only ratchet + stdlib
 # — no circular import back into npu_model.)
 from . import measured as _keyhole_measured  # noqa: E402,F401
+
+
+# ─── NPU precision-set selector (ratchet ADR 017, surface mirror of PAI-sizer) ───
+# An escalating precision ladder for the Mid/High NPU classes: posit an
+# FP-capable tensor engine at the tier's memory class and run the SAME model at
+# INT-only / +FP8 / +FP8+FP4, so users can A/B/C the prefill (and accuracy)
+# deltas. The whole benefit story lives in the prefill compute floor: each
+# precision halving doubles MAC density on the same datapath, so the rung sets
+# the effective compute dtype the projection scales against. Decode is BW-bound
+# (held by the 4-bit weight stream) and is UNCHANGED by the compute rung.
+#
+# TOPS ladder (spec §4, datapath-doubling physics: 16-bit=X, 8-bit=2X, 4-bit=4X;
+# FP8 shares the 8-bit datapath with INT8 → same TOPS, FP8 buys ACCURACY not
+# speed). FP4 (400 Mid / 800 High) is a 🟠 modeled projection — ZERO FP4 silicon
+# anchors exist on any edge NPU (confidence=low). Numbers are the canonical
+# pai-sizer/docs-ratified ladder so the two sizers render identically.
+_PRECISION_LADDER_TOPS = {
+    "NPU Mid":  {"bf16": 100.0, "int8": 200.0, "fp8": 200.0, "fp4": 400.0},
+    "NPU High": {"bf16": 200.0, "int8": 400.0, "fp8": 400.0, "fp4": 800.0},
+}
+_PRECISION_SILICON_CLASS = {
+    "NPU Mid":  "lp5x_128_int8",
+    "NPU High": "lp5x_128",
+}
+# UI label → npu_precision_set value (None = stock, no override). Order is the
+# escalating ladder the radio renders. "Escalating, not free checkboxes": no
+# real silicon ships FP4 without FP8, FP8 without INT8.
+PRECISION_SET_OPTIONS = [
+    ("Stock (no override)", None),
+    ("INT-only",            "int8"),
+    ("INT + FP8",           "int8_fp8"),
+    ("INT + FP8 + FP4",     "int8_fp8_fp4"),
+]
+_PRECISION_SET_SUFFIX = {
+    "int8":         "INT-only",
+    "int8_fp8":     "INT+FP8",
+    "int8_fp8_fp4": "INT+FP8+FP4",
+}
+# Tiers that carry a precision ladder — the selector is offered only here (Low
+# tiers + i.MX 95 ground-truth + 5090 are excluded by construction).
+PRECISION_SET_TIERS = tuple(_PRECISION_LADDER_TOPS.keys())
+
+
+def hw_with_precision(base_hw: Hardware, precision_set: str | None) -> Hardware:
+    """Clone a Mid/High tier as an NPU precision-set variant (ratchet ADR 017).
+
+    Posits an FP-capable tensor engine at `base_hw`'s memory class, carrying the
+    spec §4 TOPS ladder and stamping `npu_precision_set` on the tier so
+    `project_llm` runs the model's prefill at the rung's effective dtype. Memory
+    specs are lifted from `base_hw`, so this composes on top of an LPDDR memory
+    upgrade (the memory-upgraded clone carries `tier_lookup_name` back to its
+    stock tier, which keys the ladder).
+
+    Unlike PAI-sizer (which resolves anchors by tier_family), keyhole reads the
+    measured LLM anchors off the `hw` INSTANCE's `measured_*_overrides` dicts.
+    A bare `make_custom_tier` variant has empty overrides and would fall through
+    to the cross-class branch, losing the measured 351 ms (Mid) / 175.5 ms
+    (High) prefill anchor. So we copy the stock tier's measured overrides onto
+    the variant — the variant IS the same physical memory subsystem, only the
+    tensor-engine precision differs — so the projection stays on the measured
+    anchor and the rung scales the prefill off it (see `_precision_prefill_scale`).
+
+    `precision_set` of None (or a tier with no ladder) returns `base_hw`
+    unchanged (non-breaking — every canonical projection is identical).
+    """
+    if precision_set is None:
+        return base_hw
+    ladder_key = getattr(base_hw, "tier_lookup_name", None) or base_hw.name
+    ladder = _PRECISION_LADDER_TOPS.get(ladder_key)
+    silicon_class = _PRECISION_SILICON_CLASS.get(ladder_key)
+    if ladder is None or silicon_class is None:
+        return base_hw  # only Mid/High carry a precision ladder
+    suffix = _PRECISION_SET_SUFFIX.get(precision_set, precision_set)
+    variant = make_custom_tier(
+        f"{base_hw.name} · {suffix}",
+        silicon_class=silicon_class,
+        peak_tops_bf16=ladder["bf16"],
+        peak_tops_int8=ladder["int8"],
+        peak_tops_fp8=ladder["fp8"],
+        peak_tops_fp4=ladder["fp4"],
+        mem_bandwidth_gbs=base_hw.mem_bandwidth_gbs,
+        mem_capacity_gb=base_hw.mem_capacity_gb,
+        mem_bus_width_bits=base_hw.mem_bus_width_bits,
+        mem_type=base_hw.mem_type,
+        mem_data_rate_gtps=base_hw.mem_data_rate_gtps,
+        npu_precision_set=precision_set,
+    )
+    # Re-home into the stock memory family AND carry the measured LLM anchors +
+    # the keyhole-side NPU-share default onto the variant, so keyhole's
+    # instance-keyed anchor resolution fires off the measured Mid/High cell.
+    return dataclasses.replace(
+        variant,
+        tier_family=base_hw.tier_family,
+        measured_decode_overrides=base_hw.measured_decode_overrides,
+        measured_prefill_overrides=base_hw.measured_prefill_overrides,
+        measured_llm=base_hw.measured_llm,
+        npu_share_default=base_hw.npu_share_default,
+    )
+
+
+def _precision_prefill_scale(hw: Hardware, fp4_runtime_maturity: str = "mature") -> float:
+    """Multiplier on a tier's MEASURED prefill anchor for its precision-set rung.
+
+    The measured Mid/High prefill anchor (351 / 175.5 ms) was taken on the
+    tier's native 8-bit (INT8) tensor path. A precision-set variant runs the
+    matmul at the rung's effective dtype, so prefill scales by the TOPS ratio
+    between that native path and the rung:
+
+        prefill_ms = anchor_ms × (native_int8_TOPS / rung_effective_TOPS)
+
+    The rung dtype is resolved via ratchet's `resolve_floor_dtype`, which folds
+    in the ADR-016 maturity derate (immature FP4 → bf16/fp16 floor → the honest
+    "no win" collapse). keyhole's LLM models are Q4_K_M weight-only, whose naive
+    compute path dequants to fp16 — so 'fp16' is the model compute dtype the
+    immature collapse falls back to.
+
+    Returns 1.0 when the tier carries no precision set (every canonical tier),
+    making the path non-breaking; and 1.0 if a TOPS field is missing/zero
+    (defensive — keeps the projection finite rather than collapsing to 0/∞).
+    """
+    precision_set = getattr(hw, "npu_precision_set", None)
+    if not precision_set:
+        return 1.0
+    rung_dtype = resolve_floor_dtype(precision_set, "fp16", fp4_runtime_maturity)
+    rung_tops = hw_peak_tops_for_dtype(hw, rung_dtype)
+    native_tops = hw.peak_tops_int8  # anchor measured on the 8-bit INT8 path
+    if rung_tops <= 0 or native_tops <= 0:
+        return 1.0
+    return native_tops / rung_tops
 
 
 # Edge-anchor cap calibration constant (per [backend] 2026-05-04 16:19).
@@ -1235,8 +1366,16 @@ def workload_multiplier(category: str) -> dict:
 def project_llm(hw: Hardware, quant: str = "Q4_K_M",
                  workload: str = "plain_chat",
                  npu_share: float | None = None,
-                 model_key: str | None = None) -> dict:
+                 model_key: str | None = None,
+                 fp4_runtime_maturity: str = "mature") -> dict:
     """Project LLM decode tok/s + TTFT for the selected model on `hw`.
+
+    `fp4_runtime_maturity` ∈ {'mature', 'immature'} (ratchet ADR 016/017) — only
+    bites when `hw` carries an `npu_precision_set` (a precision-set variant from
+    `hw_with_precision`). It scales the prefill compute floor by the rung's
+    effective-dtype TOPS ratio; on an immature FP4 runtime the rung collapses to
+    the bf16/fp16 floor (the measured llama.cpp "no win"). Decode is BW-bound
+    and unaffected. Stock tiers carry no precision set → scale 1.0 (non-breaking).
 
     `model_key` (added 2026-05-01) — when provided, project_llm consults
     `hw.measured_llm[model_key][quant]` first for richer per-(model, quant)
@@ -1386,6 +1525,14 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         ttft_ms = max(prefill_bw_ms, prefill_compute_ms) + hw.compute_overhead_ms
         base_ttft = ttft_ms / 1000  # ms → sec for downstream consumers
 
+    # Precision-set rung (ratchet ADR 017): scale the prefill compute floor by
+    # the rung's effective-dtype TOPS ratio relative to the measured anchor's
+    # native INT8 path. 1.0 for every stock tier (npu_precision_set=None →
+    # non-breaking). Decode is BW-bound (held by the 4-bit weight stream) and is
+    # intentionally NOT scaled — the compute rung doesn't move it.
+    precision_scale = _precision_prefill_scale(hw, fp4_runtime_maturity)
+    base_ttft *= precision_scale
+
     # Apply the selected workload's multiplier (vs plain-chat reference)
     mult = workload_multiplier(workload)
     decode_tok_s = base_decode * mult["decode_p50_mult"]
@@ -1426,6 +1573,10 @@ def project_llm(hw: Hardware, quant: str = "Q4_K_M",
         # params, fully streamed from DRAM each token, so tok/s ∝ BW.
         "regime": "bw_bound",
         "npu_share": share,
+        # Precision-set rung surface (ratchet ADR 017). None on stock tiers.
+        "npu_precision_set": getattr(hw, "npu_precision_set", None),
+        "fp4_runtime_maturity": fp4_runtime_maturity,
+        "precision_prefill_scale": precision_scale,
     }
 
 

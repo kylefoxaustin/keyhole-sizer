@@ -549,6 +549,99 @@ with st.sidebar:
                     f"vs stock)"
                 )
 
+    # ── NPU precision-set selector for Mid + High (ratchet ADR 017) ──────
+    # An escalating-ladder radio that posits an FP-capable tensor engine at
+    # this tier's memory class, so users can A/B/C the same model across
+    # INT-only / +FP8 / +FP8+FP4 and read off the prefill / accuracy deltas
+    # (the 3-column compare in the LLM section). The rung sets the effective
+    # compute dtype the prefill floor scales against — the whole benefit story.
+    # Composes on top of the memory upgrade above (built from the possibly-
+    # upgraded `hw`). Defaults are set UNCONDITIONALLY so the projection +
+    # compare below always have them in scope (Custom / Low / i.MX 95 / 5090
+    # stay stock). Surface mirror of PAI-sizer — kept UX-parallel per [docs].
+    precision_set = None
+    fp4_maturity = "mature"
+    precision_base_hw = hw   # memory-applied, pre-precision base for the compare
+    if tier in ("NPU Mid", "NPU High"):
+        from sizer.npu_model import PRECISION_SET_OPTIONS, hw_with_precision
+        _ps_map = dict(PRECISION_SET_OPTIONS)
+        _ps_choice = st.radio(
+            "Precision capability",
+            options=[opt[0] for opt in PRECISION_SET_OPTIONS],
+            index=0,
+            key=f"precision_set_{tier}",
+            help=(
+                "Posit an FP-capable tensor engine at this memory class and "
+                "see what each precision rung buys. **INT-only** = W8A8: ~2× "
+                "prefill vs a naive fp16 run, but a measured **−3.8pp** "
+                "accuracy cliff. **+FP8** = same speed as INT8 (FP8 == INT8 "
+                "TOPS — same 8-bit datapath) and recovers the accuracy: FP8 "
+                "buys fidelity, not speed. **+FP8+FP4** = 2× the 8-bit prefill "
+                "(4× the fp16 baseline) — but only on a MATURE FP4 runtime "
+                "(see the toggle). FP4 on edge NPUs is a 🟠 modeled projection "
+                "— zero silicon anchors exist (confidence: low). Escalating "
+                "ladder, not free checkboxes: no real silicon ships FP4 "
+                "without FP8. Stock NPU Mid is INT8-only; the FP rungs posit a "
+                "hypothetical FP-capable Mid."
+            ),
+        )
+        precision_set = _ps_map[_ps_choice]
+        if precision_set == "int8_fp8_fp4":
+            _mat_choice = st.radio(
+                "FP4 runtime maturity",
+                options=[
+                    "Immature (edge default — llama.cpp-class runtime)",
+                    "Mature (vLLM / TensorRT-LLM-class runtime)",
+                ],
+                index=0,  # edge default = immature (the honest no-win floor)
+                key=f"fp4_maturity_{tier}",
+                help=(
+                    "FP4's prefill win is RUNTIME-conditional (ratchet ADR "
+                    "016). Same NVFP4 weights, same RTX 5090: vLLM gave a "
+                    "3.59× prefill WIN, but llama.cpp ran 15–19% SLOWER than "
+                    "Q4_K_M. Edge NPU vendor runtimes are custom and frequently "
+                    "llama.cpp-class, so the honest edge default is IMMATURE: "
+                    "FP4 collapses to the INT4-weight-only floor (prefill falls "
+                    "back to the bf16 floor, no compute win; decode stays "
+                    "BW-bound). Flip to MATURE only if your target vendor "
+                    "runtime is proven vLLM / TensorRT-class."
+                ),
+            )
+            fp4_maturity = ("immature" if _mat_choice.startswith("Immature")
+                            else "mature")
+        if precision_set is not None:
+            hw = hw_with_precision(hw, precision_set)
+            if precision_set == "int8":
+                st.caption(
+                    f"🎛️ **INT-only (W8A8)** — {hw.peak_tops_int8:.0f} INT8 "
+                    f"TOPS. ~2× prefill vs naive fp16, at a measured **−3.8pp** "
+                    f"accuracy cliff (the cost INT8-only silicon forces)."
+                )
+            elif precision_set == "int8_fp8":
+                st.caption(
+                    f"🎛️ **INT + FP8** — {hw.peak_tops_fp8:.0f} FP8 TOPS "
+                    f"(== INT8 speed, same 8-bit datapath). Recovers the "
+                    f"−3.8pp INT8 accuracy cliff at **zero speed cost** — FP8 "
+                    f"buys fidelity, not throughput."
+                )
+            else:  # int8_fp8_fp4
+                if fp4_maturity == "mature":
+                    _fp4_line = (
+                        f"**mature runtime** → {hw.peak_tops_fp4:.0f} FP4 TOPS, "
+                        f"~2× the 8-bit prefill (4× the fp16 baseline)."
+                    )
+                else:
+                    _fp4_line = (
+                        "**immature runtime (edge default)** → collapses to the "
+                        "INT4-weight-only floor: prefill back at the bf16 floor "
+                        "(no compute win)."
+                    )
+                st.caption(
+                    f"🎛️ **INT + FP8 + FP4** — {_fp4_line} 🟠 Modeled "
+                    f"projection — **zero FP4 silicon anchors** on any edge NPU "
+                    f"(confidence: low)."
+                )
+
     # ── NPU_share selector (BW-contention third factor) ─────────────────
     # Per [docs] 2026-04-29 14:38: the third factor in the BW decomposition
     # `effective_NPU_BW = peak_DRAM_BW × NPU_share × kernel_util_factor`.
@@ -1317,7 +1410,8 @@ if llm_enabled:
 _perf_lookup_key = (LLM_MODELS[llm_model_key].measurement_alias
                     or llm_model_key) if llm_enabled else None
 llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
-                    model_key=_perf_lookup_key)
+                    model_key=_perf_lookup_key,
+                    fp4_runtime_maturity=fp4_maturity)
        if (llm_enabled and _llm_dtype_supported) else None)
 # Apply per-model BW-scaling: project_llm() is anchored to the perf
 # reference model (Qwen3-30B-A3B MoE 3B-active). For models with
@@ -1941,6 +2035,82 @@ with tab_overview:
     if llm_enabled:
         st.markdown("---")
         st.markdown(f"### LLM — Qwen3-30B-A3B MoE @ {quant}")
+
+        # ── Precision-set benefit compare (Mid/High, ratchet ADR 017) ──────
+        # The "see the benefit" payoff: A/B/C the SAME model across the
+        # escalating precision ladder on the SAME memory class, reading off the
+        # prefill / accuracy deltas. Posits an FP-capable engine at the tier's
+        # memory class (FP4 = modeled, zero silicon anchors). Built from
+        # `precision_base_hw` (memory-applied, pre-precision) so all three rungs
+        # show regardless of the sidebar radio. Surface mirror of PAI-sizer.
+        if tier in ("NPU Mid", "NPU High"):
+            from sizer.npu_model import hw_with_precision as _hw_with_precision
+            st.subheader("Precision-set benefit — same model, three precision rungs")
+            st.caption(
+                f"**{LLM_MODELS[llm_model_key].label.split(' (')[0]}** on the "
+                f"**{tier}** memory class @ 1K-token prompt. Each rung posits an "
+                f"FP-capable tensor engine and runs the matmul at that precision. "
+                f"Prefill / TTFT is the headline compute benefit; decode is "
+                f"BW-bound (held by the 4-bit weight stream). FP4 is a 🟠 modeled "
+                f"projection — zero edge-NPU silicon anchors (confidence: low)."
+            )
+            _rungs = [
+                ("INT-only", "int8",
+                 "W8A8 — 2× prefill vs fp16", "🔴 −3.8pp (W8A8 cliff)"),
+                ("INT + FP8", "int8_fp8",
+                 "== INT8 speed, near-lossless", "🟢 ≈0pp (recovers cliff)"),
+                ("INT + FP8 + FP4", "int8_fp8_fp4",
+                 "2× the 8-bit prefill (mature)", "🟢 ≈0pp (NVFP4)"),
+            ]
+            _cmp_cols = st.columns(3)
+            _baseline_ttft = None   # INT-only TTFT, for the relative-speedup line
+            for _col, (_label, _ps, _speed_note, _acc_note) in zip(_cmp_cols, _rungs):
+                _mat = fp4_maturity if _ps == "int8_fp8_fp4" else "mature"
+                _vhw = _hw_with_precision(precision_base_hw, _ps)
+                _rr = project_llm(_vhw, quant, workload=llm_workload,
+                                   npu_share=npu_share, model_key=_perf_lookup_key,
+                                   fp4_runtime_maturity=_mat)
+                _ttft_ms = _rr["ttft_1k_sec"] * 1000
+                if _ps == "int8":
+                    _baseline_ttft = _ttft_ms
+                # FP4 column reflects the live sidebar maturity toggle.
+                if _ps == "int8_fp8_fp4":
+                    if _mat == "immature":
+                        _speed_note = "immature → no prefill win (bf16 floor)"
+                        _acc_note = "🟡 ≈0pp acc, but ADR-016 'no win'"
+                    _label = f"{_label} · {_mat}"
+                _speedup = ""
+                if (_ttft_ms and _baseline_ttft and _ps != "int8"
+                        and _ttft_ms < _baseline_ttft):
+                    _speedup = f" ({_baseline_ttft / _ttft_ms:.1f}× vs INT8)"
+                with _col:
+                    st.markdown(f"**{_label}**")
+                    st.metric("Prefill / TTFT 1K", f"{_ttft_ms:.0f} ms",
+                              delta=_speed_note, delta_color="off")
+                    st.caption(f"Decode: **{_rr['decode_tok_s']:.1f}** tok/s"
+                               f"{_speedup}")
+                    st.caption(f"Accuracy: {_acc_note}")
+            # RAM is an ORTHOGONAL axis (weight format), NOT a compute-rung
+            # effect — render it fixed-by-model with the orthogonal-axis caption
+            # ([docs]-ratified nuance #2, spec §5.1). An already-Q4 model keeps
+            # 4-bit weights at every rung.
+            _wgb = llm.get("gguf_size_gb")
+            st.caption(
+                "↑ INT8 **and** FP8 both buy ~2× prefill over a naive fp16 run; "
+                "FP8's edge over INT8 is the accuracy recovery (same speed). FP4 "
+                "adds another ~2× prefill **on a mature runtime only** (toggle in "
+                "the sidebar). "
+                + (f"**Weight RAM ≈ {_wgb:.1f} GB** is fixed by this model's "
+                   f"{quant} quantization — it doesn't change across compute "
+                   f"rungs; FP4's half-RAM benefit applies when deploying "
+                   f"FP4-quantized weights vs FP8/INT8 weights, an orthogonal "
+                   f"model-choice axis."
+                   if _wgb else
+                   "Weight RAM is set by the model's quantization, not the "
+                   "compute rung.")
+            )
+            st.markdown("---")
+
         llm_left, llm_right = st.columns([1, 1])
 
         with llm_left:
