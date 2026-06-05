@@ -53,6 +53,7 @@ NPU_LOW_LP5 = NPU_LOW_LP5_64BIT
 # keyhole queries int8/fp8/bf16/fp16; ratchet conflates bf16/fp16 (+ adds q4_km).
 _DTYPE_TO_RATCHET_CAP_KEY = {
     "int8": "int8", "fp8": "fp8", "bf16": "bf16/fp16", "fp16": "bf16/fp16",
+    "nvfp4": "nvfp4", "fp4": "nvfp4", "mxfp4": "nvfp4",  # FP4 compute dtype (ratchet >=0.2.5)
 }
 
 # keyhole's catalog key for the Skippy MoE Q4 fine-tune — the implicit

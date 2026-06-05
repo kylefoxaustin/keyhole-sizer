@@ -57,4 +57,6 @@ CAPABILITY_DESCRIPTIONS: dict[CapabilityLevel, str] = {
 }
 
 # Canonical dtype ordering for display / docstrings.
-DTYPE_ORDER: tuple[str, ...] = ("int8", "fp8", "bf16", "fp16")
+# nvfp4 = FP4 compute format (NVFP4/MXFP4), native on Blackwell sm_120; added when ratchet
+# made FP4 a first-class dtype (v0.2.5). Distinct from weight-only INT4 (a memory format).
+DTYPE_ORDER: tuple[str, ...] = ("int8", "fp8", "nvfp4", "bf16", "fp16")
