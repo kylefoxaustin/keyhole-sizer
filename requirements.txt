@@ -28,3 +28,8 @@ openpyxl>=3.1.0
 # 2026-05-30 (2): re-bumped — added camera-FPS + DDR-bandwidth-demand metrics to
 # project_vla (_add_throughput_metrics, sizer/*.py). Force a full restart so the
 # new engine fields load and the UI's perception/BW caption appears. No dep changes.
+# 2026-06-05: redeploy trigger — FP4 NPU precision-set selector (43c5e20, ratchet
+# ADR 017). hw_with_precision + _precision_prefill_scale + the project_llm
+# fp4_runtime_maturity param live in sizer/npu_model.py; app.py hot-reload alone
+# leaves that engine module cached. Force a full env reinstall so the escalating
+# radio + 3-col compare load with the new engine. No dependency changes.
