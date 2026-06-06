@@ -33,3 +33,8 @@ openpyxl>=3.1.0
 # fp4_runtime_maturity param live in sizer/npu_model.py; app.py hot-reload alone
 # leaves that engine module cached. Force a full env reinstall so the escalating
 # radio + 3-col compare load with the new engine. No dependency changes.
+# 2026-06-05 (2): redeploy trigger — UX pass (app.py only, no engine change):
+# precision selector relocated out of the sidebar into a self-contained "precision
+# what-if" compare in the LLM section (headline now sizes the real stock tier);
+# VLA units legend + always-filled perception slot + clearer deferred/won't-run
+# messaging. Bump forces the Cloud restart so the new app.py loads. No dep changes.
