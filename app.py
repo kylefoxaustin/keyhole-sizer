@@ -324,106 +324,110 @@ def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default,
         f"(`{r['mode']}`) · VLM {vlm_hz:.0f} Hz / action {action_hz:.0f} Hz"
         + ("  ⚠ off-default" if off_default else "")
     )
-    # Units key — the section mixes three units; spell them out so the metric
-    # tiles below (Control rate Hz, Perception FPS, latency ms) read cleanly.
-    st.caption(
-        "_Units: **Hz** = control-loop / action rate (how often the robot acts) · "
-        "**FPS** = camera perception rate (vision-encoder runs/sec) · "
-        "**ms** = single-step latency._"
-    )
-
-    c1, c2, c3 = st.columns(3)
+    # Headline — MIRROR the vision pipeline's 4-metric format (Kyle 2026-06-06).
+    # VLA is meant to replace a traditional vision pipeline, so size it in the
+    # SAME terms: per-camera FPS / aggregate FPS / memory fit / DDR-BW-ratio-vs-
+    # Mid. These four tiles are now STABLE across every VLA model (no more
+    # topology-dependent third tile that swapped units per model). The
+    # control-loop Hz + architecture-specific breakdown — meaningful to robotics
+    # folks but confusing/meaningless to a vision reviewer — move to a single
+    # de-emphasized caption + an expander below.
     _fleet = r["fleet_size"] > 1
+    _ncam = r["n_cameras"]
+    c1, c2, c3, c4 = st.columns(4)
+
+    _cam_fps = r.get("camera_fps")
     c1.metric(
-        "Control rate" + (" / robot" if _fleet else ""),
-        f"{r['action_hz']:.1f} Hz",
-        delta=(f"{r['aggregate_action_hz']:.1f} Hz aggregate ({r['fleet_size']}×)"
-               if _fleet else f"{r['ms_per_action']:.1f} ms/action"),
+        "Per-camera FPS",
+        f"{_cam_fps:.1f}" if _cam_fps is not None else "—",
+        delta="perception rate", delta_color="off",
+        help="Vision-encoder runs per second, per camera — how often this VLA "
+             "model perceives the scene. Directly comparable to a traditional "
+             "vision pipeline's FPS; VLA is far lower because it runs full "
+             "language + action reasoning on every frame, not just detection.",
+    )
+    _agg = r.get("aggregate_camera_fps")
+    c2.metric(
+        "Aggregate FPS",
+        f"{_agg:.0f}" if _agg is not None else "—",
+        delta=(f"× {_ncam} cam" + (f" × {r['fleet_size']} robots" if _fleet else "")),
         delta_color="off",
-        help="Actions/sec the loop sustains. For a fleet this is the PER-ROBOT "
-             "rate (instances time-share the NPU); the delta shows aggregate "
-             "throughput. Targets: ~30 Hz responsive, ~10 Hz usable.",
+        help="Total frames/sec across all cameras (and fleet robots) sharing "
+             "this one NPU — the aggregate perception throughput.",
     )
     _fit = r.get("fits_in_memory")
     _mem = r.get("fleet_memory_gb") if _fleet else r.get("dram_gb")
-    c2.metric(
+    c3.metric(
         "Memory fit" + (" (fleet)" if _fleet else ""),
         "✓ fits" if _fit else ("✗ spills" if _fit is False else "—"),
         delta=(f"{_mem:.1f} GB / {hw.mem_capacity_gb:.0f} GB"
                if _mem is not None else None),
         delta_color="off",
         help=("Fleet residency = fleet_size × per-instance weights, all resident."
-              if _fleet else None),
+              if _fleet else "Model weights + activations vs this tier's DRAM."),
+    )
+    _bw_ratio = (hw.effective_bandwidth_gbs / NPU_MID.effective_bandwidth_gbs
+                 if NPU_MID.effective_bandwidth_gbs else 1.0)
+    c4.metric(
+        "DDR bandwidth ratio",
+        f"{_bw_ratio:.2f}×",
+        delta="vs NPU Mid", delta_color="off",
+        help="This tier's effective DRAM bandwidth relative to NPU Mid — the "
+             "same hardware ratio the vision pipeline reports. VLA decode is "
+             "bandwidth-bound, so this is the lever on the achievable control rate.",
     )
 
-    # Perception rate + DDR bandwidth demand (Phase 3c throughput metrics).
-    _cam_fps = r.get("camera_fps")
-    if _cam_fps is not None:
-        _agg = r.get("aggregate_camera_fps", 0.0)
-        _ncam = r["n_cameras"]
-        _fleet_note = f" ×{r['fleet_size']} robots" if r["fleet_size"] > 1 else ""
-        _perc = (f"📷 Perception **{_cam_fps:.1f} FPS/camera** "
-                 f"({_agg:.0f} frames/s across {_ncam} cam{'s' if _ncam > 1 else ''}{_fleet_note})")
+    # VLA-specific depth — ONE de-emphasized caption + an expander, kept out of
+    # the headline so the 4 tiles stay simple and parallel to vision.
+    _ctrl = (f"🤖 `{r['architecture']}` · control loop **{r['action_hz']:.1f} Hz** "
+             f"({r['ms_per_action']:.0f} ms/action)")
+    if _fleet:
+        _ctrl += (f" · {r['aggregate_action_hz']:.0f} Hz aggregate "
+                  f"({r['fleet_size']} robots)")
+    st.caption(_ctrl)
+
+    with st.expander("ℹ️ Control-loop detail — architecture, latency breakdown, DDR demand"):
+        regime = r["regime"]
+        if regime.startswith("single_loop"):
+            st.markdown(
+                f"**Single-loop autoregressive.** VLM forward "
+                f"**{r['vlm_forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} + prefill "
+                f"{r['llm_prefill_ms']:.1f}) + {r['n_action_tokens']} action tokens × "
+                f"{r['decode_ms_per_token']:.1f} ms AR decode. The AR decode is the hard "
+                f"bandwidth wall on edge — **High ≈ Mid** because both are decode-BW-bound."
+            )
+        elif regime.startswith("dual_loop"):
+            st.markdown(
+                f"**Dual-loop flow-matching.** VLM backbone **{r['vlm_backbone_ms']:.1f} ms** "
+                f"once/chunk + {r['num_denoise_steps']}×{r['denoise_step_ms']:.1f} ms denoise "
+                f"(**{r['denoise_bottleneck']}**), amortized over {r['action_chunk_length']} "
+                f"actions. Fast-loop-only rate **{r['fast_loop_only_hz']:.0f} Hz**; chunk "
+                f"size is the amortization knob."
+            )
+            if r.get("action_hz_optimized_floor"):
+                st.markdown(
+                    f"⬆ **Optimized-kernel floor (headroom):** up to "
+                    f"{r['action_hz_optimized_floor']:.0f} Hz amortized / "
+                    f"{r['fast_loop_only_hz_optimized_floor']:.0f} Hz fast-loop with "
+                    f"CUDA-graphs/fusion/compile (the headline is the conservative eager number)."
+                )
+        elif regime.startswith("oft"):
+            st.markdown(
+                f"**OFT parallel-chunk.** One parallel forward **{r['forward_ms']:.1f} ms** "
+                f"(vision {r['vision_ms']:.1f} + LLM {r['llm_forward_ms']:.1f}) → "
+                f"{r['action_chunk_length']} actions in parallel. Prefill-shaped, "
+                f"compute-bound — **avoids the AR decode bandwidth-wall**, which is why OFT is fast."
+            )
         _bw = r.get("ddr_bw_demand_gbs")
         if _bw is not None:
             _avail = r.get("ddr_bw_available_gbs", 0.0)
             _frac = (_bw / _avail * 100) if _avail else 0.0
             _flag = " ⚠ over budget" if _bw > _avail else ""
-            _perc += (f"  ·  🚌 ~**{_bw:.0f} GB/s** avg DDR demand "
-                      f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}; "
-                      f"weight-streaming estimate — a fleet adds memory, not bandwidth)")
-        st.caption(_perc)
-    else:
-        # Always render the slot so the section doesn't read as a ragged grid.
-        st.caption("📷 Perception: _n/a — this projection doesn't report a "
-                   "per-camera frame rate for the current config._")
-
-    regime = r["regime"]
-    if regime.startswith("single_loop"):
-        c3.metric(
-            "AR decode", f"{r['decode_ms_per_token']:.1f} ms/tok",
-            delta=f"{r['n_action_tokens']} action tokens", delta_color="off",
-            help="Autoregressive action-token decode — BW-bound on edge memory.",
-        )
-        st.caption(
-            f"VLM forward **{r['vlm_forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} "
-            f"+ prefill {r['llm_prefill_ms']:.1f}) + {r['n_action_tokens']}×"
-            f"{r['decode_ms_per_token']:.1f} ms AR decode. Single-loop AR decode is "
-            f"the hard bandwidth wall on edge — High ≈ Mid because both are decode-BW-bound."
-        )
-    elif regime.startswith("dual_loop"):
-        c3.metric(
-            "Fast-loop only", f"{r['fast_loop_only_hz']:.0f} Hz",
-            delta=f"chunk of {r['action_chunk_length']} actions", delta_color="off",
-            help="Action rate if the VLM context is reused/pipelined across chunks "
-                 "(the published 'action expert at N Hz' regime).",
-        )
-        st.caption(
-            f"VLM backbone **{r['vlm_backbone_ms']:.1f} ms** once/chunk + "
-            f"{r['num_denoise_steps']}×{r['denoise_step_ms']:.1f} ms denoise "
-            f"(**{r['denoise_bottleneck']}**), amortized over {r['action_chunk_length']} "
-            f"actions. Chunk size is the amortization knob."
-        )
-        if r.get("action_hz_optimized_floor"):
-            st.caption(
-                f"⬆ **Optimized-kernel floor (headroom):** up to "
-                f"{r['action_hz_optimized_floor']:.0f} Hz amortized / "
-                f"{r['fast_loop_only_hz_optimized_floor']:.0f} Hz fast-loop with "
-                f"CUDA-graphs/fusion/compile (the eager number above is the conservative headline)."
+            st.markdown(
+                f"🚌 **~{_bw:.0f} GB/s** average DDR bandwidth demand "
+                f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}) — a weight-streaming "
+                f"estimate. A fleet adds memory, not bandwidth."
             )
-    elif regime.startswith("oft"):
-        c3.metric(
-            "Parallel chunk", f"{r['action_chunk_length']} actions",
-            delta=f"1 forward {r['forward_ms']:.1f} ms", delta_color="off",
-            help="OFT reads all action positions in parallel from a single "
-                 "prefill-shaped forward — no autoregressive token loop.",
-        )
-        st.caption(
-            f"One parallel forward **{r['forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} "
-            f"+ LLM {r['llm_forward_ms']:.1f}) → {r['action_chunk_length']} actions in "
-            f"parallel. Prefill-shaped, compute-bound — **avoids the AR decode "
-            f"bandwidth-wall**, which is why OFT is fast."
-        )
 
     if r.get("stitched_quality_caveat"):
         st.warning(f"📐 {r['stitched_quality_caveat']}")
