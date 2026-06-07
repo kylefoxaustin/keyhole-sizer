@@ -22,10 +22,18 @@ from sizer.npu_model import (
     Hardware, TIERS, NPU_MID, MEMORY_TYPES, PIPELINES,
     project_vision, project_llm, hw_with_memory, hw_with_precision,
     MEMORY_UPGRADE_OPTIONS, describe_hw, bandwidth_ratio, theoretical_bandwidth,
+    WORKLOAD_CATEGORIES, workload_distribution_on_hw, capability_level,
 )
 from sizer.project_vla import project_vla
 from sizer.vla_models import VLA_MODELS
-from sizer.llm_models import LLM_MODELS
+from sizer.llm_models import (
+    LLM_MODELS, CATEGORY_LABELS, accuracy_delta_pp, PRODUCTION_REFERENCE_KEY,
+    perf_scale_factor, METHODOLOGY_VERSION,
+)
+from sizer.llm_quant_levels import (
+    LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
+    QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
+)
 
 st.set_page_config(page_title="keyhole-sizer · horizontal prototype",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -37,11 +45,13 @@ st.set_page_config(page_title="keyhole-sizer · horizontal prototype",
 # theme-inherited so contrast is never broken in either mode.
 st.markdown("""
 <style>
-.st-key-pop_pipe button, .st-key-pop_llm button, .st-key-pop_vla button {
+.st-key-pop_pipe button, .st-key-pop_llm button, .st-key-pop_quant button,
+.st-key-pop_work button, .st-key-pop_vla button {
     border: 1.5px solid #22A06B !important;
     background-color: rgba(34, 160, 107, 0.14) !important;
 }
-.st-key-pop_pipe button:hover, .st-key-pop_llm button:hover, .st-key-pop_vla button:hover {
+.st-key-pop_pipe button:hover, .st-key-pop_llm button:hover, .st-key-pop_quant button:hover,
+.st-key-pop_work button:hover, .st-key-pop_vla button:hover {
     border-color: #1B7E54 !important;
     background-color: rgba(34, 160, 107, 0.24) !important;
 }
@@ -204,18 +214,48 @@ if "Vision" in workloads:
 
 # ───────────────────────── LLM ─────────────────────────
 if "LLM" in workloads:
-    head, picker, _sp = st.columns([0.6, 0.9, 8.5])  # picker hugs the section name
+    # Header strip: the three GREEN pickers (Model / Quant / Workload — the
+    # "what am I configuring" controls) + a neutral Duty popover for the
+    # duty-cycle inputs (queries/min + answer length), which feed the
+    # cross-workload Duty-cycle view rather than the LLM headline.
+    head, pm, pq, pw, pdu, _sp = st.columns([0.6, 0.9, 1.0, 1.2, 0.9, 5.4])
     head.markdown("#### 🤖 LLM")
-    with picker:
+    with pm:
         with st.popover("Model ▾", use_container_width=True, key="pop_llm"):
             lkeys = list(LLM_MODELS)
-            lk = st.selectbox("LLM model", lkeys,
-                              index=lkeys.index("skippy_finetune"),
-                              format_func=lambda k: LLM_MODELS[k].label.split(" (")[0],
-                              key="p_llm")
+            st.selectbox("LLM model", lkeys, index=lkeys.index("skippy_finetune"),
+                         format_func=lambda k: LLM_MODELS[k].label.split(" (")[0],
+                         key="p_llm")
+    with pq:
+        with st.popover("Quant ▾", use_container_width=True, key="pop_quant"):
+            st.selectbox("Quantization", ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
+                         key="p_quant")
+    with pw:
+        with st.popover("Workload ▾", use_container_width=True, key="pop_work"):
+            st.selectbox("Workload pattern", list(WORKLOAD_CATEGORIES), index=0,
+                         format_func=lambda k: WORKLOAD_CATEGORIES[k]["label"],
+                         key="p_work")
+            wl_now = st.session_state.get("p_work", "plain_chat")
+            st.caption(WORKLOAD_CATEGORIES[wl_now]["description"])
+    with pdu:
+        with st.popover("Duty ▾", use_container_width=True):
+            st.slider("Queries / min", 0.0, 60.0, 2.0, 0.1, key="p_qpm")
+            st.radio("Answer length", ("short", "rag"), index=0,
+                     format_func=lambda k: {"short": "Short (~200 tok)",
+                                            "rag": "RAG (8K + 2K)"}[k], key="p_ans")
+
     lk = st.session_state.get("p_llm", "skippy_finetune")
+    quant = st.session_state.get("p_quant", "Q4_K_M")
+    llm_workload = st.session_state.get("p_work", "plain_chat")
     alias = LLM_MODELS[lk].measurement_alias or lk
-    lr = project_llm(hw, "Q4_K_M", workload="plain_chat", npu_share=npu_share, model_key=alias)
+    _model = LLM_MODELS[lk]
+    _prod = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
+    _is_production = (lk == PRODUCTION_REFERENCE_KEY)
+    lr = project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
+                     model_key=alias)
+
+    st.caption(f"🤖 **{_model.label.split(' (')[0]}** · {quant} · workload "
+               f"**{WORKLOAD_CATEGORIES[llm_workload]['label']}**")
 
     m = st.columns([1.1, 1.1, 1.1, 1.1, 3.6])  # cluster the 4 metrics left; spacer eats the rest
     m[0].metric("Decode", f"{lr['decode_tok_s']:.1f} tok/s")
@@ -229,7 +269,7 @@ if "LLM" in workloads:
     with g1:
         per_tier = {}
         for lbl, key in _TIER_MAP.items():
-            tr = project_llm(TIERS[key], "Q4_K_M", workload="plain_chat",
+            tr = project_llm(TIERS[key], quant, workload=llm_workload,
                              npu_share=npu_share, model_key=alias)
             per_tier[lbl] = tr["decode_tok_s"]
         st.plotly_chart(_per_tier_bar(per_tier, "decode tok/s", base_tier),
@@ -244,16 +284,161 @@ if "LLM" in workloads:
             mat = "immature" if mat.startswith("Immature") else "mature"
             base_hw_p = TIERS[_TIER_MAP[base_tier]]
             rc = st.columns(3)
+            base_ttft = None
             for col, (lab, ps) in zip(rc, [("INT-only", "int8"),
                                            ("+FP8", "int8_fp8"),
                                            ("+FP8+FP4", "int8_fp8_fp4")]):
-                _m = mat if ps == "int8_fp8_fp4" else "mature"
-                pr = project_llm(hw_with_precision(base_hw_p, ps), "Q4_K_M",
-                                 workload="plain_chat", npu_share=npu_share,
-                                 model_key=alias, fp4_runtime_maturity=_m)
-                col.metric(lab, f"{pr['ttft_1k_sec']*1000:.0f} ms", delta="prefill", delta_color="off")
+                _mt = mat if ps == "int8_fp8_fp4" else "mature"
+                pr = project_llm(hw_with_precision(base_hw_p, ps), quant,
+                                 workload=llm_workload, npu_share=npu_share,
+                                 model_key=alias, fp4_runtime_maturity=_mt)
+                tt = pr['ttft_1k_sec'] * 1000
+                if ps == "int8":
+                    base_ttft = tt
+                sp = (f" · {base_ttft/tt:.1f}× vs INT8"
+                      if base_ttft and ps != "int8" and tt < base_ttft else "")
+                col.metric(lab, f"{tt:.0f} ms", delta="prefill", delta_color="off")
+                col.caption(f"decode {pr['decode_tok_s']:.0f} tok/s{sp}")
         else:
             st.caption("_Precision what-if available on Mid / High (FP-capable memory class)._")
+
+    # ── scoped depth tabs (Accuracy / Precision / Performance / Timing) ──
+    t_acc, t_prec, t_perf, t_tim = st.tabs(
+        ["Accuracy", "Precision", "Performance", "Timing"])
+
+    with t_acc:
+        if _model.pass_rate is None:
+            st.info(f"**{_model.label}** — perf-reference variant (same weights, "
+                    "alternate compute_dtype to reach an anchor cell). No standalone "
+                    "eval; pick a production / fine-tune / baseline row for accuracy.")
+        else:
+            st.markdown(
+                f"**{_model.label}** — {_model.pass_rate*100:.1f}% pass "
+                f"({_model.pass_n_passes}/{_model.pass_n_total})  ·  base "
+                f"{_model.base}  ·  {_model.total_params_b:.0f}B / "
+                f"{_model.active_params_b:.0f}B active")
+            cat_rows = []
+            for _k, _mm in LLM_MODELS.items():
+                d = accuracy_delta_pp(_mm, _prod)
+                ds = ("— (ref)" if _k == PRODUCTION_REFERENCE_KEY
+                      else "perf ref" if d is None
+                      else f"{'+' if d >= 0 else ''}{d:.1f}pp")
+                cat_rows.append({
+                    "Model": (("➤ " if _k == lk else "") + _mm.label.split(' (')[0]),
+                    "Pass": f"{_mm.pass_rate*100:.1f}%" if _mm.pass_rate is not None else "—",
+                    "Δ vs prod": ds,
+                    "Arch": f"{_mm.total_params_b:.0f}B/{_mm.active_params_b:.0f}B",
+                })
+            st.dataframe(pd.DataFrame(cat_rows), width="stretch", hide_index=True)
+            if _model.category_deltas:
+                _pc = _prod.category_deltas or {}
+                st.markdown("**Per-category** (production reference):" if _is_production
+                            else "**Per-category** (Δ vs production, + = this model wins):")
+                for cat, data in _model.category_deltas.items():
+                    lab = CATEGORY_LABELS.get(cat, cat)
+                    p, n, rate = data.get("pass", 0), data.get("n", 0), data.get("rate", 0.0)
+                    pdat = _pc.get(cat)
+                    if pdat and not _is_production:
+                        dl = p - pdat.get("pass", 0)
+                        st.markdown(f"- {lab}: **{p}/{n}** ({rate:.0%}) — Δ {'+' if dl >= 0 else ''}{dl}")
+                    else:
+                        st.markdown(f"- {lab}: **{p}/{n}** ({rate:.0%})")
+            with st.expander("📐 Eval methodology — Finding 4 (Qwen-family format bias)"):
+                st.markdown(
+                    "Headline uses **semantic grading** (GPT-4o binary, 132-sample "
+                    "v2-RAG, temp=0). The production model's substring lift eroded "
+                    "across five successive cross-checks:")
+                st.markdown(
+                    "| # | Cross-check | Result |\n|---|---|---|\n"
+                    "| 1 | Substring (original) | **+3.1pp** |\n"
+                    "| 2 | LLM-judge (Sonnet 4.6) | −0.35 |\n"
+                    "| 3 | Temp=0.3 substring | −29.3pp |\n"
+                    "| 4 | Cross-judge (GPT-4o) | −0.69 |\n"
+                    "| 5 | **Semantic regrade** | **−4.6pp** (sign reversal) |")
+                st.caption(
+                    "Production decision unaffected — Skippy 7B v4 ships on the "
+                    "three-gate framework (capability + voice + safety); substring "
+                    "was never load-bearing. Full deck narrative carries from app.py. "
+                    f"Methodology `{METHODOLOGY_VERSION}`.")
+
+    with t_prec:
+        _blocked = (hw.capability_levels is not None
+                    and capability_level(hw, "int8") == "tensor_compat")
+        st.markdown(
+            f"**Quality cost of the quant recipe** (Qwen2.5-14B + RAG, v2 prompt set, "
+            f"132 samples). fp16 reference: **{FP16_REFERENCE.pass_rate*100:.1f}%** "
+            f"({FP16_REFERENCE.pass_n_passes}/{FP16_REFERENCE.pass_n_total}).")
+        prec_rows = []
+        for cfg in LLM_QUANT_LADDER:
+            d = delta_pp_vs_fp16(cfg)
+            ds = "—" if cfg.key == FP16_REFERENCE.key else f"{d:+.1f}pp"
+            lab = cfg.label
+            if cfg.key == QWEN_W8A8_RAG.key and _blocked:
+                lab = f"⚠ {lab} — n/a on {hw.name}"
+            prec_rows.append({"Configuration": lab,
+                              "Pass": f"{cfg.pass_rate*100:.1f}%",
+                              "Δ vs fp16": ds,
+                              "n": f"{cfg.pass_n_passes}/{cfg.pass_n_total}",
+                              "Host": cfg.measurement_host})
+        st.dataframe(pd.DataFrame(prec_rows), width="stretch", hide_index=True)
+        if _blocked:
+            st.warning(
+                "**W8A8 INT8 is ecosystem-blocked on this tier.** Consumer Blackwell "
+                "SM120 throws `RuntimeError: Int8 not supported on SM120` — the W8A8 "
+                "row is an H100 measurement kept for the deck story, not achievable here.")
+        st.markdown("**Where the W8A8 −3.8pp regression lives** (vs fp16 base):")
+        for cat, dp in W8A8_VS_FP16_CATEGORY_DELTAS.items():
+            lab = CATEGORY_LABELS.get(cat, cat)
+            st.markdown(f"- {lab}: **±0** (no drift)" if dp == 0
+                        else f"- {lab}: **{'+' if dp > 0 else ''}{dp} passes**")
+        st.caption(
+            "Coding + reasoning byte-identical fp16↔W8A8 (structured output untouched "
+            "by INT8); regression localizes in retrieval-grounded wording. Deck framing: "
+            "W8A8 ~−3.8pp vs fp16; base→FT adds ~5pp, so a fine-tuned W8A8 lands near "
+            "the fp16 base — lifecycle cost dominates, not the ~4pp hit.")
+
+    with t_perf:
+        st.markdown(
+            "All five patterns measured on **Qwen3-30B-A3B-Instruct-2507** (Q4_K_M, "
+            "llama.cpp) on an **RTX 5090** — decode spans **3.6 → 222 tok/s** across "
+            "real traffic (~60×), which single-number vendor benchmarks miss.")
+        dist = workload_distribution_on_hw(hw, quant)
+        f = perf_scale_factor(_model)
+        if f != 1.0:
+            dist = [{**d, "decode_tok_s": d["decode_tok_s"] * f} for d in dist]
+        d_labels = [f"{d['label']}  (n={d['n']})" for d in dist]
+        d_values = [d["decode_tok_s"] for d in dist]
+        d_colors = ["#22A06B" if d["key"] == llm_workload else "#9AA7BD" for d in dist]
+        fig_dist = go.Figure(go.Bar(
+            y=d_labels, x=d_values, orientation="h", marker_color=d_colors,
+            text=[f"{v:.1f}" for v in d_values], textposition="outside"))
+        fig_dist.update_layout(template="plotly_white", height=260,
+                               margin=dict(l=10, r=30, t=10, b=10),
+                               xaxis_title=f"decode tok/s on {hw.name} @ {quant}")
+        st.plotly_chart(fig_dist, use_container_width=True, key="l_dist")
+        mx = max(d_values); mn = min(v for v in d_values if v > 0)
+        st.caption(
+            f"Selected workload highlighted (green). Spread **{mx/mn:.0f}× worst-case** "
+            f"({mx:.0f} → {mn:.1f} tok/s) on this HW+quant. Edge capacity planning "
+            f"should budget for the RAG / tool-use tail, not the plain-chat peak.")
+
+    with t_tim:
+        sp_ms = lr["ttft_1k_sec"] * 1000
+        sd_ms = (200 / lr["decode_tok_s"]) * 1000 if lr["decode_tok_s"] > 0 else 0
+        rp_ms = lr["rag_prefill_sec"] * 1000
+        rd_ms = lr["rag_decode_sec"] * 1000
+        fig_tim = go.Figure()
+        fig_tim.add_trace(go.Bar(name="Prefill", x=["Short (1K, 200 tok)", "RAG (8K+2K)"],
+                                 y=[sp_ms, rp_ms], marker_color="#F59E0B"))
+        fig_tim.add_trace(go.Bar(name="Decode", x=["Short (1K, 200 tok)", "RAG (8K+2K)"],
+                                 y=[sd_ms, rd_ms], marker_color="#6366F1"))
+        fig_tim.update_layout(barmode="stack", template="plotly_white", height=300,
+                              margin=dict(l=10, r=10, t=10, b=10),
+                              yaxis_title="Per-answer latency (ms)",
+                              legend=dict(orientation="h", y=-0.2))
+        st.plotly_chart(fig_tim, use_container_width=True, key="l_tim")
+        st.caption(f"TTFT 1K = **{lr['ttft_1k_sec']*1000:.0f} ms** · "
+                   f"decode = **{lr['decode_tok_s']:.1f} tok/s** · answer mode from Duty ▾")
     st.divider()
 
 # ───────────────────────── VLA ─────────────────────────
