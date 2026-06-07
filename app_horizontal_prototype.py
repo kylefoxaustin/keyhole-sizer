@@ -252,7 +252,7 @@ with st.container(border=True):
     with r1[1]:
         workloads = st.pills(
             "🧩 Workloads", options=["Vision", "LLM", "VLA"],
-            selection_mode="multi", default=["Vision", "VLA"], key="p_workloads",
+            selection_mode="multi", default=["Vision"], key="p_workloads",
         ) or []
     with r1[2]:
         n_cameras = st.number_input(
@@ -370,9 +370,15 @@ if "Vision" in workloads:
                    f"{vr.get('compute_floor_ms', 0):.2f} ms · "
                    f"DRAM {vr.get('vram_mb', 0):.0f} MB/frame")
 
-    # ── scoped depth tabs (Pipeline timing / Stream scaling / DRAM / flow) ──
-    vt_time, vt_stream, vt_bw, vt_flow = st.tabs(
-        ["Pipeline timing", "Stream scaling", "DRAM bandwidth", "Pipeline flow"])
+    # ── scoped depth tabs (Pipeline timing / Stream scaling / DRAM / flow),
+    # wrapped in a collapsible "detail" expander so the section can MINIMIZE.
+    # Tabs are created INSIDE the expander; the with-blocks below fill them
+    # (Streamlit binds each tab's container at creation, so output still lands
+    # inside the expander even though the blocks sit outside the with-stmt). ──
+    with st.expander("🔎 Vision detail — timing · streams · bandwidth · flow",
+                     expanded=False):
+        vt_time, vt_stream, vt_bw, vt_flow = st.tabs(
+            ["Pipeline timing", "Stream scaling", "DRAM bandwidth", "Pipeline flow"])
 
     with vt_time:
         # Per-stage edge ms (YOLO vs CLIP) for two-component pipelines; a single
@@ -594,9 +600,13 @@ if "LLM" in workloads:
                     "FP8 / FP4 tensor engine is meaningful. Select **Mid** or **High** "
                     "to compare INT-only → +FP8 → +FP8+FP4 prefill.")
 
-    # ── scoped depth tabs (Accuracy / Precision / Performance / Timing) ──
-    t_acc, t_prec, t_perf, t_tim = st.tabs(
-        ["Accuracy", "Precision", "Performance", "Timing"])
+    # ── scoped depth tabs (Accuracy / Precision / Performance / Timing),
+    # wrapped in a collapsible "detail" expander so the section can MINIMIZE
+    # (create-inside / fill-below pattern; see the Vision section note). ──
+    with st.expander("🔎 LLM detail — accuracy · precision · performance · timing",
+                     expanded=False):
+        t_acc, t_prec, t_perf, t_tim = st.tabs(
+            ["Accuracy", "Precision", "Performance", "Timing"])
 
     with t_acc:
         if _model.pass_rate is None:
@@ -635,7 +645,9 @@ if "LLM" in workloads:
                         st.markdown(f"- {lab}: **{p}/{n}** ({rate:.0%}) — Δ {'+' if dl >= 0 else ''}{dl}")
                     else:
                         st.markdown(f"- {lab}: **{p}/{n}** ({rate:.0%})")
-            with st.expander("📐 Eval methodology — Finding 4 (Qwen-family format bias)"):
+            # popover (not expander) so it doesn't illegally nest inside the
+            # collapsible "LLM detail" expander that now wraps these tabs.
+            with st.popover("📐 Eval methodology — Finding 4 (Qwen-family format bias)"):
                 st.markdown(
                     "Headline uses **semantic grading** (GPT-4o binary, 132-sample "
                     "v2-RAG, temp=0). The production model's substring lift eroded "
@@ -774,8 +786,11 @@ if "VLA" in workloads:
         st.caption(f"🤖 `{r['architecture']}` · control loop **{r['action_hz']:.1f} Hz** "
                    f"({r['ms_per_action']:.0f} ms/action)")
 
-        # ── scoped depth tabs (Tier scaling / Control-loop breakdown) ──
-        wt_tier, wt_loop = st.tabs(["Tier scaling", "Control-loop breakdown"])
+        # ── scoped depth tabs (Tier scaling / Control-loop breakdown),
+        # wrapped in a collapsible "detail" expander so the section can MINIMIZE
+        # (create-inside / fill-below pattern; see the Vision section note). ──
+        with st.expander("🔎 VLA detail — tier scaling · control-loop", expanded=False):
+            wt_tier, wt_loop = st.tabs(["Tier scaling", "Control-loop breakdown"])
         with wt_tier:
             per_tier = {}
             for lbl, key in _TIER_MAP.items():
