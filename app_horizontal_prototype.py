@@ -30,6 +30,24 @@ from sizer.llm_models import LLM_MODELS
 st.set_page_config(page_title="keyhole-sizer · horizontal prototype",
                    layout="wide", initial_sidebar_state="collapsed")
 
+# Highlight the picker popovers (Pipeline / Model / VLA model) in green so the
+# "what am I configuring" control pops out from the neutral popovers around it.
+# A green border + translucent fill reads correctly in BOTH light and dark
+# browser themes (the fill tints whatever's behind it); button text is left
+# theme-inherited so contrast is never broken in either mode.
+st.markdown("""
+<style>
+.st-key-pop_pipe button, .st-key-pop_llm button, .st-key-pop_vla button {
+    border: 1.5px solid #22A06B !important;
+    background-color: rgba(34, 160, 107, 0.14) !important;
+}
+.st-key-pop_pipe button:hover, .st-key-pop_llm button:hover, .st-key-pop_vla button:hover {
+    border-color: #1B7E54 !important;
+    background-color: rgba(34, 160, 107, 0.24) !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ── short tier label → TIERS key (the comparison ladder, in order) ──
 _TIER_MAP = {
     "i.MX 95": "NPU i.MX 95 (ground truth)",
@@ -66,7 +84,7 @@ with st.container(border=True):
     # so their label-tops line up on one baseline (NPU tier ↔ Workloads ↔
     # Cameras). Workloads sits immediately right of the tier and carries an emoji
     # so it reads as the primary "what am I sizing" control; Cameras hugs it. ──
-    r1 = st.columns([2.5, 1.4, 0.7, 4.4])
+    r1 = st.columns([2.4, 1.3, 1.9, 3.4])
     with r1[0]:
         tier_label = st.segmented_control(
             "NPU tier", options=list(_TIER_MAP), default="High", key="p_tier",
@@ -81,7 +99,9 @@ with st.container(border=True):
             selection_mode="multi", default=["Vision", "VLA"], key="p_workloads",
         ) or []
     with r1[2]:
-        n_cameras = st.number_input("Cameras", 1, 8, 1, key="p_ncam")
+        n_cameras = st.number_input(
+            "📷 Choose # of cameras", 1, 8, 1, key="p_ncam", width=160,
+            help="Number of camera feeds the NPU drives in parallel.")
 
     # ── Row 2: the tuning knobs. All three are POPOVERS, so their buttons share
     # one baseline (this is what fixes the Settings-vs-Cameras misalignment — the
@@ -139,10 +159,10 @@ if not workloads:
 
 # ───────────────────────── VISION ─────────────────────────
 if "Vision" in workloads:
-    head, picker, _sp = st.columns([2.0, 1.0, 6.0])  # picker hugs the section name
+    head, picker, _sp = st.columns([1.4, 0.9, 7.7])  # picker hugs the section name
     head.markdown("#### 📹 Vision pipeline")
     with picker:
-        with st.popover("Pipeline ▾", use_container_width=True):
+        with st.popover("Pipeline ▾", use_container_width=True, key="pop_pipe"):
             pk = st.selectbox("Pipeline", list(PIPELINES), key="p_pipe")
             res = st.segmented_control("Resolution", ["720p", "1080p", "4K"],
                                        default="1080p", key="p_res") or "1080p"
@@ -184,10 +204,10 @@ if "Vision" in workloads:
 
 # ───────────────────────── LLM ─────────────────────────
 if "LLM" in workloads:
-    head, picker, _sp = st.columns([1.0, 1.0, 7.0])  # picker hugs the section name
+    head, picker, _sp = st.columns([0.6, 0.9, 8.5])  # picker hugs the section name
     head.markdown("#### 🤖 LLM")
     with picker:
-        with st.popover("Model ▾", use_container_width=True):
+        with st.popover("Model ▾", use_container_width=True, key="pop_llm"):
             lkeys = list(LLM_MODELS)
             lk = st.selectbox("LLM model", lkeys,
                               index=lkeys.index("skippy_finetune"),
@@ -238,10 +258,10 @@ if "LLM" in workloads:
 
 # ───────────────────────── VLA ─────────────────────────
 if "VLA" in workloads:
-    head, picker, _sp = st.columns([3.0, 1.0, 5.0])  # picker hugs the section name
-    head.markdown("#### 🦾 VLA — robot control loop")
+    head, picker, _sp = st.columns([0.6, 0.9, 8.5])  # picker hugs the section name
+    head.markdown("#### 🦾 VLA")
     with picker:
-        with st.popover("VLA model ▾", use_container_width=True):
+        with st.popover("VLA model ▾", use_container_width=True, key="pop_vla"):
             vkeys = list(VLA_MODELS)
             vk = st.selectbox("VLA model", vkeys, index=vkeys.index("nora_3b"),
                               format_func=lambda k: VLA_MODELS[k].display_name, key="p_vla")
