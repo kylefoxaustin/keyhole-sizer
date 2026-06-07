@@ -835,6 +835,51 @@ if workloads and st.session_state.get("p_kpi_on", True):
         st.download_button("⬇ Export KPIs (CSV)", df.to_csv(index=False),
                            "keyhole_kpis.csv", "text/csv", key="p_kpi_dl")
 
+    # ── NCU provenance + hardware config (reference detail, collapsed) ──
+    with st.expander("🔬 NCU provenance & hardware config"):
+        prov_col, hw_col = st.columns([1.5, 1])
+        with prov_col:
+            st.caption("**NCU measurement provenance** — vision-pipeline-keyed")
+            comps = measured_components(pk) if "Vision" in workloads else None
+            if "Vision" not in workloads:
+                st.info("Vision off — ncu provenance is pipeline-keyed and not "
+                        "shown in this configuration.")
+            elif comps is None:
+                st.info(f"No ncu mapping for `{pk}` — the saturation "
+                        "approximation is the only figure for this pipeline.")
+            else:
+                dfc = pd.DataFrame([{
+                    "NVTX workload_id":  c["ncu_workload_id"],
+                    "Fires/frame":       c["fires_per_frame"],
+                    "DRAM MB/fire":      round(c["dram_bytes_per_fire"] / 1e6, 2),
+                    "n_fwd (bakeoff)":   c["n_forwards_in_bakeoff"],
+                } for c in comps])
+                st.dataframe(dfc, use_container_width=True, hide_index=True)
+                total_mb = sum(c["dram_bytes_per_fire"] * c["fires_per_frame"]
+                               for c in comps) / 1e6
+                meta = bundle_metadata()
+                st.caption(
+                    f"Per-frame sum **{total_mb:.1f} MB** — hardware-neutral; "
+                    f"transfers across tiers (scale by FPS vs the tier's BW "
+                    f"ceiling). Bundle `{meta['ncu_bundle_timestamp']}` · "
+                    f"{meta['ncu_n_workloads']} workloads · "
+                    f"*{meta['ncu_measurement_host']}*.")
+        with hw_col:
+            st.caption("**Hardware config** — selected tier (incl. overlays)")
+            st.json({
+                "name": hw.name,
+                "bus": f"{hw.mem_bus_width_bits}-bit {hw.mem_type} @ "
+                       f"{hw.mem_data_rate_gtps} GT/s",
+                "mem_bandwidth_gbs_theoretical": round(hw.mem_bandwidth_gbs, 1),
+                "mem_bandwidth_gbs_effective": round(hw.effective_bandwidth_gbs, 1),
+                "mem_capacity_gb": hw.mem_capacity_gb,
+                "peak_tops_bf16": hw.peak_tops_bf16,
+                "peak_tops_fp8": hw.peak_tops_fp8,
+                "compute_efficiency": hw.compute_efficiency,
+                "bandwidth_efficiency": hw.bandwidth_efficiency,
+                "tdp_watts": hw.tdp_watts,
+            })
+
 st.divider()
 st.caption("⬑ **Prototype** — control strip + full-width results/charts + onscreen KPIs, "
            "no sidebar. Tier across all silicon highlighted in red. If the layout works, "
