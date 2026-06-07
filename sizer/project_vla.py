@@ -534,13 +534,28 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
     dl = vla.measured_5090_dual_loop
     comp_meas = vla.measured_5090_components
 
-    # Un-calibrated dual-loop (π0.5, openvla_7b_cached): no measured topology yet.
+    # A GROUNDED what-if (openvla_7b_cached): no bake-off of its own, but points
+    # at one that has via dual_loop_anchor_alias. Borrow that entry's measured
+    # denoise topology (fast loop); keep THIS entry's own measured VLM backbone
+    # (slow loop) when present. The result is forced to 🟠 cross_class below —
+    # concrete numbers, honestly labelled a what-if, never measured/calibrated.
+    grounded = False
     if not (vla.measured_5090_calibrated and dl and comp_meas):
-        return {**base, "deferred": True,
-                "reason": (f"{vla.architecture} projection needs a measured "
-                           "dual-loop anchor (measured_5090_dual_loop): "
-                           "flow-matching backbone-once + denoise-loop split. "
-                           "Phase 3b absorbs these per-model as bake-offs land.")}
+        alias = getattr(vla, "dual_loop_anchor_alias", "")
+        if alias:
+            from sizer.vla_models import VLA_MODELS
+            anchor = VLA_MODELS.get(alias)
+            if anchor and anchor.measured_5090_dual_loop:
+                dl = anchor.measured_5090_dual_loop
+                comp_meas = comp_meas or anchor.measured_5090_components
+                grounded = True
+        if not grounded:
+            # Un-calibrated dual-loop with no grounding anchor: defer.
+            return {**base, "deferred": True,
+                    "reason": (f"{vla.architecture} projection needs a measured "
+                               "dual-loop anchor (measured_5090_dual_loop): "
+                               "flow-matching backbone-once + denoise-loop split. "
+                               "Phase 3b absorbs these per-model as bake-offs land.")}
 
     H = dl["action_chunk_length"]
     N = dl["num_denoise_steps"]
@@ -567,14 +582,21 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
         return {**base, "runs": False,
                 "reason": f"{hw.name} has no {vlm_dtype} compute (peak_tops=0)"}
 
-    # ── FP-required action-expert gate (the hard QuantVLA gate) ──────────────
-    expert_dtype = _resolve_expert_dtype(vla, hw)
-    if expert_dtype is None:
-        return {**base, "runs": False,
-                "reason": ("flow-matching action expert REQUIRES FP (fp8/bf16) "
-                           "per QuantVLA; "
-                           f"{hw.name} has neither (INT8-only) — the FP-required "
-                           "diffusion head is a hard gate that eliminates this tier")}
+    # ── action-expert dtype gate ─────────────────────────────────────────────
+    # FP-required ONLY for heads that genuinely need it (flow-matching diffusion
+    # per QuantVLA — NORA-1.5, π0.5). An INTEGER-FRIENDLY head whose
+    # dtype_required includes int8 (discrete-token actions, e.g. cached-OpenVLA)
+    # runs on INT8-only silicon and skips the hard FP gate.
+    if "int8" in vla.components["action_head"].dtype_required:
+        expert_dtype = vlm_dtype                       # discrete actions share the VLM dtype
+    else:
+        expert_dtype = _resolve_expert_dtype(vla, hw)
+        if expert_dtype is None:
+            return {**base, "runs": False,
+                    "reason": ("flow-matching action expert REQUIRES FP (fp8/bf16) "
+                               "per QuantVLA; "
+                               f"{hw.name} has neither (INT8-only) — the FP-required "
+                               "diffusion head is a hard gate that eliminates this tier")}
 
     # ── memory gate (VLM-dtype footprint) ────────────────────────────────────
     dram_gb = _dram_gb_for_dtype(vla, vlm_dtype)
@@ -593,7 +615,10 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
         vision_ms = comp_meas["vision_ms"] * vision_scale
         prefill_ms = prefill_meas
         expert_dtype = _REFERENCE_DTYPE               # measured at bf16
-        if vision_scale == 1.0 and prefill_ms == comp_meas["llm_prefill_ms"]:
+        # Grounded what-if borrows a foreign denoise anchor, so the stored
+        # amortization belongs to the ANCHOR's backbone, not this one — always
+        # recompose from this entry's VLM backbone + the borrowed denoise step.
+        if vision_scale == 1.0 and prefill_ms == comp_meas["llm_prefill_ms"] and not grounded:
             vlm_backbone_ms = dl["vlm_backbone_ms"]
             ms_per_action = dl["amortized_ms_per_action"]  # authoritative measured amortization
             chunk_latency_ms = dl["chunk_latency_ms"]
@@ -619,6 +644,16 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
         chunk_latency_ms = vlm_backbone_ms + N * eager_step_ms
         ms_per_action = chunk_latency_ms / H
 
+    # Grounded what-if: concrete numbers, but this cached config was never
+    # bench'd → force the honest 🟠 what-if badge (app.py reads vla_source_reason).
+    grounded_reason = None
+    if grounded:
+        vla_source, regime = "cross_class", "dual_loop_grounded_whatif"
+        grounded_reason = (
+            f"grounded what-if — this entry's measured VLM backbone + "
+            f"{vla.dual_loop_anchor_alias}'s measured denoise topology "
+            f"(this cached config was never bench'd, so it is a projection)")
+
     action_hz = 1000.0 / ms_per_action if ms_per_action > 0 else 0.0
     eager_loop_ms = N * eager_step_ms
     fast_loop_only_hz = (H / (eager_loop_ms / 1000.0)) if eager_loop_ms > 0 else 0.0
@@ -634,6 +669,9 @@ def _project_dual_loop(vla: VLAModel, hw: Hardware, base: dict, *,
         **base,
         "runs": True,
         "vla_source": vla_source,
+        # only present on a grounded what-if — keeps measured/calibrated dicts
+        # clean (cf. _finalize_vla, which sets this when it downgrades to 🟠).
+        **({"vla_source_reason": grounded_reason} if grounded_reason else {}),
         "regime": regime,
         "vlm_dtype": vlm_dtype,
         "expert_dtype": expert_dtype,

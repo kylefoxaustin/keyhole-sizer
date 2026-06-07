@@ -313,6 +313,19 @@ class VLAModel:
     #   prefill_at_N = measured_prefill + (N − measured_n_cameras) × this.
     llm_prefill_ms_per_camera: float = 0.0
 
+    # ── Grounded dual-loop what-if (mirrors llm_models.measurement_alias) ────
+    # For a projection-only dual_loop entry that has NO bake-off of its own (the
+    # synthetic openvla_7b_cached what-if), point at another catalog entry that
+    # DOES have a measured `measured_5090_dual_loop` topology, so the dual-loop
+    # projection borrows that fast-loop (denoise) anchor to produce concrete
+    # numbers instead of deferring. The SLOW loop still uses THIS entry's own
+    # measured_5090_components when present (so e.g. cached-OpenVLA keeps
+    # OpenVLA's real VLM backbone). A grounded result is ALWAYS stamped
+    # vla_source="cross_class" (🟠 what-if) with a reason — it never reads as
+    # 🟢 measured / 🔵 calibrated, since the config itself was never bench'd.
+    # Empty string = no grounding (a missing anchor simply defers, as before).
+    dual_loop_anchor_alias: str = ""
+
 
 # ───────────────────────────────────────────────────────────────────────
 # Module-level constant per VLA entry. Convention mirrors llm_models.py:
@@ -456,14 +469,32 @@ OPENVLA_7B_CACHED = VLAModel(
     vlm_hz_min=1.0, vlm_hz_max=10.0,
     action_hz_min=15.0, action_hz_max=60.0,
     source_paper="projection variant; no published artifact",
-    measured_5090_ms_per_action=None,               # projection only
+    measured_5090_ms_per_action=None,               # projection only (no e2e bake-off)
     n_action_tokens=7,                              # same weights as single-loop variant
+    # SLOW loop grounded in OpenVLA's REAL measured VLM backbone (the same
+    # vision+prefill split measured on openvla_7b_single, 5090 bf16, b2e7397) —
+    # only the FAST loop is borrowed (see dual_loop_anchor_alias below). NOT
+    # calibrated for THIS dual-loop config (no such bake-off exists), so the
+    # result is stamped 🟠 cross_class (what-if), never measured/calibrated.
+    measured_5090_components={
+        "vision_ms": 6.23,                          # OpenVLA SigLIP+DINOv2 (measured)
+        "llm_prefill_ms": 40.38,                    # OpenVLA Llama-2 prefill (measured)
+    },
+    # Borrow NORA-1.5's measured denoise topology to ground the fast loop: its
+    # launch-bound ~27-32 Hz fast loop is the right analog for the cached-OpenVLA
+    # "~30 Hz action" premise (launch-bound ⇒ silicon-independent, the honest
+    # carry to edge). The projection recomposes chunk latency from OpenVLA's real
+    # VLM backbone + NORA-1.5's denoise step — never NORA's stored amortization.
+    dual_loop_anchor_alias="nora_1p5",
     notes=(
-        "Synthetic projection: OpenVLA with hypothetical cache wrapper "
-        "running VLM at 2 Hz and re-using semantic embedding for action "
-        "token generation at 30 Hz. NOT a measured model — projection only. "
-        "Source taxonomy always cross_class for this entry. Useful for "
-        "what-if exploration of caching benefit."
+        "GROUNDED what-if: OpenVLA with a hypothetical cache wrapper running the "
+        "VLM slow and re-using the semantic embedding for higher-rate action "
+        "generation. The slow VLM loop uses OpenVLA's REAL measured 5090 backbone "
+        "(vision 6.23 + prefill 40.38 ms); the fast action loop borrows NORA-1.5's "
+        "measured launch-bound denoise topology as a concrete stand-in. NOT a "
+        "measured model and NOT calibrated for this config — source taxonomy is "
+        "always 🟠 cross_class (what-if). Useful for exploring the caching benefit "
+        "against the real OpenVLA single-loop number."
     ),
     libero_success_pct=None,                        # no published number — projection-only
     inference_dram_gb_bf16=15.0,

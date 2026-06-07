@@ -101,12 +101,31 @@ def test_bitvla_oft_not_bw_walled_unlike_single_loop_ar():
     assert bitvla_mid > openvla_mid * 10
 
 
-def test_uncalibrated_dual_loop_still_defers():
-    """Dual-loop models WITHOUT a measured topology anchor still defer — the
-    projection needs measured_5090_dual_loop, not just the architecture flag.
-    (openvla_7b_cached is the synthetic projection-only entry; NORA-1.5 and π0.5
-    are now both calibrated.)"""
+def test_cached_openvla_grounds_against_alias_as_whatif():
+    """openvla_7b_cached has no bake-off of its own but points at NORA-1.5 via
+    dual_loop_anchor_alias → it GROUNDS into a concrete 🟠 cross_class what-if
+    (never measured/calibrated), borrowing NORA-1.5's measured denoise topology
+    while keeping OpenVLA's own measured VLM backbone."""
     r = project_vla(VLA_MODELS["openvla_7b_cached"], NPU_HIGH)
+    assert not r.get("deferred") and r.get("runs") is True
+    assert r["vla_source"] == "cross_class"
+    assert "grounded what-if" in r["vla_source_reason"]
+    assert r["action_hz"] > 0
+    # Integer-friendly discrete-token head → NOT FP-gated; runs even on the 5090
+    # reference, but stays a what-if there (this cached config was never bench'd).
+    r5 = project_vla(VLA_MODELS["openvla_7b_cached"],
+                     RTX_5090_REFERENCE, npu_share=1.0)
+    assert r5["vla_source"] == "cross_class"
+
+
+def test_uncalibrated_dual_loop_without_anchor_still_defers():
+    """The defer path still fires for a dual-loop entry that is neither
+    calibrated NOR grounded — strip the grounding alias and it falls back to the
+    'needs a measured dual-loop anchor' deferral."""
+    import dataclasses
+    bare = dataclasses.replace(VLA_MODELS["openvla_7b_cached"],
+                               dual_loop_anchor_alias="")
+    r = project_vla(bare, NPU_HIGH)
     assert r.get("deferred") is True
     assert "dual-loop anchor" in r["reason"]
 
