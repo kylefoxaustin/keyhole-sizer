@@ -368,9 +368,51 @@ if "Vision" in workloads:
                    f"{vr.get('compute_floor_ms', 0):.2f} ms · "
                    f"DRAM {vr.get('vram_mb', 0):.0f} MB/frame")
 
-    # ── scoped depth tabs (Stream scaling / DRAM bandwidth / Pipeline flow) ──
-    vt_stream, vt_bw, vt_flow = st.tabs(
-        ["Stream scaling", "DRAM bandwidth", "Pipeline flow"])
+    # ── scoped depth tabs (Pipeline timing / Stream scaling / DRAM / flow) ──
+    vt_time, vt_stream, vt_bw, vt_flow = st.tabs(
+        ["Pipeline timing", "Stream scaling", "DRAM bandwidth", "Pipeline flow"])
+
+    with vt_time:
+        # Per-stage edge ms (YOLO vs CLIP) for two-component pipelines; a single
+        # total bar for one-model pipelines (SAM 3, ES-Small, YOLO-only). Ported
+        # from app.py "Pipeline timing (current config)".
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            figt = go.Figure()
+            if vr.get("yolo_ms") is not None and vr.get("clip_ms") is not None:
+                figt.add_trace(go.Bar(
+                    x=["YOLO-seg (batched)", "CLIP component"],
+                    y=[vr["yolo_ms"], vr["clip_ms"]],
+                    marker_color=["#6366F1", "#22C55E"],
+                    text=[f"{vr['yolo_ms']:.1f} ms", f"{vr['clip_ms']:.1f} ms"],
+                    textposition="auto"))
+            else:
+                figt.add_trace(go.Bar(
+                    x=[f"{PIPELINES[pk].label} (total)"],
+                    y=[vr.get("per_stream_ms", 0.0)],
+                    marker_color="#F59E0B",
+                    text=[f"{vr.get('per_stream_ms', 0.0):.1f} ms"],
+                    textposition="auto"))
+            figt.update_layout(template="plotly_white", height=300,
+                               margin=dict(l=10, r=10, t=10, b=10),
+                               yaxis_title="Edge ms per batch cycle",
+                               showlegend=False)
+            st.plotly_chart(figt, use_container_width=True, key="v_timing")
+        with c2:
+            _note = getattr(PIPELINES[pk], "note", None)
+            if _note:
+                st.caption(_note)
+            if pk in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
+                      "hybrid_v2_bf16", "hybrid_v2_torchao_fp8", "yolo_only_fp8",
+                      "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
+                      "yolov8n_only_fp8", "yolo11s_trt_int8",
+                      "yolov8n_trt_int8_coco128"}:
+                st.caption(
+                    "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
+                    "fixed **640²** input and CLIP at **224²**. Source resolution "
+                    "only affects FFmpeg decode + resize — a small fraction of the "
+                    "inference budget. Measured: 4K is only **~21% slower** than "
+                    "720p, not 9× slower.")
 
     with vt_stream:
         srows = []
