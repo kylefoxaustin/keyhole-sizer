@@ -14,6 +14,7 @@ like it, Step 3 is migrating app.py onto this shell.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -173,6 +174,62 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
     else:
         stages.append(("NLQ / LLM\n(off)", False))
     return stages
+
+
+# ── VLA calibration-source badge (mirrors app.py::_VLA_SOURCE_BADGE). 🟢
+# measured = this hw IS the 5090 reference; 🔵 calibrated = 5090-anchored
+# latencies scaled cross-class (footgun-free); 🟠 cross_class = uncalibrated
+# roofline / what-if. ──
+_VLA_SOURCE_BADGE = {
+    "measured":    ("🟢", "measured",
+                    "RTX 5090 measured — this hardware IS the reference"),
+    "calibrated":  ("🔵", "calibrated",
+                    "5090-anchored latencies scaled to this tier (cross-class, footgun-free)"),
+    "cross_class": ("🟠", "cross_class",
+                    "first-principles roofline — model not calibrated"),
+}
+
+
+def _vla_breakdown(r):
+    """Topology-branched control-loop detail (ported from app.py::_render_vla).
+    Single-loop AR / dual-loop flow-matching / OFT parallel-chunk each get
+    architecture-specific latency math, then the shared DDR-demand line."""
+    regime = r["regime"]
+    if regime.startswith("single_loop"):
+        st.markdown(
+            f"**Single-loop autoregressive.** VLM forward "
+            f"**{r['vlm_forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} + prefill "
+            f"{r['llm_prefill_ms']:.1f}) + {r['n_action_tokens']} action tokens × "
+            f"{r['decode_ms_per_token']:.1f} ms AR decode. The AR decode is the hard "
+            f"bandwidth wall on edge — **High ≈ Mid** because both are decode-BW-bound.")
+    elif regime.startswith("dual_loop"):
+        st.markdown(
+            f"**Dual-loop flow-matching.** VLM backbone **{r['vlm_backbone_ms']:.1f} ms** "
+            f"once/chunk + {r['num_denoise_steps']}×{r['denoise_step_ms']:.1f} ms denoise "
+            f"(**{r['denoise_bottleneck']}**), amortized over {r['action_chunk_length']} "
+            f"actions. Fast-loop-only rate **{r['fast_loop_only_hz']:.0f} Hz**; chunk "
+            f"size is the amortization knob.")
+        if r.get("action_hz_optimized_floor"):
+            st.markdown(
+                f"⬆ **Optimized-kernel floor (headroom):** up to "
+                f"{r['action_hz_optimized_floor']:.0f} Hz amortized / "
+                f"{r['fast_loop_only_hz_optimized_floor']:.0f} Hz fast-loop with "
+                f"CUDA-graphs/fusion/compile (the headline is the conservative eager number).")
+    elif regime.startswith("oft"):
+        st.markdown(
+            f"**OFT parallel-chunk.** One parallel forward **{r['forward_ms']:.1f} ms** "
+            f"(vision {r['vision_ms']:.1f} + LLM {r['llm_forward_ms']:.1f}) → "
+            f"{r['action_chunk_length']} actions in parallel. Prefill-shaped, "
+            f"compute-bound — **avoids the AR decode bandwidth-wall**, which is why OFT is fast.")
+    _bw = r.get("ddr_bw_demand_gbs")
+    if _bw is not None:
+        _avail = r.get("ddr_bw_available_gbs", 0.0)
+        _frac = (_bw / _avail * 100) if _avail else 0.0
+        _flag = " ⚠ over budget" if _bw > _avail else ""
+        st.markdown(
+            f"🚌 **~{_bw:.0f} GB/s** average DDR bandwidth demand "
+            f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}) — a weight-streaming "
+            f"estimate. A fleet adds memory, not bandwidth.")
 
 
 # ───────────────────────── TOP CONTROL STRIP ─────────────────────────
@@ -639,6 +696,18 @@ if "VLA" in workloads:
     vk = st.session_state.get("p_vla", "nora_3b")
     r = project_vla(VLA_MODELS[vk], hw, npu_share=npu_share, n_cameras=n_cameras)
 
+    # 🟢🔵🟠 calibration badge — a multi-camera what-if can drop the projection
+    # to 🟠 (vla_source_reason); otherwise use the source's own taxonomy.
+    if r.get("runs"):
+        if r["vla_source"] == "cross_class" and r.get("vla_source_reason"):
+            _bi, _bl, _bt = "🟠", "cross_class (what-if)", r["vla_source_reason"]
+        else:
+            _bi, _bl, _bt = _VLA_SOURCE_BADGE.get(
+                r["vla_source"], ("", r.get("vla_source", "?"), ""))
+        st.caption(f"{_bi} **{_bl}** · {VLA_MODELS[vk].display_name} · "
+                   f"`{r['architecture']}` · exec dtype "
+                   f"`{r.get('expert_dtype') or r['dtype']}` — {_bt}")
+
     if r.get("deferred"):
         st.info(f"**{VLA_MODELS[vk].display_name}** — projection deferred: {r['reason']}")
     elif not r.get("runs"):
@@ -656,8 +725,9 @@ if "VLA" in workloads:
         st.caption(f"🤖 `{r['architecture']}` · control loop **{r['action_hz']:.1f} Hz** "
                    f"({r['ms_per_action']:.0f} ms/action)")
 
-        g1, g2 = st.columns([3, 2])
-        with g1:
+        # ── scoped depth tabs (Tier scaling / Control-loop breakdown) ──
+        wt_tier, wt_loop = st.tabs(["Tier scaling", "Control-loop breakdown"])
+        with wt_tier:
             per_tier = {}
             for lbl, key in _TIER_MAP.items():
                 tr = project_vla(VLA_MODELS[vk], TIERS[key], npu_share=npu_share,
@@ -665,14 +735,75 @@ if "VLA" in workloads:
                 per_tier[lbl] = tr.get("camera_fps", 0.0) if tr.get("runs") else 0.0
             st.plotly_chart(_per_tier_bar(per_tier, "per-camera FPS", base_tier),
                             use_container_width=True, key="w_tier")
-        with g2:
-            with st.expander("ℹ️ Control-loop detail", expanded=True):
-                st.markdown(f"`{r['regime']}` · **{r['action_hz']:.1f} Hz** "
-                            f"({r['ms_per_action']:.0f} ms/action)")
-                _bw = r.get("ddr_bw_demand_gbs")
-                if _bw is not None:
-                    st.markdown(f"🚌 ~**{_bw:.0f} GB/s** avg DDR demand "
-                                f"({_bw/r.get('ddr_bw_available_gbs',1)*100:.0f}% of available)")
+            st.caption("Per-camera perception FPS across every silicon tier — single-loop AR "
+                       "models flatten (High ≈ Mid, decode-BW-bound); OFT / dual-loop scale "
+                       "with compute. Bars at 0 = the model won't run on that tier.")
+        with wt_loop:
+            _vla_breakdown(r)
+    st.divider()
+
+# ──────────────── PLATFORM BUDGET — duty-cycle contention ────────────────
+# Cross-workload view: each LLM query occupies the shared NPU for its full
+# answer time, stealing that fraction of the second from vision. This is the
+# *time-domain* duty cycle, distinct from the static npu_share split in the
+# control strip. Only meaningful when BOTH vision and LLM are live. Ported
+# from app.py "Vision FPS under concurrent LLM load"; consumes the Duty ▾
+# popover controls (p_qpm / p_ans) that were previously inert.
+if "Vision" in workloads and "LLM" in workloads:
+    st.markdown("#### 🔀 Platform budget — vision FPS under concurrent LLM load")
+    qpm_cur = st.session_state.get("p_qpm", 2.0)
+    answer_kind = st.session_state.get("p_ans", "short")
+    base_fps = vr.get("fps_per_stream", 0.0)
+    short_ms = lr["short_answer_sec"] * 1000
+    rag_ms = lr["rag_total_sec"] * 1000
+
+    qpm = np.linspace(0, 120, 200)
+    qps = qpm / 60
+    fps_short = np.clip(base_fps * (1 - qps * short_ms / 1000), 0, base_fps)
+    fps_rag = np.clip(base_fps * (1 - qps * rag_ms / 1000), 0, base_fps)
+
+    cur_ms = short_ms if answer_kind == "short" else rag_ms
+    fps_eff = max(0.0, base_fps * (1 - (qpm_cur / 60) * cur_ms / 1000))
+
+    col_chart, col_txt = st.columns([1.5, 1])
+    with col_chart:
+        figd = go.Figure()
+        figd.add_trace(go.Scatter(x=qpm, y=fps_short, mode="lines",
+                                  line=dict(color="#22C55E", width=3),
+                                  name=f"Short answer ({short_ms/1000:.1f}s each)"))
+        figd.add_trace(go.Scatter(x=qpm, y=fps_rag, mode="lines",
+                                  line=dict(color="#F59E0B", width=3),
+                                  name=f"RAG answer ({rag_ms/1000:.0f}s each)"))
+        figd.add_vline(x=qpm_cur, line_dash="dot", line_color="#6366F1",
+                       annotation_text=f"current: {qpm_cur:.1f}/min",
+                       annotation_position="top")
+        figd.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
+                       annotation_text="30 FPS")
+        figd.add_hline(y=15, line_dash="dot", line_color="#93A1B5",
+                       annotation_text="15 FPS")
+        figd.update_layout(template="plotly_white", height=360,
+                           margin=dict(l=10, r=10, t=10, b=10),
+                           xaxis_title="LLM queries per minute",
+                           yaxis_title="Effective vision FPS",
+                           legend=dict(orientation="h", y=-0.25))
+        st.plotly_chart(figd, use_container_width=True, key="duty_chart")
+    with col_txt:
+        st.metric("Effective vision FPS", f"{fps_eff:.1f}",
+                  delta=f"from {base_fps:.1f} stock", delta_color="off")
+        _amode = "Short (~200 tok)" if answer_kind == "short" else "RAG (8K + 2K)"
+        st.caption(f"At **{qpm_cur:.1f}/min** of **{_amode}** answers on "
+                   f"**{hw.name} @ {quant}**, vision drops "
+                   f"**{base_fps:.1f} → {fps_eff:.1f} FPS** per stream.")
+        st.caption(f"LLM: decode **{lr['decode_tok_s']:.1f} tok/s** · TTFT(1K) "
+                   f"**{lr['ttft_1k_sec']*1000:.0f} ms** · short "
+                   f"**{lr['short_answer_sec']:.1f}s** · RAG "
+                   f"**{lr['rag_total_sec']:.0f}s** · GGUF "
+                   f"**{lr['gguf_size_gb']:.1f} GB** "
+                   f"{'✓ fits' if lr['fits_in_memory'] else '✗ spills'}")
+        st.caption("Each query holds the shared NPU for its full answer time — "
+                   "that fraction of the second is stolen from vision. Time-domain "
+                   "duty cycle, distinct from the static NPU-share split above. "
+                   "Tune via **Duty ▾** in the LLM control strip.")
     st.divider()
 
 # ───────────────────────── KPIs ONSCREEN ─────────────────────────
