@@ -358,6 +358,8 @@ if "Vision" in workloads:
             per_tier[lbl] = tr.get("fps_per_stream", tr.get("total_fps", 0.0))
         st.plotly_chart(_per_tier_bar(per_tier, "FPS / camera", base_tier),
                         use_container_width=True, key="v_tier")
+        st.caption("Per-camera FPS across the stock silicon ladder — your "
+                   "selection accented in red.")
     with g2:
         st.caption("**Timing**")
         st.metric("Per-frame latency",
@@ -559,6 +561,8 @@ if "LLM" in workloads:
             per_tier[lbl] = tr["decode_tok_s"]
         st.plotly_chart(_per_tier_bar(per_tier, "decode tok/s", base_tier),
                         use_container_width=True, key="l_tier")
+        st.caption("Decode tok/s across tiers — near-flat across NPU classes "
+                   "(decode is BW-bound, not compute-bound); selection in red.")
     with g2:
         # The precision what-if compare (Mid/High) — the validated feature, in
         # its full-width home now instead of buried in a sidebar.
@@ -585,7 +589,10 @@ if "LLM" in workloads:
                 col.metric(lab, f"{tt:.0f} ms", delta="prefill", delta_color="off")
                 col.caption(f"decode {pr['decode_tok_s']:.0f} tok/s{sp}")
         else:
-            st.caption("_Precision what-if available on Mid / High (FP-capable memory class)._")
+            st.info("**🎛️ Precision what-if** is a Mid / High feature — those tiers "
+                    "sit in the FP-capable LPDDR5X memory class where positing an "
+                    "FP8 / FP4 tensor engine is meaningful. Select **Mid** or **High** "
+                    "to compare INT-only → +FP8 → +FP8+FP4 prefill.")
 
     # ── scoped depth tabs (Accuracy / Precision / Performance / Timing) ──
     t_acc, t_prec, t_perf, t_tim = st.tabs(
