@@ -34,6 +34,9 @@ from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
     QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
 )
+from sizer.measured import (
+    measured_dram_per_frame, measured_components, bundle_metadata,
+)
 
 st.set_page_config(page_title="keyhole-sizer · horizontal prototype",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -84,6 +87,92 @@ def _per_tier_bar(values: dict[str, float], y_title: str, selected: str):
         yaxis_title=y_title, showlegend=False,
     )
     return fig
+
+
+# ── Vision pipeline narrative tracks (mirrors app.py::PIPELINE_TRACKS).
+# (label, [pipeline keys], canonical-default-key). The track radio lives
+# inside the Pipeline ▾ popover so the flat 23-pipeline list reads as the
+# deck's optimization journey instead of an undifferentiated dropdown. ──
+PIPELINE_TRACKS = [
+    ("SAM 3 lineage",
+     ["sam3_bf16", "essmall_fp8",
+      "efficientsam3_es_ev_s_bf16", "efficientsam3p1_es_ev_s_bf16"], "sam3_bf16"),
+    ("One-model open-vocab",
+     ["yoloe26_s_pf_fp16", "yoloe26_s_pf_trt_fp8"], "yoloe26_s_pf_trt_fp8"),
+    ("Default (Hybrid V2 → TRT)",
+     ["hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
+      "trt_fp8_every_frame", "trt_fp8_1hz_clip", "yolo_only_fp8"], "trt_fp8_1hz_clip"),
+    ("YOLOv8n nano",
+     ["yolov8n_trt_fp8_every_frame", "yolov8n_trt_fp8_1hz_clip",
+      "yolov8n_only_fp8"], "yolov8n_trt_fp8_1hz_clip"),
+    ("INT8 vendor-comparison",
+     ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128", "resnet50v1_int8_224",
+      "yolov8n_trt_int4_coco128", "resnet50v1_int4_224"], "yolov8n_trt_int8_coco128"),
+    ("ViT alternatives (what-if)",
+     ["rtdetr_l_pytorch_fp16", "detr_resnet50_pytorch_fp16",
+      "owlv2_base_pytorch_fp16", "grounding_dino_tiny_pytorch_fp32"],
+     "owlv2_base_pytorch_fp16"),
+]
+_DEFAULT_TRACK_INDEX = 2  # "Default (Hybrid V2 → TRT)"
+
+
+def _render_pipeline_strip(stages: list[tuple[str, bool]]):
+    """Horizontal pipeline flow mirroring the Keyhole deck's exec summary.
+    Highlighted boxes are indigo; dim boxes are neutral. Ported from app.py."""
+    box_highlight = ("background:#6366F1; color:#FFFFFF; border:1.5px solid #6366F1; "
+                     "font-weight:600;")
+    box_dim = "background:#334155; color:#EAEDF4; border:1.5px solid #475569;"
+    arrow = ('<div style="display:flex; align-items:center; color:#6366F1; '
+             'font-size:24px; padding:0 4px;">→</div>')
+    parts = []
+    for i, (label, hl) in enumerate(stages):
+        style = box_highlight if hl else box_dim
+        parts.append(
+            f'<div style="{style} border-radius:10px; padding:10px 14px; '
+            f'min-width:115px; flex:1; text-align:center; font-size:12.5px; '
+            f'line-height:1.35; white-space:pre-line;">{label}</div>')
+        if i < len(stages) - 1:
+            parts.append(arrow)
+    st.markdown('<div style="display:flex; flex-wrap:nowrap; align-items:stretch; '
+                f'gap:2px; margin:12px 0 8px;">{"".join(parts)}</div>',
+                unsafe_allow_html=True)
+
+
+def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
+                         llm_workload: str, quant: str) -> list[tuple[str, bool]]:
+    """Build the 5-stage flow based on current selections. Ported from app.py."""
+    mapping = {
+        "sam3_bf16":             ("YOLO 11x", False, "SAM 3 BF16", True),
+        "essmall_fp8":           ("YOLO 11x", False, "EfficientSAM-Small FP8", True),
+        "efficientsam3_es_ev_s_bf16": ("YOLO 11x", False, "EfficientSAM3 ES-EV-S\nBF16", True),
+        "efficientsam3p1_es_ev_s_bf16": ("(text-prompt)", False, "EfficientSAM3.1 ES-EV-S\nBF16 (n=1 concept)", True),
+        "yoloe26_s_pf_fp16":     ("YOLOE-26S-PF FP16\n(one model)", True, "(open-vocab built-in)", False),
+        "yoloe26_s_pf_trt_fp8":  ("YOLOE-26S-PF TRT FP8\n(optimized ceiling)", True, "(open-vocab built-in)", False),
+        "hybrid_v2_bf16":        ("YOLO-seg BF16", True, "CLIP BF16", True),
+        "hybrid_v2_torchao_fp8": ("YOLO-seg BF16", True, "CLIP FP8 (torchao)", True),
+        "trt_fp8_every_frame":   ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
+        "trt_fp8_1hz_clip":      ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
+        "yolo_only_fp8":         ("YOLO-seg FP8 (TRT)", True, "(no CLIP)", False),
+        "yolov8n_trt_fp8_every_frame": ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
+        "yolov8n_trt_fp8_1hz_clip":    ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
+        "yolov8n_only_fp8":            ("yolov8n-seg FP8 (TRT)", True, "(no CLIP)", False),
+        "yolo11s_trt_int8":            ("yolo11s-seg INT8 (TRT)\n20-frame PTQ", True, "(no CLIP)", False),
+        "yolov8n_trt_int8_coco128":    ("yolov8n-seg INT8 (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        "yolov8n_trt_int4_coco128":    ("yolov8n-seg INT4-w (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        "resnet50v1_int4_224":         ("ResNet-50 INT4-w (TRT)\nImageNet 224×224", True, "(no CLIP)", False),
+    }
+    det_label, det_hl, enr_label, enr_hl = mapping.get(
+        pipeline_key, ("?", False, "?", False))
+    stages: list[tuple[str, bool]] = [
+        ("FFmpeg\ningest", False), (det_label, det_hl),
+        (enr_label, enr_hl), ("SQLite\n+ FTS5", False),
+    ]
+    if llm_enabled:
+        wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
+        stages.append((f"Qwen3-30B-A3B {quant}\n{wl_label}", True))
+    else:
+        stages.append(("NLQ / LLM\n(off)", False))
+    return stages
 
 
 # ───────────────────────── TOP CONTROL STRIP ─────────────────────────
@@ -173,13 +262,24 @@ if "Vision" in workloads:
     head.markdown("#### 📹 Vision pipeline")
     with picker:
         with st.popover("Pipeline ▾", use_container_width=True, key="pop_pipe"):
-            pk = st.selectbox("Pipeline", list(PIPELINES), key="p_pipe")
+            # Two-step pick: narrative track radio → track-scoped selectbox
+            # (each track remembers its own pick via key=f"p_pipe__{track}").
+            track_label = st.radio("Pipeline track", [t[0] for t in PIPELINE_TRACKS],
+                                   index=_DEFAULT_TRACK_INDEX, key="p_track")
+            _, _tkeys, _canon = next(t for t in PIPELINE_TRACKS if t[0] == track_label)
+            st.selectbox("Pipeline", _tkeys, index=_tkeys.index(_canon),
+                         format_func=lambda k: PIPELINES[k].label,
+                         key=f"p_pipe__{track_label}")
             res = st.segmented_control("Resolution", ["720p", "1080p", "4K"],
                                        default="1080p", key="p_res") or "1080p"
-    pk = st.session_state.get("p_pipe", list(PIPELINES)[0])
+    track_label = st.session_state.get("p_track", PIPELINE_TRACKS[_DEFAULT_TRACK_INDEX][0])
+    _, _tkeys, _canon = next(t for t in PIPELINE_TRACKS if t[0] == track_label)
+    pk = st.session_state.get(f"p_pipe__{track_label}", _canon)
     res = st.session_state.get("p_res", "1080p")
     vr = project_vision(PIPELINES[pk], hw, resolution=res, n_streams=n_cameras,
                         compiler_quality_vs_trt=compiler_quality, npu_share=npu_share)
+
+    st.caption(f"📹 **{PIPELINES[pk].label}** — {PIPELINES[pk].description}")
 
     m = st.columns([1.1, 1.1, 1.1, 1.1, 3.6])  # cluster the 4 metrics left; spacer eats the rest
     m[0].metric("Per-camera FPS", f"{vr.get('fps_per_stream', vr.get('total_fps', 0.0)):.1f}")
@@ -210,6 +310,92 @@ if "Vision" in workloads:
                    f"{vr.get('bw_floor_ms', 0):.2f} ms · compute floor "
                    f"{vr.get('compute_floor_ms', 0):.2f} ms · "
                    f"DRAM {vr.get('vram_mb', 0):.0f} MB/frame")
+
+    # ── scoped depth tabs (Stream scaling / DRAM bandwidth / Pipeline flow) ──
+    vt_stream, vt_bw, vt_flow = st.tabs(
+        ["Stream scaling", "DRAM bandwidth", "Pipeline flow"])
+
+    with vt_stream:
+        srows = []
+        for N in [1, 2, 4, 8, 16]:
+            v = project_vision(PIPELINES[pk], hw, resolution=res, n_streams=N,
+                               compiler_quality_vs_trt=compiler_quality, npu_share=npu_share)
+            srows.append({"N streams": N,
+                          "Per-stream FPS": round(v["fps_per_stream"], 1),
+                          "Total system FPS": round(v["total_fps"], 1),
+                          "Batch cycle ms": round(v["per_stream_ms"], 1),
+                          "VRAM (MB)": round(v["vram_mb"], 0),
+                          "Fits": "✓" if v["fits_in_memory"] else "✗"})
+        df_s = pd.DataFrame(srows)
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            fig_s = go.Figure()
+            fig_s.add_trace(go.Scatter(x=df_s["N streams"], y=df_s["Per-stream FPS"],
+                                       mode="lines+markers", line=dict(color="#6366F1", width=3),
+                                       marker=dict(size=9), name="Per-stream FPS"))
+            fig_s.add_trace(go.Scatter(x=df_s["N streams"], y=df_s["Total system FPS"],
+                                       mode="lines+markers",
+                                       line=dict(color="#22C55E", width=3, dash="dash"),
+                                       marker=dict(size=9), name="Total system FPS", yaxis="y2"))
+            fig_s.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
+                            annotation_text="30 FPS real-time")
+            fig_s.update_layout(template="plotly_white", height=340,
+                                margin=dict(l=10, r=10, t=10, b=10),
+                                xaxis_title="Concurrent streams",
+                                yaxis=dict(title="Per-stream FPS"),
+                                yaxis2=dict(title="Total system FPS", overlaying="y", side="right"),
+                                legend=dict(orientation="h", y=-0.28))
+            st.plotly_chart(fig_s, use_container_width=True, key="v_streams")
+        with c2:
+            st.dataframe(df_s, width="stretch", hide_index=True)
+            st.caption("YOLO batching amortizes kernel overhead — 4 streams at batch=4 "
+                       "typically get ~70% of single-stream FPS, not 25%.")
+
+    with vt_bw:
+        mbpf = measured_dram_per_frame(pk)
+        eff_total_fps = vr["fps_per_stream"] * n_cameras
+        approx = hw.effective_bandwidth_gbs
+        if mbpf is None:
+            st.info(f"No ncu measurement mapped for **{PIPELINES[pk].label}** yet — "
+                    "only the saturation approximation is available for this pipeline.")
+        else:
+            meas = mbpf * eff_total_fps / 1e9
+            fig_bw = go.Figure(go.Bar(
+                x=["Saturation model<br>(CSV ss_ddr_gbs_avg)",
+                   "Measured (ncu)<br>ss_ddr_gbs_avg_measured"],
+                y=[approx, meas], marker_color=["#EF4444", "#22C55E"],
+                text=[f"{approx:.1f} GB/s", f"{meas:.2f} GB/s"], textposition="outside"))
+            fig_bw.add_hline(y=approx, line_dash="dot", line_color="#93A1B5",
+                             annotation_text=f"{hw.name} ceiling ({approx:.1f} GB/s)",
+                             annotation_position="top right")
+            fig_bw.update_layout(template="plotly_white", height=320,
+                                 margin=dict(l=10, r=10, t=10, b=10),
+                                 yaxis_title="DRAM GB/s consumed by vision pipeline",
+                                 showlegend=False)
+            st.plotly_chart(fig_bw, use_container_width=True, key="v_bw")
+            util = (meas / approx * 100) if approx > 0 else 0
+            st.markdown(f"**Per-frame DRAM:** {mbpf/1e6:.1f} MB · **Pipeline FPS:** "
+                        f"{eff_total_fps:.1f} · **Measured usage:** {meas:.2f} GB/s "
+                        f"({util:.1f}% of ceiling) · **Spare:** {max(0.0, approx-meas):.1f} GB/s")
+            comps = measured_components(pk) or []
+            if len(comps) > 1:
+                parts = " + ".join(f"`{c['ncu_workload_id']}` × {c['fires_per_frame']:.3g} "
+                                   f"({c['dram_bytes_per_fire']/1e6:.1f} MB/fire)" for c in comps)
+                st.caption(f"Composition: {parts}")
+            meta = bundle_metadata()
+            st.caption("Saturation = pessimistic bus-pin assumption; measured = ncu DRAM "
+                       "bytes/forward × FPS. The gap is real headroom for concurrent LLM / "
+                       f"extra streams. ncu bundle `{meta['ncu_bundle_timestamp']}` · "
+                       f"{meta['ncu_n_workloads']} workloads · host *{meta['ncu_measurement_host']}*.")
+
+    with vt_flow:
+        _llm_on = "LLM" in workloads
+        _wl = st.session_state.get("p_work", "plain_chat")
+        _q = st.session_state.get("p_quant", "Q4_K_M")
+        _render_pipeline_strip(_stages_for_pipeline(pk, _llm_on, _wl, _q))
+        st.caption("Indigo = stage driven by your pipeline / LLM choice; slate = always-on "
+                   "infrastructure (ingest, storage). Every stage runs — the colour just "
+                   "flags where your controls take effect.")
     st.divider()
 
 # ───────────────────────── LLM ─────────────────────────
