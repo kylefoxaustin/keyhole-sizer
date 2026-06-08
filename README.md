@@ -69,6 +69,44 @@ running locally with ratchet as an editable install (`pip install -e
 ~/path/to/ratchet`), pip prefers your editable over the git pin —
 useful for engine co-development.
 
+## Horizontal-layout prototype (experimental)
+
+Alongside the live sidebar app, the repo carries an **experimental
+horizontal-layout mockup** at
+[`app_horizontal_prototype.py`](app_horizontal_prototype.py) — a throwaway
+shell being judged before deciding whether to migrate the live app onto it
+("Step 3"). It runs on the **same real engine** (live numbers) and leaves
+`app.py` untouched.
+
+```bash
+streamlit run app_horizontal_prototype.py   # no password gate on the prototype
+```
+
+What it explores vs the sidebar layout:
+
+- **No left sidebar.** All controls live in a horizontal **top control
+  strip**: NPU-tier pills, workload pills (Vision / LLM / VLA), camera
+  count, popovers for Pipeline / Model / Quant / Workload / Duty / Memory /
+  BW-share, and a single ⚙ Settings popover for the rarely-touched power
+  controls (custom-NPU builder, compiler quality, KPI toggle).
+- **Full-width results + charts**; KPIs visible onscreen, not download-only.
+- **Per-section scoped detail tabs** per workload — Vision (Pipeline-timing /
+  Stream-scaling / DRAM-bandwidth / Pipeline-flow), LLM (Accuracy / Precision /
+  Performance / Timing), VLA (Tier-scaling / Control-loop) — each wrapped in a
+  **collapsible "🔎 … detail" expander** so verbose tabs can be minimized.
+  Compact defaults: detail expanders collapsed, default workload Vision-only.
+- **Platform-budget** cross-workload view (vision FPS under concurrent LLM
+  load) when both Vision and LLM are active.
+- **Per-workload KPI section** — each active workload gets a collapsible KPI
+  block (cross-tier + cross-config tables), exportable individually or as one
+  **uber XLSX** with a sheet per active `(workload × view)` and a tier-scoped
+  filename.
+
+The companion
+[personal-ai-assistant-sizer](https://github.com/kylefoxaustin/personal-ai-assistant-sizer)
+carries a parallel `app_horizontal_prototype.py` (the LLM-only single-workload
+cut), so both sizers can be judged on the same shell.
+
 ## Deployment (Streamlit Community Cloud)
 
 The app is deployed at **https://keyhole-sizer.streamlit.app** with a
