@@ -14,6 +14,8 @@ like it, Step 3 is migrating app.py onto this shell.
 """
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -38,6 +40,7 @@ from sizer.llm_quant_levels import (
 from sizer.measured import (
     measured_dram_per_frame, measured_components, bundle_metadata,
 )
+from sizer.kpi_breakdown import all_pipeline_kpi_rows
 
 st.set_page_config(page_title="keyhole-sizer · horizontal prototype",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -230,6 +233,128 @@ def _vla_breakdown(r):
             f"🚌 **~{_bw:.0f} GB/s** average DDR bandwidth demand "
             f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}) — a weight-streaming "
             f"estimate. A fleet adds memory, not bandwidth.")
+
+
+# ── KPI tables (per-workload cross-tier + cross-config) + uber XLSX export.
+# Mirrors pai-sizer's restored KPI parity, generalized to 3 workloads. Each
+# builder returns a list[dict] that feeds BOTH st.dataframe and the XLSX writer.
+# Cross-tier tables span the 5-tier ladder (_TIER_MAP), matching the on-screen
+# per-tier bars. Source badges come straight off the projection results. ──
+_SRC_EMOJI = {"measured": "🟢", "measured_anchor": "🟢", "calibrated": "🔵",
+              "same_class_anchor": "🟡", "cross_class": "🟠"}
+
+
+def _src(s):
+    return f"{_SRC_EMOJI.get(s, '')} {s}".strip() if s else "—"
+
+
+def _vision_cross_tier_rows(pk, res, compiler_quality, npu_share, n_cameras):
+    rows = []
+    for lbl, key in _TIER_MAP.items():
+        v = project_vision(PIPELINES[pk], TIERS[key], resolution=res, n_streams=n_cameras,
+                           compiler_quality_vs_trt=compiler_quality, npu_share=npu_share)
+        rows.append({
+            "Tier": lbl,
+            "Per-cam FPS": round(v.get("fps_per_stream", 0.0), 1),
+            "Aggregate FPS": round(v.get("total_fps", 0.0), 0),
+            "Per-frame ms": round(v.get("per_stream_ms", 0.0), 2),
+            "Regime": v.get("regime", "?"),
+            "Source": _src(v.get("edge_ms_source")),
+            "Fits": "✓" if v.get("fits_in_memory") else "✗",
+        })
+    return rows
+
+
+def _vision_pipeline_rows(hw_, res):
+    # Reuse the live-app machinery; drop the embedded Hardware object column
+    # (un-serializable + redundant — the whole sheet is one tier).
+    return [{k: val for k, val in r.items() if k != "hw"}
+            for r in all_pipeline_kpi_rows(hw_, resolution=res, llm_enabled=False)]
+
+
+def _llm_cross_tier_rows(quant, workload, npu_share, alias):
+    rows = []
+    for lbl, key in _TIER_MAP.items():
+        hw_ = TIERS[key]
+        l = project_llm(hw_, quant, workload=workload, npu_share=npu_share, model_key=alias)
+        rows.append({
+            "Tier": lbl,
+            "Source": _src(l.get("llm_source")),
+            "DDR type": hw_.mem_type,
+            "Usable BW GB/s": round(hw_.effective_bandwidth_gbs, 1),
+            "Decode tok/s": round(l["decode_tok_s"], 1),
+            "Prefill ms": round(l["ttft_1k_sec"] * 1000, 0),
+            "Short ans s": round(l["short_answer_sec"], 1),
+            "RAG s": round(l["rag_total_sec"], 0),
+            "Fits": "✓" if l["fits_in_memory"] else "✗",
+        })
+    return rows
+
+
+def _llm_cross_model_rows(hw_, quant, workload, npu_share):
+    rows = []
+    for mk, mm in LLM_MODELS.items():
+        a = mm.measurement_alias or mk
+        l = project_llm(hw_, quant, workload=workload, npu_share=npu_share, model_key=a)
+        rows.append({
+            "Model": mm.label.split(" (")[0],
+            "Arch": f"{mm.total_params_b:.0f}B/{mm.active_params_b:.0f}B",
+            "Decode tok/s": round(l["decode_tok_s"], 1),
+            "Short ans s": round(l["short_answer_sec"], 1),
+            "RAG s": round(l["rag_total_sec"], 0),
+            "GGUF GB": round(l["gguf_size_gb"], 1),
+            "Source": _src(l.get("llm_source")),
+        })
+    return rows
+
+
+def _vla_cross_tier_rows(vk, npu_share, n_cameras):
+    rows = []
+    for lbl, key in _TIER_MAP.items():
+        w = project_vla(VLA_MODELS[vk], TIERS[key], npu_share=npu_share, n_cameras=n_cameras)
+        runs = w.get("runs")
+        rows.append({
+            "Tier": lbl,
+            "Per-cam FPS": round(w["camera_fps"], 1) if runs else None,
+            "Aggregate FPS": round(w["aggregate_camera_fps"], 0) if runs else None,
+            "Control Hz": round(w["action_hz"], 1) if runs else None,
+            "Source": _src(w.get("vla_source")) if runs
+                      else ("deferred" if w.get("deferred") else "won't run"),
+            "Fits": ("✓" if w["fits_in_memory"] else "✗") if runs else "—",
+            "Regime": w.get("regime", "—") if runs else "—",
+        })
+    return rows
+
+
+def _vla_cross_model_rows(hw_, npu_share, n_cameras):
+    rows = []
+    for mk, mm in VLA_MODELS.items():
+        w = project_vla(mm, hw_, npu_share=npu_share, n_cameras=n_cameras)
+        runs = w.get("runs")
+        rows.append({
+            "Model": mm.display_name,
+            "Arch": w.get("architecture", "—") if runs else "—",
+            "Control Hz": round(w["action_hz"], 1) if runs else None,
+            "Per-cam FPS": round(w["camera_fps"], 1) if runs else None,
+            "DRAM GB": round(w["dram_gb"], 1) if runs else None,
+            "Fits": ("✓" if w["fits_in_memory"] else "✗") if runs else "—",
+            "Source": _src(w.get("vla_source")) if runs
+                      else ("deferred" if w.get("deferred") else "won't run"),
+        })
+    return rows
+
+
+def _kpi_xlsx(sheets):
+    """One workbook, one sheet per (workload, view). sheets = {name: list[dict]}."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, rws in sheets.items():
+            pd.DataFrame(rws).to_excel(xw, sheet_name=name[:31], index=False)
+    return buf.getvalue()
+
+
+def _tier_slug(name):
+    return "".join(c if c.isalnum() else "_" for c in name).strip("_").lower()
 
 
 # ───────────────────────── TOP CONTROL STRIP ─────────────────────────
@@ -873,6 +998,7 @@ if "Vision" in workloads and "LLM" in workloads:
 # ───────────────────────── KPIs ONSCREEN ─────────────────────────
 if workloads and st.session_state.get("p_kpi_on", True):
     st.markdown("#### 📊 KPIs — current configuration")
+    _slug = _tier_slug(hw.name)
     rows = []
     if "Vision" in workloads:
         rows.append({"Workload": f"Vision · {pk}", "Per-cam FPS": round(vr.get('fps_per_stream', 0.0), 1),
@@ -896,8 +1022,64 @@ if workloads and st.session_state.get("p_kpi_on", True):
     if rows:
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button("⬇ Export KPIs (CSV)", df.to_csv(index=False),
-                           "keyhole_kpis.csv", "text/csv", key="p_kpi_dl")
+        st.download_button("⬇ Summary (CSV)", df.to_csv(index=False),
+                           f"keyhole_sizer_kpis_{_slug}_summary.csv", "text/csv",
+                           key="p_kpi_dl")
+
+    # ── Per-(workload, view) sheet set for ONLY the active workloads → one uber
+    # XLSX (tier-scoped) + per-workload XLSX inside collapsed expanders. Mirrors
+    # pai-sizer's KPI parity, generalized to 3 workloads (Vision/LLM/VLA). ──
+    sheets = {}
+    if "Vision" in workloads:
+        sheets["vision_cross_tier"] = _vision_cross_tier_rows(
+            pk, res, compiler_quality, npu_share, n_cameras)
+        sheets["vision_pipelines"] = _vision_pipeline_rows(hw, res)
+    if "LLM" in workloads:
+        sheets["llm_cross_tier"] = _llm_cross_tier_rows(quant, llm_workload, npu_share, alias)
+        sheets["llm_cross_model"] = _llm_cross_model_rows(hw, quant, llm_workload, npu_share)
+    if "VLA" in workloads:
+        sheets["vla_cross_tier"] = _vla_cross_tier_rows(vk, npu_share, n_cameras)
+        sheets["vla_cross_model"] = _vla_cross_model_rows(hw, npu_share, n_cameras)
+
+    if sheets:
+        _ub_col, _cap_col = st.columns([1.5, 4])
+        with _ub_col:
+            st.download_button(
+                "⬇ Export ALL KPIs (XLSX)", _kpi_xlsx(sheets),
+                file_name=f"keyhole_sizer_kpis_{_slug}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, key="kpi_uber_dl",
+                help="One workbook, one sheet per (active workload × view), scoped to "
+                     "the selected NPU tier. Only active workloads get sheets.")
+        _cap_col.caption(f"Tier-scoped to **{hw.name}**. Summary row above = current "
+                         "config; the per-workload blocks below carry the full cross-tier "
+                         "and cross-config tables (also in the workbook).")
+
+        # Per-workload KPI blocks — collapsed by default (compact-first).
+        _WL_VIEWS = {
+            "Vision": [("Cross-tier — this pipeline across the ladder", "vision_cross_tier"),
+                       ("All pipelines on this tier", "vision_pipelines")],
+            "LLM":    [("Cross-tier — this model across the ladder", "llm_cross_tier"),
+                       ("Cross-model — all models on this tier", "llm_cross_model")],
+            "VLA":    [("Cross-tier — this model across the ladder", "vla_cross_tier"),
+                       ("Cross-model — all models on this tier", "vla_cross_model")],
+        }
+        for wl in ("Vision", "LLM", "VLA"):
+            if wl not in workloads:
+                continue
+            with st.expander(f"📊 {wl} KPIs", expanded=False):
+                for title, key in _WL_VIEWS[wl]:
+                    if key not in sheets:
+                        continue
+                    st.caption(f"**{title}**")
+                    st.dataframe(pd.DataFrame(sheets[key]),
+                                 use_container_width=True, hide_index=True)
+                wl_sheets = {k: sheets[k] for _, k in _WL_VIEWS[wl] if k in sheets}
+                st.download_button(
+                    f"⬇ Export {wl} KPIs (XLSX)", _kpi_xlsx(wl_sheets),
+                    file_name=f"keyhole_sizer_kpis_{_slug}_{wl.lower()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"kpi_{wl.lower()}_dl")
 
     # ── NCU provenance + hardware config (reference detail, collapsed) ──
     with st.expander("🔬 NCU provenance & hardware config"):
