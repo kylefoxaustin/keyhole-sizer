@@ -1,10 +1,17 @@
-"""
-keyhole-sizer — interactive NPU sizing sandbox for the Keyhole bake-off findings.
+"""keyhole-sizer — horizontal-layout app (live since v2.0.0, 2026-06-10).
 
-Launch:
-    streamlit run app.py
+The production sizer UI: no left sidebar; controls in a horizontal top strip
+(tier pills + popovers + workload pills + a ⚙ settings popover for power
+controls); results + charts fill the full page width; KPIs visible onscreen.
+Runs on the real engine (live numbers).
+
+This shell was the "horizontal-layout prototype" (Step 2) judged against the
+original tall-sidebar layout; Step 3 (v2.0.0) promoted it to app.py. The
+previous vertical layout is preserved at app_vertical_legacy.py.
 """
 from __future__ import annotations
+
+import io
 
 import numpy as np
 import pandas as pd
@@ -12,70 +19,28 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from sizer.npu_model import (
-    Hardware, TIERS, MEMORY_TYPES, PIPELINES, NPU_MID,
-    WORKLOAD_CATEGORIES, BYTES_PER_PARAM,
-    describe_hw, project_vision, project_llm,
-    theoretical_bandwidth, vision_fps_under_llm_load,
-    workload_distribution_on_hw,
-    workload_multiplier,
-    capability_level,
+    Hardware, TIERS, NPU_MID, MEMORY_TYPES, PIPELINES,
+    project_vision, project_llm, hw_with_memory, hw_with_precision,
+    MEMORY_UPGRADE_OPTIONS, describe_hw, bandwidth_ratio, theoretical_bandwidth,
+    WORKLOAD_CATEGORIES, workload_distribution_on_hw, capability_level,
 )
-from sizer.platform_budget import (
-    vision_workload_row, llm_workload_row, rows_to_csv_str,
-)
-from sizer.measured import (
-    measured_dram_per_frame, measured_components, bundle_metadata,
-)
-from sizer.kpi_breakdown import (
-    pipeline_kpi_row, all_pipeline_kpi_rows, kpi_rows_to_xlsx,
-)
-from sizer.precision import CAPABILITY_LABELS, CAPABILITY_DESCRIPTIONS
+from sizer.project_vla import project_vla
+from sizer.vla_models import VLA_MODELS
 from sizer.llm_models import (
-    LLM_MODELS, DEFAULT_LLM_MODEL_KEY, CATEGORY_LABELS, accuracy_delta_pp,
-    PRODUCTION_REFERENCE_KEY, scale_llm_projection, perf_scale_factor,
-    METHODOLOGY_VERSION,
+    LLM_MODELS, CATEGORY_LABELS, accuracy_delta_pp, PRODUCTION_REFERENCE_KEY,
+    perf_scale_factor, METHODOLOGY_VERSION,
 )
 from sizer.llm_quant_levels import (
     LLM_QUANT_LADDER, W8A8_VS_FP16_CATEGORY_DELTAS,
     QWEN_W8A8_RAG, FP16_REFERENCE, delta_pp_vs_fp16,
 )
-from sizer.vla_models import VLA_MODELS, VLA_TRACKS
-from sizer.project_vla import project_vla
-from ratchet.anchors import load_llm_anchor, load_cnn_anchor
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _full_matrix_csv() -> str:
-    """Generate the full preset-HW × pipeline × resolution × stream-count matrix,
-    plus every LLM (quant × workload × answer_kind) combo. Cached for an hour.
-    Same output as `scripts/export_platform_matrix.py`."""
-    rows: list[dict] = []
-    for hw in TIERS.values():
-        for pipeline in PIPELINES.values():
-            for res in ("720p", "1080p", "4K"):
-                for n in (1, 2, 4, 8, 16):
-                    try:
-                        rows.append(vision_workload_row(pipeline, hw, res, n_streams=n))
-                    except Exception:
-                        pass
-    for hw in TIERS.values():
-        for quant in BYTES_PER_PARAM:
-            for workload in WORKLOAD_CATEGORIES:
-                for answer_kind in ("short", "rag"):
-                    try:
-                        rows.append(llm_workload_row(
-                            hw, quant, workload=workload,
-                            queries_per_minute=2.0, answer_kind=answer_kind,
-                        ))
-                    except Exception:
-                        pass
-    return rows_to_csv_str(rows)
-
-st.set_page_config(
-    page_title="keyhole-sizer",
-    page_icon="🎯",
-    layout="wide",
+from sizer.measured import (
+    measured_dram_per_frame, measured_components, bundle_metadata,
 )
+from sizer.kpi_breakdown import all_pipeline_kpi_rows
+
+st.set_page_config(page_title="keyhole-sizer", page_icon="🎯",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 
 # ───────────────────────── Shared-password gate ─────────────────────────
@@ -112,121 +77,131 @@ def _password_gate() -> bool:
 if not _password_gate():
     st.stop()
 
+# Highlight the picker popovers (Pipeline / Model / VLA model) in green so the
+# "what am I configuring" control pops out from the neutral popovers around it.
+# A green border + translucent fill reads correctly in BOTH light and dark
+# browser themes (the fill tints whatever's behind it); button text is left
+# theme-inherited so contrast is never broken in either mode.
+st.markdown("""
+<style>
+.st-key-pop_pipe button, .st-key-pop_llm button, .st-key-pop_quant button,
+.st-key-pop_work button, .st-key-pop_vla button {
+    border: 1.5px solid #22A06B !important;
+    background-color: rgba(34, 160, 107, 0.14) !important;
+}
+.st-key-pop_pipe button:hover, .st-key-pop_llm button:hover, .st-key-pop_quant button:hover,
+.st-key-pop_work button:hover, .st-key-pop_vla button:hover {
+    border-color: #1B7E54 !important;
+    background-color: rgba(34, 160, 107, 0.24) !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
-# ───────────────────────── Header ─────────────────────────
-
-st.title("🎯 keyhole-sizer")
-# "ℹ About this sizer" expander was here at the top until 2026-05-16;
-# moved to the bottom of the page (just above the footer caption) per
-# Kyle — header should land the user straight on the metrics, not on
-# explanatory copy.
-
-
-# ───────────────────────── Helpers: chart theme + pipeline strip ─────────────────────────
-
-# Sizer's dark-theme palette for Plotly figures. Applied consistently so
-# axis ticks, titles, and gridlines render as readable near-white-on-navy
-# instead of Plotly's default gray-on-dark (which has low contrast).
-_CHART_FG = "#EAEDF4"
-_CHART_BG = "#0F192E"
-_CHART_GRID = "#334155"
+# ── short tier label → TIERS key (the comparison ladder, in order) ──
+_TIER_MAP = {
+    "i.MX 95": "NPU i.MX 95 (ground truth)",
+    "Low-LP5X": "NPU Low-LP5X",
+    "Mid": "NPU Mid",
+    "High": "NPU High",
+    "RTX 5090": "RTX 5090 (reference, measured)",
+}
+_SHARE_MAP = {"100%": 1.0, "75%": 0.75, "50%": 0.5, "25%": 0.25}
+_ACCENT = "#E1483A"   # keyhole red — highlight the selected tier in charts
 
 
-def _apply_chart_theme(fig):
-    """Apply the sizer's dark-theme axis + legend colors to a Plotly figure.
-
-    Called AFTER the figure's primary update_layout() so per-chart titles,
-    heights, margins, and layout tweaks are preserved. Uses update_xaxes /
-    update_yaxes / update_layout which MERGE rather than replace, so any
-    chart that already sets e.g. tickfont=dict(size=13) keeps its size.
-
-    Fixes: axis ticks / axis titles / gridlines inheriting Plotly's default
-    gray-on-dark palette instead of the figure-level font color.
-    """
-    fig.update_xaxes(
-        color=_CHART_FG,
-        gridcolor=_CHART_GRID,
-        title_font=dict(color=_CHART_FG),
-    )
-    fig.update_yaxes(
-        color=_CHART_FG,
-        gridcolor=_CHART_GRID,
-        title_font=dict(color=_CHART_FG),
-    )
+def _per_tier_bar(values: dict[str, float], y_title: str, selected: str):
+    """Horizontal-friendly bar of a metric across the tier ladder; the selected
+    tier is accented. `values` keyed by short tier label."""
+    fig = go.Figure(go.Bar(
+        x=list(values), y=list(values.values()),
+        marker_color=[_ACCENT if k == selected else "#9AA7BD" for k in values],
+        text=[f"{v:.1f}" for v in values.values()], textposition="outside",
+    ))
     fig.update_layout(
-        legend=dict(font=dict(color=_CHART_FG)),
+        template="plotly_white", height=240,
+        margin=dict(l=10, r=10, t=10, b=10),
+        yaxis_title=y_title, showlegend=False,
     )
+    return fig
+
+
+# ── Vision pipeline narrative tracks (mirrors app.py::PIPELINE_TRACKS).
+# (label, [pipeline keys], canonical-default-key). The track radio lives
+# inside the Pipeline ▾ popover so the flat 23-pipeline list reads as the
+# deck's optimization journey instead of an undifferentiated dropdown. ──
+PIPELINE_TRACKS = [
+    ("SAM 3 lineage",
+     ["sam3_bf16", "essmall_fp8",
+      "efficientsam3_es_ev_s_bf16", "efficientsam3p1_es_ev_s_bf16"], "sam3_bf16"),
+    ("One-model open-vocab",
+     ["yoloe26_s_pf_fp16", "yoloe26_s_pf_trt_fp8"], "yoloe26_s_pf_trt_fp8"),
+    ("Default (Hybrid V2 → TRT)",
+     ["hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
+      "trt_fp8_every_frame", "trt_fp8_1hz_clip", "yolo_only_fp8"], "trt_fp8_1hz_clip"),
+    ("YOLOv8n nano",
+     ["yolov8n_trt_fp8_every_frame", "yolov8n_trt_fp8_1hz_clip",
+      "yolov8n_only_fp8"], "yolov8n_trt_fp8_1hz_clip"),
+    ("INT8 vendor-comparison",
+     ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128", "resnet50v1_int8_224",
+      "yolov8n_trt_int4_coco128", "resnet50v1_int4_224"], "yolov8n_trt_int8_coco128"),
+    ("ViT alternatives (what-if)",
+     ["rtdetr_l_pytorch_fp16", "detr_resnet50_pytorch_fp16",
+      "owlv2_base_pytorch_fp16", "grounding_dino_tiny_pytorch_fp32"],
+     "owlv2_base_pytorch_fp16"),
+]
+_DEFAULT_TRACK_INDEX = 2  # "Default (Hybrid V2 → TRT)"
 
 
 def _render_pipeline_strip(stages: list[tuple[str, bool]]):
     """Horizontal pipeline flow mirroring the Keyhole deck's exec summary.
-    Highlighted boxes are indigo; dim boxes are neutral. Arrows between."""
-    box_highlight = (
-        "background:#6366F1; color:#FFFFFF; border:1.5px solid #6366F1; "
-        "font-weight:600;"
-    )
-    # "Fixed infrastructure" boxes — always-on pipeline stages that don't vary with
-    # the user's pipeline selection. Bright text on a mid-slate so they read as
-    # "present, supporting" not "disabled/placeholder."
-    box_dim = (
-        "background:#334155; color:#EAEDF4; border:1.5px solid #475569;"
-    )
-    arrow = (
-        '<div style="display:flex; align-items:center; color:#6366F1; '
-        'font-size:24px; padding:0 4px;">→</div>'
-    )
+    Highlighted boxes are indigo; dim boxes are neutral. Ported from app.py."""
+    box_highlight = ("background:#6366F1; color:#FFFFFF; border:1.5px solid #6366F1; "
+                     "font-weight:600;")
+    box_dim = "background:#334155; color:#EAEDF4; border:1.5px solid #475569;"
+    arrow = ('<div style="display:flex; align-items:center; color:#6366F1; '
+             'font-size:24px; padding:0 4px;">→</div>')
     parts = []
     for i, (label, hl) in enumerate(stages):
         style = box_highlight if hl else box_dim
         parts.append(
             f'<div style="{style} border-radius:10px; padding:10px 14px; '
             f'min-width:115px; flex:1; text-align:center; font-size:12.5px; '
-            f'line-height:1.35; white-space:pre-line;">{label}</div>'
-        )
+            f'line-height:1.35; white-space:pre-line;">{label}</div>')
         if i < len(stages) - 1:
             parts.append(arrow)
-    html = (
-        '<div style="display:flex; flex-wrap:nowrap; align-items:stretch; '
-        f'gap:2px; margin:12px 0 8px;">{"".join(parts)}</div>'
-    )
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown('<div style="display:flex; flex-wrap:nowrap; align-items:stretch; '
+                f'gap:2px; margin:12px 0 8px;">{"".join(parts)}</div>',
+                unsafe_allow_html=True)
 
 
 def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
                          llm_workload: str, quant: str) -> list[tuple[str, bool]]:
-    """Build the 5-stage flow based on the user's current selections.
-    Highlight = 'this box is driven by the user's pipeline / LLM choice'."""
+    """Build the 5-stage flow based on current selections. Ported from app.py."""
     mapping = {
-        "sam3_bf16":             ("YOLO 11x", False,       "SAM 3 BF16", True),
-        "essmall_fp8":           ("YOLO 11x", False,       "EfficientSAM-Small FP8", True),
-        "efficientsam3_es_ev_s_bf16": ("YOLO 11x", False,  "EfficientSAM3 ES-EV-S\nBF16", True),
+        "sam3_bf16":             ("YOLO 11x", False, "SAM 3 BF16", True),
+        "essmall_fp8":           ("YOLO 11x", False, "EfficientSAM-Small FP8", True),
+        "efficientsam3_es_ev_s_bf16": ("YOLO 11x", False, "EfficientSAM3 ES-EV-S\nBF16", True),
         "efficientsam3p1_es_ev_s_bf16": ("(text-prompt)", False, "EfficientSAM3.1 ES-EV-S\nBF16 (n=1 concept)", True),
-        "yoloe26_s_pf_fp16":          ("YOLOE-26S-PF FP16\n(one model)", True, "(open-vocab built-in)", False),
-        "yoloe26_s_pf_trt_fp8":       ("YOLOE-26S-PF TRT FP8\n(optimized ceiling)", True, "(open-vocab built-in)", False),
-        "hybrid_v2_bf16":        ("YOLO-seg BF16", True,   "CLIP BF16", True),
-        "hybrid_v2_torchao_fp8": ("YOLO-seg BF16", True,   "CLIP FP8 (torchao)", True),
+        "yoloe26_s_pf_fp16":     ("YOLOE-26S-PF FP16\n(one model)", True, "(open-vocab built-in)", False),
+        "yoloe26_s_pf_trt_fp8":  ("YOLOE-26S-PF TRT FP8\n(optimized ceiling)", True, "(open-vocab built-in)", False),
+        "hybrid_v2_bf16":        ("YOLO-seg BF16", True, "CLIP BF16", True),
+        "hybrid_v2_torchao_fp8": ("YOLO-seg BF16", True, "CLIP FP8 (torchao)", True),
         "trt_fp8_every_frame":   ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
         "trt_fp8_1hz_clip":      ("YOLO-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
         "yolo_only_fp8":         ("YOLO-seg FP8 (TRT)", True, "(no CLIP)", False),
-        "yolov8n_trt_fp8_every_frame":  ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
-        "yolov8n_trt_fp8_1hz_clip":     ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
-        "yolov8n_only_fp8":             ("yolov8n-seg FP8 (TRT)", True, "(no CLIP)", False),
-        "yolo11s_trt_int8":              ("yolo11s-seg INT8 (TRT)\n20-frame PTQ", True, "(no CLIP)", False),
-        "yolov8n_trt_int8_coco128":      ("yolov8n-seg INT8 (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
-        # 4-bit-weight variants (2026-05-14) — compute path is still INT8
-        # on edge silicon; only weights compress to 4-bit. Diagram shape
-        # matches the 8-bit-weight siblings (one-model, no CLIP).
-        "yolov8n_trt_int4_coco128":      ("yolov8n-seg INT4-w (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
-        "resnet50v1_int4_224":           ("ResNet-50 INT4-w (TRT)\nImageNet 224×224", True, "(no CLIP)", False),
+        "yolov8n_trt_fp8_every_frame": ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\nevery frame", True),
+        "yolov8n_trt_fp8_1hz_clip":    ("yolov8n-seg FP8 (TRT)", True, "CLIP FP8 (TRT)\n@ 1 Hz", True),
+        "yolov8n_only_fp8":            ("yolov8n-seg FP8 (TRT)", True, "(no CLIP)", False),
+        "yolo11s_trt_int8":            ("yolo11s-seg INT8 (TRT)\n20-frame PTQ", True, "(no CLIP)", False),
+        "yolov8n_trt_int8_coco128":    ("yolov8n-seg INT8 (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        "yolov8n_trt_int4_coco128":    ("yolov8n-seg INT4-w (TRT)\ncoco128-seg PTQ", True, "(no CLIP)", False),
+        "resnet50v1_int4_224":         ("ResNet-50 INT4-w (TRT)\nImageNet 224×224", True, "(no CLIP)", False),
     }
     det_label, det_hl, enr_label, enr_hl = mapping.get(
-        pipeline_key, ("?", False, "?", False)
-    )
+        pipeline_key, ("?", False, "?", False))
     stages: list[tuple[str, bool]] = [
-        ("FFmpeg\ningest", False),
-        (det_label, det_hl),
-        (enr_label, enr_hl),
-        ("SQLite\n+ FTS5", False),
+        ("FFmpeg\ningest", False), (det_label, det_hl),
+        (enr_label, enr_hl), ("SQLite\n+ FTS5", False),
     ]
     if llm_enabled:
         wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
@@ -236,10 +211,10 @@ def _stages_for_pipeline(pipeline_key: str, llm_enabled: bool,
     return stages
 
 
-# ── VLA (robot control-loop) projection rendering ───────────────────────────
-# The 3-state taxonomy badge (matches project_vla's vla_source). 🟢 measured =
-# this hw IS the 5090 reference; 🔵 calibrated = 5090-anchored latencies scaled
-# cross-class (footgun-free); 🟠 cross_class = uncalibrated roofline.
+# ── VLA calibration-source badge (mirrors app.py::_VLA_SOURCE_BADGE). 🟢
+# measured = this hw IS the 5090 reference; 🔵 calibrated = 5090-anchored
+# latencies scaled cross-class (footgun-free); 🟠 cross_class = uncalibrated
+# roofline / what-if. ──
 _VLA_SOURCE_BADGE = {
     "measured":    ("🟢", "measured",
                     "RTX 5090 measured — this hardware IS the reference"),
@@ -250,2739 +225,940 @@ _VLA_SOURCE_BADGE = {
 }
 
 
-def _vla_rate_control(label, lo, hi, default, key, help_):
-    """Render a VLA operating-rate control. When min==max==default the model is
-    architecturally fixed-rate (no scheduling freedom) → show a locked caption
-    instead of a slider (st.slider requires lo<hi). Returns (value, off_default).
-    """
-    if lo == hi == default:
-        st.caption(f"{label}: **{default:.0f} Hz** — fixed (no scheduling freedom)")
-        return float(default), False
-    val = st.slider(label, float(lo), float(hi), float(default),
-                    key=key, help=help_)
-    return val, (abs(val - default) > 1e-9)
-
-
-def _render_vla(vla, hw, npu_share, vlm_hz, action_hz, off_default,
-                n_cameras=None, fleet_size=1, camera_mode="native"):
-    """Self-contained VLA projection section — independent of the vision+LLM
-    platform budget. Branches the breakdown on the action-generation topology
-    (single-loop AR / OFT parallel-chunk / dual-loop flow-matching).
-
-    `off_default` True means the user moved an operating-rate slider off the
-    model's measured/published default → the calibrated projection no longer
-    anchors to this operating point, so the source badge drops to 🟠 (what-if).
-    Phase 3c: n_cameras / fleet_size / camera_mode drive the multi-camera + fleet
-    cost shapes (native vision[+prefill]×N / stitched flat / fleet ×N)."""
-    st.markdown("---")
-    st.header("🤖 VLA — robot control-loop projection")
-    st.caption(
-        "A vision-language-action manipulation loop on the selected NPU. This is "
-        "a distinct robotics workload — **not** part of the video+LLM platform "
-        "budget above/below — so it's sized on its own."
-    )
-    r = project_vla(vla, hw, npu_share=npu_share, n_cameras=n_cameras,
-                    fleet_size=fleet_size, camera_mode=camera_mode)
-
-    if r.get("deferred"):
-        st.info(
-            f"**{vla.display_name} — projection deferred (no metrics below).**  \n"
-            f"{r['reason']}  \n_Pick a different VLA model, or a tier where this "
-            f"topology is calibrated, to see a control-rate projection._"
-        )
-        return
-    if not r.get("runs"):
-        st.error(
-            f"**{vla.display_name} won't run on {hw.name} (no metrics below).**  \n"
-            f"{r['reason']}  \n_Try a higher tier (more DRAM / FP support) or a "
-            f"smaller VLA model._"
-        )
-        return
-
-    # Source badge. The projection may already have dropped to 🟠 for a
-    # multi-camera what-if (vla_source_reason); an off-default operating rate is
-    # an additional what-if. Either → 🟠, prefer the projection's own reason.
-    if r["vla_source"] == "cross_class" and r.get("vla_source_reason"):
-        icon, label, tip = "🟠", "cross_class (what-if)", r["vla_source_reason"]
-    elif off_default and r["vla_source"] in ("measured", "calibrated"):
-        icon, label, tip = ("🟠", "cross_class (what-if)",
-                            "operating point moved off the measured default — "
-                            "no longer a calibrated projection")
-    else:
-        icon, label, tip = _VLA_SOURCE_BADGE.get(
-            r["vla_source"], ("", r.get("vla_source", "?"), ""))
-    st.caption(
-        f"{icon} **{label}** · {vla.display_name} · `{r['architecture']}` · "
-        f"exec dtype `{r.get('expert_dtype') or r['dtype']}` — {tip}"
-    )
-    # Camera + fleet configuration line.
-    _cam_desc = (f"{r['n_cameras']}-camera stitched panorama"
-                 if camera_mode == "stitched"
-                 else f"{r['n_cameras']} camera(s) native")
-    st.caption(
-        f"Config: {_cam_desc} · fleet of **{r['fleet_size']}** "
-        f"(`{r['mode']}`) · VLM {vlm_hz:.0f} Hz / action {action_hz:.0f} Hz"
-        + ("  ⚠ off-default" if off_default else "")
-    )
-    # Headline — MIRROR the vision pipeline's 4-metric format (Kyle 2026-06-06).
-    # VLA is meant to replace a traditional vision pipeline, so size it in the
-    # SAME terms: per-camera FPS / aggregate FPS / memory fit / DDR-BW-ratio-vs-
-    # Mid. These four tiles are now STABLE across every VLA model (no more
-    # topology-dependent third tile that swapped units per model). The
-    # control-loop Hz + architecture-specific breakdown — meaningful to robotics
-    # folks but confusing/meaningless to a vision reviewer — move to a single
-    # de-emphasized caption + an expander below.
-    _fleet = r["fleet_size"] > 1
-    _ncam = r["n_cameras"]
-    c1, c2, c3, c4 = st.columns(4)
-
-    _cam_fps = r.get("camera_fps")
-    c1.metric(
-        "Per-camera FPS",
-        f"{_cam_fps:.1f}" if _cam_fps is not None else "—",
-        delta="perception rate", delta_color="off",
-        help="Vision-encoder runs per second, per camera — how often this VLA "
-             "model perceives the scene. Directly comparable to a traditional "
-             "vision pipeline's FPS; VLA is far lower because it runs full "
-             "language + action reasoning on every frame, not just detection.",
-    )
-    _agg = r.get("aggregate_camera_fps")
-    c2.metric(
-        "Aggregate FPS",
-        f"{_agg:.0f}" if _agg is not None else "—",
-        delta=(f"× {_ncam} cam" + (f" × {r['fleet_size']} robots" if _fleet else "")),
-        delta_color="off",
-        help="Total frames/sec across all cameras (and fleet robots) sharing "
-             "this one NPU — the aggregate perception throughput.",
-    )
-    _fit = r.get("fits_in_memory")
-    _mem = r.get("fleet_memory_gb") if _fleet else r.get("dram_gb")
-    c3.metric(
-        "Memory fit" + (" (fleet)" if _fleet else ""),
-        "✓ fits" if _fit else ("✗ spills" if _fit is False else "—"),
-        delta=(f"{_mem:.1f} GB / {hw.mem_capacity_gb:.0f} GB"
-               if _mem is not None else None),
-        delta_color="off",
-        help=("Fleet residency = fleet_size × per-instance weights, all resident."
-              if _fleet else "Model weights + activations vs this tier's DRAM."),
-    )
-    _bw_ratio = (hw.effective_bandwidth_gbs / NPU_MID.effective_bandwidth_gbs
-                 if NPU_MID.effective_bandwidth_gbs else 1.0)
-    c4.metric(
-        "DDR bandwidth ratio",
-        f"{_bw_ratio:.2f}×",
-        delta="vs NPU Mid", delta_color="off",
-        help="This tier's effective DRAM bandwidth relative to NPU Mid — the "
-             "same hardware ratio the vision pipeline reports. VLA decode is "
-             "bandwidth-bound, so this is the lever on the achievable control rate.",
-    )
-
-    # VLA-specific depth — ONE de-emphasized caption + an expander, kept out of
-    # the headline so the 4 tiles stay simple and parallel to vision.
-    _ctrl = (f"🤖 `{r['architecture']}` · control loop **{r['action_hz']:.1f} Hz** "
-             f"({r['ms_per_action']:.0f} ms/action)")
-    if _fleet:
-        _ctrl += (f" · {r['aggregate_action_hz']:.0f} Hz aggregate "
-                  f"({r['fleet_size']} robots)")
-    st.caption(_ctrl)
-
-    with st.expander("ℹ️ Control-loop detail — architecture, latency breakdown, DDR demand"):
-        regime = r["regime"]
-        if regime.startswith("single_loop"):
+def _vla_breakdown(r):
+    """Topology-branched control-loop detail (ported from app.py::_render_vla).
+    Single-loop AR / dual-loop flow-matching / OFT parallel-chunk each get
+    architecture-specific latency math, then the shared DDR-demand line."""
+    regime = r["regime"]
+    if regime.startswith("single_loop"):
+        st.markdown(
+            f"**Single-loop autoregressive.** VLM forward "
+            f"**{r['vlm_forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} + prefill "
+            f"{r['llm_prefill_ms']:.1f}) + {r['n_action_tokens']} action tokens × "
+            f"{r['decode_ms_per_token']:.1f} ms AR decode. The AR decode is the hard "
+            f"bandwidth wall on edge — **High ≈ Mid** because both are decode-BW-bound.")
+    elif regime.startswith("dual_loop"):
+        st.markdown(
+            f"**Dual-loop flow-matching.** VLM backbone **{r['vlm_backbone_ms']:.1f} ms** "
+            f"once/chunk + {r['num_denoise_steps']}×{r['denoise_step_ms']:.1f} ms denoise "
+            f"(**{r['denoise_bottleneck']}**), amortized over {r['action_chunk_length']} "
+            f"actions. Fast-loop-only rate **{r['fast_loop_only_hz']:.0f} Hz**; chunk "
+            f"size is the amortization knob.")
+        if r.get("action_hz_optimized_floor"):
             st.markdown(
-                f"**Single-loop autoregressive.** VLM forward "
-                f"**{r['vlm_forward_ms']:.1f} ms** (vision {r['vision_ms']:.1f} + prefill "
-                f"{r['llm_prefill_ms']:.1f}) + {r['n_action_tokens']} action tokens × "
-                f"{r['decode_ms_per_token']:.1f} ms AR decode. The AR decode is the hard "
-                f"bandwidth wall on edge — **High ≈ Mid** because both are decode-BW-bound."
-            )
-        elif regime.startswith("dual_loop"):
-            st.markdown(
-                f"**Dual-loop flow-matching.** VLM backbone **{r['vlm_backbone_ms']:.1f} ms** "
-                f"once/chunk + {r['num_denoise_steps']}×{r['denoise_step_ms']:.1f} ms denoise "
-                f"(**{r['denoise_bottleneck']}**), amortized over {r['action_chunk_length']} "
-                f"actions. Fast-loop-only rate **{r['fast_loop_only_hz']:.0f} Hz**; chunk "
-                f"size is the amortization knob."
-            )
-            if r.get("action_hz_optimized_floor"):
-                st.markdown(
-                    f"⬆ **Optimized-kernel floor (headroom):** up to "
-                    f"{r['action_hz_optimized_floor']:.0f} Hz amortized / "
-                    f"{r['fast_loop_only_hz_optimized_floor']:.0f} Hz fast-loop with "
-                    f"CUDA-graphs/fusion/compile (the headline is the conservative eager number)."
-                )
-        elif regime.startswith("oft"):
-            st.markdown(
-                f"**OFT parallel-chunk.** One parallel forward **{r['forward_ms']:.1f} ms** "
-                f"(vision {r['vision_ms']:.1f} + LLM {r['llm_forward_ms']:.1f}) → "
-                f"{r['action_chunk_length']} actions in parallel. Prefill-shaped, "
-                f"compute-bound — **avoids the AR decode bandwidth-wall**, which is why OFT is fast."
-            )
-        _bw = r.get("ddr_bw_demand_gbs")
-        if _bw is not None:
-            _avail = r.get("ddr_bw_available_gbs", 0.0)
-            _frac = (_bw / _avail * 100) if _avail else 0.0
-            _flag = " ⚠ over budget" if _bw > _avail else ""
-            st.markdown(
-                f"🚌 **~{_bw:.0f} GB/s** average DDR bandwidth demand "
-                f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}) — a weight-streaming "
-                f"estimate. A fleet adds memory, not bandwidth."
-            )
-
-    if r.get("stitched_quality_caveat"):
-        st.warning(f"📐 {r['stitched_quality_caveat']}")
-
-    # Target (slider) vs projected achievable — the honest "can this tier keep
-    # up?" check. action_hz here is the desired operating rate; r['action_hz']
-    # is what the silicon sustains.
-    if action_hz > r["action_hz"] * 1.05:
-        st.caption(
-            f"⚠ Target action rate **{action_hz:.0f} Hz** exceeds the projected "
-            f"achievable **{r['action_hz']:.1f} Hz** on {hw.name} — the loop can't "
-            f"sustain the target here."
-        )
-
-    if vla.libero_success_pct is not None:
-        st.caption(f"LIBERO success (accuracy proxy): **{vla.libero_success_pct:.0f}%**")
-    with st.expander("ℹ️ Model notes + projection method"):
-        st.markdown(vla.notes)
+                f"⬆ **Optimized-kernel floor (headroom):** up to "
+                f"{r['action_hz_optimized_floor']:.0f} Hz amortized / "
+                f"{r['fast_loop_only_hz_optimized_floor']:.0f} Hz fast-loop with "
+                f"CUDA-graphs/fusion/compile (the headline is the conservative eager number).")
+    elif regime.startswith("oft"):
+        st.markdown(
+            f"**OFT parallel-chunk.** One parallel forward **{r['forward_ms']:.1f} ms** "
+            f"(vision {r['vision_ms']:.1f} + LLM {r['llm_forward_ms']:.1f}) → "
+            f"{r['action_chunk_length']} actions in parallel. Prefill-shaped, "
+            f"compute-bound — **avoids the AR decode bandwidth-wall**, which is why OFT is fast.")
+    _bw = r.get("ddr_bw_demand_gbs")
+    if _bw is not None:
+        _avail = r.get("ddr_bw_available_gbs", 0.0)
+        _frac = (_bw / _avail * 100) if _avail else 0.0
+        _flag = " ⚠ over budget" if _bw > _avail else ""
+        st.markdown(
+            f"🚌 **~{_bw:.0f} GB/s** average DDR bandwidth demand "
+            f"({_frac:.0f}% of {_avail:.0f} GB/s available{_flag}) — a weight-streaming "
+            f"estimate. A fleet adds memory, not bandwidth.")
 
 
-# ───────────────────────── Sidebar: hardware + workload ─────────────────────────
+# ── KPI tables (per-workload cross-tier + cross-config) + uber XLSX export.
+# Mirrors pai-sizer's restored KPI parity, generalized to 3 workloads. Each
+# builder returns a list[dict] that feeds BOTH st.dataframe and the XLSX writer.
+# Cross-tier tables span the 5-tier ladder (_TIER_MAP), matching the on-screen
+# per-tier bars. Source badges come straight off the projection results. ──
+_SRC_EMOJI = {"measured": "🟢", "measured_anchor": "🟢", "calibrated": "🔵",
+              "same_class_anchor": "🟡", "cross_class": "🟠"}
 
-with st.sidebar:
-    st.header("Edge NPU")
-    tier = st.selectbox(
-        "Tier preset",
-        options=("NPU i.MX 95 (ground truth)",
-                 "NPU Low-LP5-64bit", "NPU Low-LP5X",
-                 "NPU Mid", "NPU High",
-                 "RTX 5090 (reference, measured)",
-                 "Custom"),
-        index=4,  # lands on 'NPU High' — has FP support, so the default
-                  # (Skippy 7B v4 dense fp16) doesn't trip dtype-mismatch
-                  # on first load. Mirrors PAI sizer 5b6e49f rationale
-                  # (per [pai-sizer] 2026-05-14 16:35 first-render polish).
-        help="i.MX 95 = entry-tier NPU class (NXP eIQ Neutron, 32-bit LPDDR5 @ 6.4 GT/s, 25.6 GB/s, "
-             "2 TOPS INT8 dense silicon) with a real 2026-04 production measurement: yolov8n-seg INT8 "
-             "@ 1080p = 32.0 ms. Selecting this tier returns the measured number directly for "
-             "workloads where we have ground-truth data; other (pipeline, resolution) pairs fall "
-             "back to the regular BW projection. "
-             "Low-LP5-64bit = 64-bit LPDDR5 @ 6.4 GT/s (51.2 GB/s, 2× the i.MX 95 bandwidth on "
-             "the same INT8-only silicon class). "
-             "Low-LP5X = same 64-bit bus on LPDDR5X @ 8.4 GT/s (67.2 GB/s, 1.3× Low-LP5-64bit). "
-             "Mid = 128-bit LPDDR5X @ 8.4 GT/s, 200 TOPS INT8 (Keyhole shipping target — INT8-only silicon, no FP support). "
-             "High = 128-bit LPDDR5X @ 8.4 GT/s, FP-capable silicon (200 BF16 / 400 INT8 / 400 FP8 — "
-             "2× INT8 doubling on the same MAC hardware as the FP path). "
-             "Same memory class as Mid; differentiates on COMPUTE FAMILY (FP-capable vs Mid's INT8-only) "
-             "and CAPACITY (32 GB DRAM, 40 W). The inflection point where FP capability shows up. "
-             "Memory upgrades (LPDDR5T 11.2, LPDDR6 12/14) are available as overlays on either Mid or High. "
-             "RTX 5090 = the reference silicon every BW-scaling projection here is derived from "
-             "(512-bit GDDR7 @ 28 GT/s, 1792 GB/s). Blackwell-TRT 10.16 bake-off measurements "
-             "for 5 pipelines surface directly via the measured-silicon override. "
-             "Custom = roll your own. All presets assume 70% bandwidth efficiency.",
-        key="tier",
-    )
 
-    if tier == "Custom":
-        st.markdown("---")
-        st.caption("Custom NPU")
-        bus_width = st.select_slider(
-            "Memory bus width (bits)",
-            options=[64, 96, 128, 192, 256, 384, 512],
-            value=128,
-            key="custom_bus_width",
-        )
-        mem_type = st.selectbox("Memory type", options=MEMORY_TYPES, index=2,
-                                 key="custom_mem_type")
-        data_rate = st.slider("Data rate (GT/s)", min_value=2.0, max_value=32.0,
-                               value=8.4, step=0.1,
-                               key="custom_data_rate")
-        theoretical_bw = theoretical_bandwidth(bus_width, data_rate)
-        st.caption(f"→ theoretical BW: **{theoretical_bw:.1f} GB/s**")
-        bw_eff = st.slider("Bandwidth efficiency", 0.50, 0.95, 0.70, 0.01,
-                            help="Fraction of theoretical BW realized on real workloads. "
-                                 "Presets use 0.70 (matches the tier cards above).",
-                            key="custom_bw_eff")
-        # Both sliders share the same 50-1000 range so equal numeric values
-        # sit at equal horizontal positions. FP8 on Blackwell-class silicon
-        # is typically 2× BF16, but some NPUs are 1:1 or even missing FP8 —
-        # decouple the sliders so the user can model either.
-        tops_bf16 = st.slider("Peak BF16 TOPS", 50, 1000, 200, 10,
-                               key="custom_tops_bf16")
-        tops_fp8 = st.slider("Peak FP8 TOPS", 0, 1000, min(1000, int(tops_bf16 * 2)), 10,
-                              help="Set to 0 if silicon doesn't support FP8 natively. "
-                                   "Blackwell-class is typically 2× BF16.",
-                              key="custom_tops_fp8")
-        compute_eff = st.slider("Compute efficiency", 0.40, 0.85, 0.65, 0.01,
-                                 key="custom_compute_eff")
-        mem_cap = st.slider("DRAM capacity (GB)", 2, 64, 8, 1,
-                             key="custom_mem_cap")
-        tdp = st.slider("TDP (W)", 2, 150, 25, 1,
-                         key="custom_tdp")
+def _src(s):
+    return f"{_SRC_EMOJI.get(s, '')} {s}".strip() if s else "—"
 
-        hw = Hardware(
-            name="Custom NPU",
-            peak_tops_bf16=tops_bf16, peak_tops_int8=tops_fp8, peak_tops_fp8=tops_fp8,
-            mem_bandwidth_gbs=theoretical_bw, mem_capacity_gb=mem_cap,
-            mem_bus_width_bits=bus_width, mem_type=mem_type, mem_data_rate_gtps=data_rate,
-            compute_efficiency=compute_eff, bandwidth_efficiency=bw_eff,
-            tdp_watts=tdp,
-        )
-    else:
-        hw = TIERS[tier]
 
-        # ── Memory-type upgrade sub-selector for Mid + High ──────────────
-        # [backend] 2026-04-28: lets users preview LPDDR6 @ 12/14 GT/s on
-        # Mid and High without burning a top-level tier slot. Keeps the
-        # tier × precision × memory matrix tight. Other tiers (Neutron-
-        # class, LP5X, 5090) don't get the option — they're characterized
-        # by their specific memory generation, and 5090 is reference.
-        if tier in ("NPU Mid", "NPU High"):
-            from sizer.npu_model import MEMORY_UPGRADE_OPTIONS, hw_with_memory
-            stock_label = "Stock (no upgrade)"
-            mem_options = [(stock_label, hw.mem_type, hw.mem_data_rate_gtps)] + \
-                           MEMORY_UPGRADE_OPTIONS
-            mem_choice = st.selectbox(
-                "Memory upgrade",
-                options=[opt[0] for opt in mem_options],
-                index=0,
-                help=(
-                    "Preview an LPDDR6 swap on this tier. Holds 70% "
-                    "bandwidth efficiency uniformly (slightly conservative "
-                    "— LPDDR6 typically realizes 75-80% in practice per "
-                    "JEDEC). All other tier specs (TOPS, capacity, TDP) "
-                    "stay unchanged — this is a memory-only swap."
-                ),
-                key=f"mem_upgrade_{tier}",
-            )
-            chosen = next(opt for opt in mem_options if opt[0] == mem_choice)
-            if chosen[0] != stock_label:
-                # Memory swap requested — clone the tier with new memory.
-                # name_suffix surfaces in describe_hw() + Simulating line.
-                _suffix = f"{chosen[1]}-{chosen[2]:.0f}"
-                hw = hw_with_memory(hw, chosen[1], chosen[2], name_suffix=_suffix)
-                st.caption(
-                    f"⚡ Memory upgrade: **{chosen[1]} @ {chosen[2]:.0f} GT/s** → "
-                    f"**{hw.mem_bandwidth_gbs:.1f} GB/s** peak / "
-                    f"**{hw.effective_bandwidth_gbs:.1f} GB/s** effective "
-                    f"({hw.mem_bandwidth_gbs / TIERS[tier].mem_bandwidth_gbs:.2f}× "
-                    f"vs stock)"
-                )
+def _vision_cross_tier_rows(pk, res, compiler_quality, npu_share, n_cameras):
+    rows = []
+    for lbl, key in _TIER_MAP.items():
+        v = project_vision(PIPELINES[pk], TIERS[key], resolution=res, n_streams=n_cameras,
+                           compiler_quality_vs_trt=compiler_quality, npu_share=npu_share)
+        rows.append({
+            "Tier": lbl,
+            "Per-cam FPS": round(v.get("fps_per_stream", 0.0), 1),
+            "Aggregate FPS": round(v.get("total_fps", 0.0), 0),
+            "Per-frame ms": round(v.get("per_stream_ms", 0.0), 2),
+            "Regime": v.get("regime", "?"),
+            "Source": _src(v.get("edge_ms_source")),
+            "Fits": "✓" if v.get("fits_in_memory") else "✗",
+        })
+    return rows
 
-    # NPU precision-set what-if (ratchet ADR 017) is surfaced DOWN in the LLM
-    # section as a self-contained "what if this NPU supported FP8/FP4?" compare
-    # panel — control co-located with its payoff. It is deliberately NOT a
-    # sidebar control: a sidebar radio positing hypothetical FP-capable silicon
-    # read as confusing real-hardware config (Kyle 2026-06-05). The headline
-    # projection runs on the REAL stock tier; precision is explored as a what-if.
-    # `precision_base_hw` is the memory-applied tier the compare builds all three
-    # rungs from. `fp4_maturity` default is a no-op on the stock headline (it
-    # carries no npu_precision_set); the compare panel owns the live toggle.
-    precision_base_hw = hw
-    fp4_maturity = "mature"
 
-    # ── NPU_share selector (BW-contention third factor) ─────────────────
-    # Per [docs] 2026-04-29 14:38: the third factor in the BW decomposition
-    # `effective_NPU_BW = peak_DRAM_BW × NPU_share × kernel_util_factor`.
-    # Models SoC bus contention from display / camera / audio paths.
-    # Defaults: 5090 = 100% (dedicated VRAM), NPU tiers = 75% (typical).
-    # Affects BW-bound paths only — TTFT / compute floors unchanged.
-    _share_options = [
-        ("100% — Idle SoC, NPU has full memory bus", 1.0),
-        ("75% — Light system load (typical default)", 0.75),
-        ("50% — Moderate contention (display + camera + audio concurrent)", 0.5),
-        ("25% — Heavy contention (NPU starved)", 0.25),
-    ]
-    _share_default_value = hw.npu_share_default
-    _share_default_idx = next(
-        (i for i, (_lbl, v) in enumerate(_share_options) if abs(v - _share_default_value) < 1e-6),
-        1,  # fallback to 75% if hw default is something exotic
-    )
-    npu_share_choice = st.selectbox(
-        "BW available to NPU",
-        options=[lbl for lbl, _v in _share_options],
-        index=_share_default_idx,
-        help=(
-            "Fraction of the NPU's effective DRAM bandwidth available to "
-            "this workload. Models SoC bus contention — display, camera, "
-            "audio paths competing for the same memory bus on edge silicon. "
-            "Affects BW-bound paths (LLM decode tok/s, vision FPS when "
-            "BW-bound) but NOT compute-bound paths (LLM TTFT / prefill, "
-            "vision FPS when compute-bound) — TOPS doesn't share the "
-            "memory bus. 5090 defaults to 100% (dedicated VRAM); NPU tiers "
-            "default to 75% (typical SoC contention)."
-        ),
-        key=f"npu_share_{tier}",
-    )
-    npu_share = next(v for lbl, v in _share_options if lbl == npu_share_choice)
-    if npu_share != hw.npu_share_default:
-        st.caption(
-            f"⚙ NPU share: **{npu_share*100:.0f}%** "
-            f"(default for {hw.tier_family or 'this tier'}: "
-            f"{hw.npu_share_default*100:.0f}%)"
-        )
+def _vision_pipeline_rows(hw_, res):
+    # Reuse the live-app machinery; drop the embedded Hardware object column
+    # (un-serializable + redundant — the whole sheet is one tier).
+    return [{k: val for k, val in r.items() if k != "hw"}
+            for r in all_pipeline_kpi_rows(hw_, resolution=res, llm_enabled=False)]
 
-    st.caption(describe_hw(hw))
 
-    st.markdown("---")
-    st.header("Vision workload")
-    vision_enabled = st.toggle(
-        "Enable vision pipeline",
-        value=True,
-        help="When OFF, the sizer projects only LLM workload — useful for "
-             "modeling LLM-only edge devices (e.g. local AI assistant on an "
-             "NPU without a camera input). Defaults ON for backward compat.",
-        key="vision_enabled",
-    )
-    if not vision_enabled:
-        # Set defaults so downstream code that incidentally references these
-        # variables (CSV file_name, KPI helpers, capability caption) doesn't
-        # NameError. Display gating uses `vision_enabled` directly.
-        pipeline_key = "yolo_only_fp8"
-        pipeline = PIPELINES[pipeline_key]
-        resolution = "1080p"
-        n_streams = 1
-        compiler_quality = 1.0
+def _llm_cross_tier_rows(quant, workload, npu_share, alias):
+    rows = []
+    for lbl, key in _TIER_MAP.items():
+        hw_ = TIERS[key]
+        l = project_llm(hw_, quant, workload=workload, npu_share=npu_share, model_key=alias)
+        rows.append({
+            "Tier": lbl,
+            "Source": _src(l.get("llm_source")),
+            "DDR type": hw_.mem_type,
+            "Usable BW GB/s": round(hw_.effective_bandwidth_gbs, 1),
+            "Decode tok/s": round(l["decode_tok_s"], 1),
+            "Prefill ms": round(l["ttft_1k_sec"] * 1000, 0),
+            "Short ans s": round(l["short_answer_sec"], 1),
+            "RAG s": round(l["rag_total_sec"], 0),
+            "Fits": "✓" if l["fits_in_memory"] else "✗",
+        })
+    return rows
 
-    # Pipeline-track invariant runs unconditionally — same loud-fail-on-
-    # orphan check whether vision is currently enabled or not. Catches
-    # PIPELINES/PIPELINE_TRACKS drift the moment app boots, not the moment
-    # someone toggles vision on.
-    PIPELINE_TRACKS = [
-        ("SAM 3 lineage",
-         ["sam3_bf16", "essmall_fp8",
-          "efficientsam3_es_ev_s_bf16", "efficientsam3p1_es_ev_s_bf16"],
-         "sam3_bf16"),
-        ("One-model open-vocab",
-         ["yoloe26_s_pf_fp16", "yoloe26_s_pf_trt_fp8"],
-         "yoloe26_s_pf_trt_fp8"),
-        ("Default (Hybrid V2 → TRT)",
-         ["hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
-          "trt_fp8_every_frame", "trt_fp8_1hz_clip", "yolo_only_fp8"],
-         "trt_fp8_1hz_clip"),
-        ("YOLOv8n nano",
-         ["yolov8n_trt_fp8_every_frame", "yolov8n_trt_fp8_1hz_clip",
-          "yolov8n_only_fp8"],
-         "yolov8n_trt_fp8_1hz_clip"),
-        ("INT8 vendor-comparison",
-         ["yolo11s_trt_int8", "yolov8n_trt_int8_coco128", "resnet50v1_int8_224",
-          # 4-bit-weight variants added 2026-05-14 to surface the
-          # spec's resnet50_w4 / yolov8n_w4 anchor cells.
-          "yolov8n_trt_int4_coco128", "resnet50v1_int4_224"],
-         "yolov8n_trt_int8_coco128"),
-        ("ViT alternatives (what-if)",
-         ["rtdetr_l_pytorch_fp16", "detr_resnet50_pytorch_fp16",
-          "owlv2_base_pytorch_fp16", "grounding_dino_tiny_pytorch_fp32"],
-         "owlv2_base_pytorch_fp16"),
-    ]
-    _TRACK_LABELS = [t[0] for t in PIPELINE_TRACKS]
-    _DEFAULT_TRACK_INDEX = 2  # "Default (Hybrid V2 → TRT)"
 
-    _track_pipelines = {k for _, keys, _ in PIPELINE_TRACKS for k in keys}
-    _orphaned = set(PIPELINES.keys()) - _track_pipelines
-    _unknown  = _track_pipelines - set(PIPELINES.keys())
-    if _orphaned:
-        raise RuntimeError(
-            f"PIPELINES keys orphaned from PIPELINE_TRACKS (won't appear in "
-            f"dropdown): {sorted(_orphaned)}. Add them to a track in "
-            f"app.py::PIPELINE_TRACKS."
-        )
-    if _unknown:
-        raise RuntimeError(
-            f"PIPELINE_TRACKS references unknown pipeline keys: "
-            f"{sorted(_unknown)}. Typo, or removed from PIPELINES?"
-        )
+def _llm_cross_model_rows(hw_, quant, workload, npu_share):
+    rows = []
+    for mk, mm in LLM_MODELS.items():
+        a = mm.measurement_alias or mk
+        l = project_llm(hw_, quant, workload=workload, npu_share=npu_share, model_key=a)
+        rows.append({
+            "Model": mm.label.split(" (")[0],
+            "Arch": f"{mm.total_params_b:.0f}B/{mm.active_params_b:.0f}B",
+            "Decode tok/s": round(l["decode_tok_s"], 1),
+            "Short ans s": round(l["short_answer_sec"], 1),
+            "RAG s": round(l["rag_total_sec"], 0),
+            "GGUF GB": round(l["gguf_size_gb"], 1),
+            "Source": _src(l.get("llm_source")),
+        })
+    return rows
 
-    if vision_enabled:
-        # Pipeline is picked in two steps: a radio for the narrative track,
-        # then a selectbox scoped to that track. Each track has its own
-        # selectbox state (via key=f"pipeline__{track_label}") so switching
-        # tracks and coming back remembers the last pick for that track;
-        # first visit to a track shows that track's canonical default.
-        track_label = st.radio(
-            "Pipeline track",
-            options=_TRACK_LABELS,
-            index=_DEFAULT_TRACK_INDEX,
-            help="Pick a narrative track, then choose a specific pipeline within it. "
-                 "Tracks match the deck's optimization journey: where we started (SAM 3), "
-                 "one-model open-vocab alternatives, the Hybrid V2 → TRT default path, "
-                 "the yolov8n nano cross-variant, and INT8 vendor-comparison points.",
-            key="pipeline_track",
-        )
-        _, _track_keys, _canonical = next(
-            t for t in PIPELINE_TRACKS if t[0] == track_label
-        )
 
-        pipeline_key = st.selectbox(
-            "Pipeline",
-            options=_track_keys,
-            format_func=lambda k: PIPELINES[k].label,
-            index=_track_keys.index(_canonical),
-            key=f"pipeline__{track_label}",
-        )
-        pipeline = PIPELINES[pipeline_key]
-        st.caption(pipeline.description)
+def _vla_cross_tier_rows(vk, npu_share, n_cameras):
+    rows = []
+    for lbl, key in _TIER_MAP.items():
+        w = project_vla(VLA_MODELS[vk], TIERS[key], npu_share=npu_share, n_cameras=n_cameras)
+        runs = w.get("runs")
+        rows.append({
+            "Tier": lbl,
+            "Per-cam FPS": round(w["camera_fps"], 1) if runs else None,
+            "Aggregate FPS": round(w["aggregate_camera_fps"], 0) if runs else None,
+            "Control Hz": round(w["action_hz"], 1) if runs else None,
+            "Source": _src(w.get("vla_source")) if runs
+                      else ("deferred" if w.get("deferred") else "won't run"),
+            "Fits": ("✓" if w["fits_in_memory"] else "✗") if runs else "—",
+            "Regime": w.get("regime", "—") if runs else "—",
+        })
+    return rows
 
-        resolution = st.selectbox("Per-stream resolution", ("720p", "1080p", "4K"), index=1,
-                                   key="resolution")
-        n_streams = st.slider("Concurrent streams", 1, 16, 1, 1,
-                               help="Each stream processes its own video source. YOLO batching "
-                                    "kicks in automatically (batch = N_streams).",
-                               key="n_streams")
 
-        compiler_quality = st.slider(
-            "Edge compiler quality vs TensorRT", 0.50, 1.00, 1.00, 0.05,
-            help="5090 measurements came out of NVIDIA TensorRT — a best-in-class compiler. "
-                 "Vendor edge-NPU compilers (SNPE, NeuroPilot, OpenVINO-NPU, etc.) typically "
-                 "extract a fraction of the same theoretical peak. **1.00 = parity** (projections "
-                 "unchanged, optimistic). **0.75 = realistic** (edge compiler 25% slower per kernel). "
-                 "**0.50 = pessimistic** (half as good — first-gen NPU SDK). Applied as a post-multiplier "
-                 "on every projected vision latency path.",
-            key="compiler_quality",
-        )
-        if compiler_quality < 1.00:
-            st.caption(f"⚠️ Applying {(1 - compiler_quality) * 100:.0f}% compiler-quality haircut "
-                        f"to projected vision FPS (LLM tok/s unaffected — those are vendor-measured).")
+def _vla_cross_model_rows(hw_, npu_share, n_cameras):
+    rows = []
+    for mk, mm in VLA_MODELS.items():
+        w = project_vla(mm, hw_, npu_share=npu_share, n_cameras=n_cameras)
+        runs = w.get("runs")
+        rows.append({
+            "Model": mm.display_name,
+            "Arch": w.get("architecture", "—") if runs else "—",
+            "Control Hz": round(w["action_hz"], 1) if runs else None,
+            "Per-cam FPS": round(w["camera_fps"], 1) if runs else None,
+            "DRAM GB": round(w["dram_gb"], 1) if runs else None,
+            "Fits": ("✓" if w["fits_in_memory"] else "✗") if runs else "—",
+            "Source": _src(w.get("vla_source")) if runs
+                      else ("deferred" if w.get("deferred") else "won't run"),
+        })
+    return rows
 
-        with st.expander("ℹ️ CPU preprocessing cost (not in these FPS numbers)"):
-            st.markdown(
-                "Every YOLO frame needs a **640×640 letterbox resize** before it hits "
-                "the TRT engine. That resize runs on the **host CPU** (OpenCV "
-                "`cv2.resize` bilinear), not on the GPU/NPU — and it's excluded from "
-                "the engine ms/frame numbers here, the same way it's excluded from the "
-                "5090 bake-off timings.\n\n"
-                "**Measured** (5090 host, i9-14900KF, single-thread, N=500):\n"
-                "- 720p → 640×640: **0.17 ms/frame**\n"
-                "- 1080p → 640×640: **0.32 ms/frame**\n"
-                "- 4K → 640×640: **0.33 ms/frame**\n\n"
-                "That's **~0.5–1% of one CPU core at 30 fps**. Flat across source "
-                "resolutions because the 640×640 output dominates cost.\n\n"
-                "**Edge ARM extrapolation** (Cortex-A55 ≈ 10× slower single-thread): "
-                "~**2–3 ms/frame**, ~**6–10% of one edge core at 30 fps**.\n\n"
-                "**The caveat that matters:** most edge SoCs move this off-CPU via a "
-                "fixed-function ISP, 2D GPU, or video-decoder output scaler "
-                "(Qualcomm, MediaTek, NXP i.MX 95, Ambarella, Hailo all ship one). "
-                "Pure-NPU boards without such a block (e.g., Google Coral) pay the "
-                "full CPU cost."
-            )
-    else:
-        st.caption(
-            "🚫 Vision off — sizing only the LLM workload. Toggle on to "
-            "include camera-stream pipelines."
-        )
 
-    st.markdown("---")
-    st.header("LLM workload")
-    llm_enabled = st.toggle("Enable generative LLM",
-                             value=False,
-                             help="Qwen3-30B-A3B MoE (3B active / 30B total). "
-                                  "Models LLM workload alongside vision (or alone, "
-                                  "with vision disabled).",
-                             key="llm_enabled")
-    if llm_enabled:
-        # Model selection — categorized by role (PROD / FT / BASE / PERF)
-        # with compatibility-aware sort. Mirrors PAI sizer's _model_role +
-        # _ROLE_PRIORITY pattern per Kyle 2026-05-16 + [pai-sizer] 20:02
-        # confirmation. Same icon vocabulary across both apps:
-        #   🚀 PROD = production reference (Skippy 7B v4)
-        #   🔬 FT   = Skippy fine-tune experiment (skippy_* keys)
-        #   📚 BASE = stock public base model
-        #   ⚙️ PERF = perf-reference variant (anchor-reachability — pass_rate=None)
-        #   🔴      = incompatible with current NPU tier (sinks to bottom)
-        def _model_role(k: str) -> tuple[str, str]:
-            if k == PRODUCTION_REFERENCE_KEY:
-                return "PROD", "🚀"
-            m = LLM_MODELS[k]
-            if m.pass_rate is None:
-                # Anchor-reachability perf-reference variants from
-                # 2026-05-14 (qwen3_30b_a3b_moe_fp, qwen25_*_dense_int8)
-                # — same weights as stock, alternate compute_dtype.
-                return "PERF", "⚙️"
-            if k.startswith("skippy_"):
-                return "FT", "🔬"
-            return "BASE", "📚"
+def _kpi_xlsx(sheets):
+    """One workbook, one sheet per (workload, view). sheets = {name: list[dict]}."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
+        for name, rws in sheets.items():
+            pd.DataFrame(rws).to_excel(xw, sheet_name=name[:31], index=False)
+    return buf.getvalue()
 
-        def _model_compatible(k: str) -> bool:
-            return capability_level(
-                hw, getattr(LLM_MODELS[k], "compute_dtype", "int8")
-            ) != "unsupported"
 
-        _ROLE_PRIORITY = {"PROD": 0, "FT": 1, "BASE": 2, "PERF": 3}
-        _original_index = {k: i for i, k in enumerate(LLM_MODELS.keys())}
-        # Sort: compatible-first (incompatibles sink to bottom with 🔴),
-        # then by role priority (PROD → FT → BASE → PERF), then by
-        # original dict-order (preserves the curated narrative within
-        # each (compat, role) bucket).
-        llm_model_keys = sorted(
-            LLM_MODELS.keys(),
-            key=lambda k: (
-                0 if _model_compatible(k) else 1,
-                _ROLE_PRIORITY[_model_role(k)[0]],
-                _original_index[k],
-            ),
-        )
+def _tier_slug(name):
+    return "".join(c if c.isalnum() else "_" for c in name).strip("_").lower()
 
-        def _format_model(k: str) -> str:
-            role, badge = _model_role(k)
-            compat_prefix = "" if _model_compatible(k) else "🔴 "
-            return f"{compat_prefix}{badge} {role} · {LLM_MODELS[k].label}"
 
-        # Default selection: production model (still SKIPPY_7B_V4). On
-        # NPU High (default tier), production is compatible and lands at
-        # the top of the sorted list. On Mid (INT8-only), production
-        # sinks to the incompatible group — selectbox sticky-state keeps
-        # whatever was last selected; the 🔴 prefix surfaces the mismatch
-        # at model-pick time, and the existing dtype-mismatch banner +
-        # workload-selectbox-disabled gate handle the downstream cascade.
-        llm_model_key = st.selectbox(
-            "LLM model",
-            options=llm_model_keys,
-            format_func=_format_model,
-            index=llm_model_keys.index(DEFAULT_LLM_MODEL_KEY),
-            help="Badges: 🚀 PROD = current production model (Skippy 7B "
-                 "v4 dense). 🔬 FT = Skippy fine-tune experiment "
-                 "(validated or cautionary; see Accuracy tab). 📚 BASE = "
-                 "stock public base model (apples-to-apples comparison "
-                 "anchor). ⚙️ PERF = perf-reference variant — same "
-                 "weights as the underlying stock, alternate "
-                 "compute_dtype routing to unlock anchor-secret cells "
-                 "(no separate eval; for sizing comparisons only). 🔴 "
-                 "prefix = this model's compute precision can't execute "
-                 "on the currently-selected NPU Tier (e.g. fp16 models "
-                 "on NPU Mid's INT8-only silicon); incompatible models "
-                 "are sorted to the bottom.",
-            key="llm_model_key",
-        )
-        # Compact visible legend — Streamlit selectbox doesn't support
-        # per-option tooltips, so the legend surfaces what the icons mean
-        # without requiring a hover on the ? icon. Mirrors PAI sizer's
-        # caption verbatim for cross-app consistency.
-        st.caption(
-            "🚀 production · 🔬 fine-tune · 📚 stock base · "
-            "⚙️ perf reference · 🔴 won't run on this NPU tier"
-        )
-        _model = LLM_MODELS[llm_model_key]
-        _production_model = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
-        _delta_vs_prod = accuracy_delta_pp(_model, _production_model)
-        _is_production = (llm_model_key == PRODUCTION_REFERENCE_KEY)
-        _delta_sign = "+" if (_delta_vs_prod is not None and _delta_vs_prod >= 0) else ""
-        # Pre-compute the dtype-mismatch state INLINE in the sidebar so we
-        # can gray out downstream LLM-config widgets (workload pattern in
-        # particular) when the selected model's compute_dtype is not
-        # supported on the current tier — e.g. fp16 dense Q4 on Mid INT8-
-        # only silicon. The full dtype-mismatch gate + red banner still
-        # runs in the main area (line ~680); this just makes the sidebar
-        # widgets visually communicate "no-op on this tier" instead of
-        # appearing interactive while having no effect on the rendered
-        # output. Per Kyle 2026-05-12.
-        _sidebar_dtype_supported = (
-            capability_level(hw, getattr(_model, "compute_dtype", "int8"))
-            != "unsupported"
-        )
-        if _model.pass_rate is None:
-            # Perf-comparison-only entries (e.g. Qwen 2.5 7B / 32B dense)
-            # — no Skippy v2 prompt-set evaluation. Surface that explicitly.
-            st.caption(
-                f"_Performance-comparison reference — no Skippy v2 prompt-set evaluation._"
-            )
-        elif _is_production:
-            st.caption(
-                f"**{_model.pass_rate*100:.1f}%** pass rate "
-                f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
-                f" · production reference"
-            )
+# ───────────────────────── TOP CONTROL STRIP ─────────────────────────
+st.markdown("### 🎯 keyhole-sizer  ·  &nbsp;_horizontal-layout prototype_", unsafe_allow_html=True)
+
+with st.container(border=True):
+    # ── Row 1: the frequently-touched controls. All three are LABELED widgets,
+    # so their label-tops line up on one baseline (NPU tier ↔ Workloads ↔
+    # Cameras). Workloads sits immediately right of the tier and carries an emoji
+    # so it reads as the primary "what am I sizing" control; Cameras hugs it. ──
+    r1 = st.columns([2.4, 1.3, 1.9, 3.4])
+    with r1[0]:
+        tier_label = st.segmented_control(
+            "NPU tier", options=list(_TIER_MAP), default="High", key="p_tier",
+            help="Silicon target — horizontal pills, not a sidebar dropdown.",
+        ) or "High"
+    base_tier = tier_label
+    hw = TIERS[_TIER_MAP[tier_label]]
+
+    with r1[1]:
+        workloads = st.pills(
+            "🧩 Workloads", options=["Vision", "LLM", "VLA"],
+            selection_mode="multi", default=["Vision"], key="p_workloads",
+        ) or []
+    with r1[2]:
+        n_cameras = st.number_input(
+            "📷 Choose # of cameras", 1, 8, 1, key="p_ncam", width=160,
+            help="Number of camera feeds the NPU drives in parallel.")
+
+    # ── Row 2: the tuning knobs. All three are POPOVERS, so their buttons share
+    # one baseline (this is what fixes the Settings-vs-Cameras misalignment — the
+    # old layout mixed a label-less popover into a row of labeled inputs). ──
+    r2 = st.columns([1.1, 1.1, 1.1, 5.7])
+    with r2[0]:
+        if tier_label in ("Mid", "High"):
+            with st.popover("Memory ▾", use_container_width=True):
+                opts = ["Stock"] + [o[0] for o in MEMORY_UPGRADE_OPTIONS]
+                mc = st.radio("Memory upgrade", opts, index=0, key="p_mem")
+                if mc != "Stock":
+                    o = next(o for o in MEMORY_UPGRADE_OPTIONS if o[0] == mc)
+                    hw = hw_with_memory(hw, o[1], o[2], name_suffix=f"{o[1]}-{o[2]:.0f}")
         else:
-            st.caption(
-                f"**{_model.pass_rate*100:.1f}%** pass rate "
-                f"({_model.pass_n_passes}/{_model.pass_n_total}, RAG on, v2 prompt set) "
-                f" · {_delta_sign}{_delta_vs_prod:.1f}pp vs production "
-                f"({_production_model.label.split(' (')[0]})"
-            )
-        # Per-model BW-scaling note. Only fires when scaling actually
-        # changes numbers (perf_scale_factor != 1.0 — i.e. dense entry,
-        # since MoE entries share the perf-reference architecture).
-        # Headline tiles are NOW accurate for the selected model — same
-        # first-order BW-bound math the rest of the sizer uses.
-        _scale = perf_scale_factor(_model)
-        if _scale != 1.0:
-            _ref = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
-            st.caption(
-                f"ℹ️ Headline tok/s and TTFT scaled to this model's "
-                f"BW-per-token: ~**{_model.decode_bw_per_token_gb:.1f} GB** "
-                f"read per decode token (vs **{_ref.decode_bw_per_token_gb:.1f} "
-                f"GB** for the MoE entries — {_model.total_params_b:.0f}B dense "
-                f"reads the full weight set every token, while MoE only reads "
-                f"the routed experts). Tier projections shown above reflect "
-                f"this {1/_scale:.1f}× higher per-token BW load."
-            )
-        # 📊 Accuracy details + 📉 Precision quality reference moved OUT
-        # of the sidebar on 2026-05-11 — the sidebar's ~200px column was
-        # mangling tables + long verbatim quotes (especially after the
-        # Finding 4 methodology surface landed; markdown tables don't fit
-        # at 200px). Both expanders now live in the main area, rendered
-        # under `if llm_enabled:` right after the LLM source banner +
-        # capability caption. Search for `with st.expander("📊 Accuracy`
-        # to find them.
+            st.popover("Memory ▾", use_container_width=True, disabled=True,
+                       help="Memory upgrades apply to Mid / High only.")
 
-        quant = st.selectbox("Qwen3 quantization",
-                              ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
-                              key="llm_quant")
-        # When dtype-mismatch is in play (e.g. fp16 dense model on Mid
-        # INT8-only silicon), the LLM tile + perf chart won't render at
-        # all — workload-pattern selection has no visible effect. Disable
-        # the selectbox in that case so the UI signals "no-op on this
-        # tier" instead of appearing interactive. Per Kyle 2026-05-12
-        # (option 1 of the dtype-mismatch UX clarity options).
-        _wl_help_base = (
-            "Real-world workload categories measured on Skippy production "
-            "(n=1-5 per category). Decode tok/s spans 3.6-222 across "
-            "categories — pick the one your deployment will actually see."
-        )
-        _wl_help_disabled_suffix = (
-            f"\n\n⚠ DISABLED — {_model.label.split(' (')[0]} requires "
-            f"{getattr(_model, 'compute_dtype', 'int8').upper()} tensor "
-            f"support, but {hw.name}'s silicon doesn't provide it. The "
-            f"LLM tile is suppressed (see red banner in main area). "
-            f"Pick NPU High / RTX 5090 for FP-capable silicon, or pick "
-            f"an INT8-native MoE model (Skippy MoE / Thinking) to "
-            f"re-enable this control."
-        )
-        llm_workload = st.selectbox(
-            "LLM workload pattern",
-            options=list(WORKLOAD_CATEGORIES.keys()),
-            format_func=lambda k: WORKLOAD_CATEGORIES[k]["label"],
-            index=0,
-            help=(_wl_help_base if _sidebar_dtype_supported
-                  else _wl_help_base + _wl_help_disabled_suffix),
-            key="llm_workload",
-            disabled=not _sidebar_dtype_supported,
-        )
-        st.caption(WORKLOAD_CATEGORIES[llm_workload]["description"])
+    with r2[1]:
+        with st.popover("BW share ▾", use_container_width=True):
+            share_label = st.segmented_control(
+                "NPU BW share", options=list(_SHARE_MAP), default="75%", key="p_share",
+            ) or "75%"
+    npu_share = _SHARE_MAP[share_label]
 
-        # "About these workload patterns" content moved OUT of the sidebar
-        # on 2026-05-11 (option-B follow-up) into a "📊 Performance details"
-        # tab in the main area. Same readability rationale as the Accuracy
-        # + Precision moves: tables + per-category bullets need full main-
-        # pane width. Search for `_tab_perf` in the main-area tabs widget.
-        queries_per_min = st.slider("LLM queries per minute", 0.0, 60.0, 2.0, 0.1,
-                                     key="llm_queries_per_min")
-        answer_kind = st.radio("Typical answer length",
-                                ("short", "rag"),
-                                index=0,
-                                format_func=lambda k: {
-                                    "short": "Short (~200 tokens)",
-                                    "rag":   "RAG (8K prompt + 2K response)"}[k],
-                                horizontal=True,
-                                key="llm_answer_kind")
-    else:
-        quant = "Q4_K_M"
-        llm_workload = "plain_chat"
-        queries_per_min = 0.0
-        answer_kind = "short"
-        llm_model_key = DEFAULT_LLM_MODEL_KEY
+    # ⚙ Settings popover — the "rarely touched power controls" home (Kyle's call:
+    # a settings button instead of a sidebar). Custom NPU builder + global knobs.
+    with r2[2]:
+        with st.popover("⚙ Settings", use_container_width=True):
+            use_custom = st.toggle("Use a custom NPU (override tier)", key="p_custom_on")
+            if use_custom:
+                c_bus = st.select_slider("Bus width (bits)",
+                                         [64, 96, 128, 192, 256, 384, 512], 128, key="p_c_bus")
+                c_rate = st.slider("Data rate (GT/s)", 2.0, 32.0, 8.4, 0.1, key="p_c_rate")
+                c_tops = st.slider("INT8 TOPS", 50, 1000, 200, 10, key="p_c_tops")
+                c_cap = st.slider("DRAM (GB)", 2, 64, 16, 1, key="p_c_cap")
+                c_tdp = st.slider("TDP (W)", 2, 150, 25, 1, key="p_c_tdp")
+                c_bw = theoretical_bandwidth(c_bus, c_rate)
+                hw = Hardware(
+                    name="Custom NPU", peak_tops_bf16=c_tops, peak_tops_int8=c_tops,
+                    peak_tops_fp8=c_tops, mem_bandwidth_gbs=c_bw, mem_capacity_gb=c_cap,
+                    mem_bus_width_bits=c_bus, mem_type="LPDDR5X", mem_data_rate_gtps=c_rate,
+                    compute_efficiency=0.65, bandwidth_efficiency=0.70, tdp_watts=c_tdp,
+                )
+                base_tier = None
+            st.divider()
+            compiler_quality = st.slider("Vision compiler quality", 0.5, 1.0, 1.0, 0.01,
+                                         key="p_cq", help="Haircut vs TRT-ideal kernels.")
+            show_kpis = st.toggle("Show KPI table onscreen", value=True, key="p_kpi_on")
 
-    st.markdown("---")
-    st.header("VLA workload (robot control)")
-    vla_enabled = st.toggle(
-        "Enable VLA (Vision-Language-Action)",
-        value=False,
-        help="Project a robot manipulation control loop (vision → language → "
-             "action) on the selected NPU. Independent of the video+LLM platform "
-             "budget — VLAs are a distinct robotics workload. Three action-"
-             "generation topologies: single-loop autoregressive, OFT parallel-"
-             "chunk, and dual-loop flow-matching.",
-        key="vla_enabled",
-    )
-    if vla_enabled:
-        # Narrative tracks (intentionally overlap — same model can appear in
-        # several). Pick a track, then a model within it. Mirrors the vision
-        # track→pipeline picker. VLA_TRACKS key validity is asserted at import
-        # in vla_models.py, so no orphan check needed here.
-        _VLA_TRACK_LABELS = [
-            ("Single-loop autoregressive", "autoregressive"),
-            ("Dual-loop / cached",         "dual_loop"),
-            ("Integer-friendly",           "integer_friendly"),
-            ("FP-required (flow-matching)", "fp_required"),
-        ]
-        _vla_track_label = st.radio(
-            "VLA track",
-            options=[t[0] for t in _VLA_TRACK_LABELS],
-            index=0,
-            help="Narrative grouping; tracks overlap intentionally. The 5 "
-                 "measured models span single-loop AR (BW-walled on edge), OFT "
-                 "parallel-chunk (compute-bound, runs on INT8-only tiers), and "
-                 "dual-loop flow-matching (FP-required head, chunk-amortized).",
-            key="vla_track",
-        )
-        _vla_track_key = next(
-            k for lbl, k in _VLA_TRACK_LABELS if lbl == _vla_track_label)
-        _vla_keys = VLA_TRACKS[_vla_track_key]
-        vla_model_key = st.selectbox(
-            "VLA model",
-            options=_vla_keys,
-            format_func=lambda k: VLA_MODELS[k].display_name,
-            key=f"vla_model__{_vla_track_key}",
-        )
-        vla_model = VLA_MODELS[vla_model_key]
-        st.caption(
-            f"{vla_model.source_paper} · `{vla_model.architecture}`"
-            + (f" · LIBERO {vla_model.libero_success_pct:.0f}%"
-               if vla_model.libero_success_pct is not None else "")
-        )
+st.caption(describe_hw(hw))
+st.divider()
 
-        # Operating-rate sliders. Locked (caption only) when the catalog marks
-        # the model architecturally fixed-rate (min==max==default); adjustable
-        # for dual-loop / cached models that have real scheduling freedom.
-        # Moving either off-default flips the projection badge to 🟠 (what-if) —
-        # the calibrated number anchors to the measured default operating point.
-        vla_vlm_hz, _vlm_off = _vla_rate_control(
-            "VLM rate", vla_model.vlm_hz_min, vla_model.vlm_hz_max,
-            vla_model.default_vlm_hz, f"vla_vlm_hz__{vla_model_key}",
-            "How often the vision-language backbone re-perceives. Fixed for "
-            "single-loop/OFT models; a scheduling knob for dual-loop (VLM at a "
-            "low rate, action expert faster).",
-        )
-        vla_action_hz, _act_off = _vla_rate_control(
-            "Action rate", vla_model.action_hz_min, vla_model.action_hz_max,
-            vla_model.default_action_hz, f"vla_action_hz__{vla_model_key}",
-            "Target control rate (actions/sec). The main-area projection shows "
-            "whether the selected tier can sustain it.",
-        )
-        vla_off_default = _vlm_off or _act_off
+if not workloads:
+    st.info("Pick one or more workloads in the strip above.")
 
-        # ── Phase 3c: multi-camera + fleet (the three measured cost shapes) ──
-        st.markdown("**Cameras & fleet**")
-        vla_camera_mode = st.radio(
-            "Camera config",
-            options=["native", "stitched"],
-            index=0,
-            format_func=lambda m: {"native": "Native feeds",
-                                   "stitched": "Stitched panorama"}[m],
-            horizontal=True,
-            help="Native = N separate camera feeds (vision — and for π0.5 also "
-                 "LLM prefill — scale with N; capped at the model's trained max). "
-                 "Stitched = N cameras combined into ONE downscaled panorama: "
-                 "flat compute (measured on OpenVLA) but resolution-per-camera "
-                 "degrades (out-of-distribution).",
-            key=f"vla_camera_mode__{vla_model_key}",
-        )
-        if vla_camera_mode == "stitched":
-            vla_n_cameras = st.slider(
-                "Cameras (stitched into one panorama)", 1, 6,
-                max(vla_model.measured_n_cameras, 1),
-                help="Stitched is flat-cost regardless of N — they share one "
-                     "downscaled input tensor. The quality caveat is in the projection.",
-                key=f"vla_ncam_stitch__{vla_model_key}")
-        elif vla_model.max_cameras_native > 1:
-            vla_n_cameras = st.slider(
-                "Cameras (native feeds)", 1, vla_model.max_cameras_native,
-                vla_model.measured_n_cameras,
-                help=f"{vla_model.display_name.split(' (')[0]} natively supports up "
-                     f"to {vla_model.max_cameras_native}. Measured at "
-                     f"{vla_model.measured_n_cameras} → other counts are 🟠 linear-assumed.",
-                key=f"vla_ncam_nat__{vla_model_key}")
-        else:
-            vla_n_cameras = 1
-            st.caption(
-                f"Native cameras: **1** — {vla_model.display_name.split(' (')[0]} "
-                f"is single-camera. Switch to *Stitched* for a multi-camera panorama.")
-        vla_fleet_size = st.slider(
-            "Fleet size (robots / instances)", 1, 8, 1,
-            help="N independent VLA instances time-sharing this NPU (a robot "
-                 "fleet, or multi-arm). Per-robot rate = single / N; memory = "
-                 "N × per-instance (overflow → won't fit).",
-            key=f"vla_fleet__{vla_model_key}",
-        )
-    else:
-        vla_model_key = None
-        vla_model = None
-        vla_vlm_hz = vla_action_hz = None
-        vla_off_default = False
-        vla_n_cameras = None
-        vla_fleet_size = 1
-        vla_camera_mode = "native"
+# ───────────────────────── VISION ─────────────────────────
+if "Vision" in workloads:
+    head, picker, _sp = st.columns([1.4, 0.9, 7.7])  # picker hugs the section name
+    head.markdown("#### 📹 Vision pipeline")
+    with picker:
+        with st.popover("Pipeline ▾", use_container_width=True, key="pop_pipe"):
+            # Two-step pick: narrative track radio → track-scoped selectbox
+            # (each track remembers its own pick via key=f"p_pipe__{track}").
+            track_label = st.radio("Pipeline track", [t[0] for t in PIPELINE_TRACKS],
+                                   index=_DEFAULT_TRACK_INDEX, key="p_track")
+            _, _tkeys, _canon = next(t for t in PIPELINE_TRACKS if t[0] == track_label)
+            st.selectbox("Pipeline", _tkeys, index=_tkeys.index(_canon),
+                         format_func=lambda k: PIPELINES[k].label,
+                         key=f"p_pipe__{track_label}")
+            res = st.segmented_control("Resolution", ["720p", "1080p", "4K"],
+                                       default="1080p", key="p_res") or "1080p"
+    track_label = st.session_state.get("p_track", PIPELINE_TRACKS[_DEFAULT_TRACK_INDEX][0])
+    _, _tkeys, _canon = next(t for t in PIPELINE_TRACKS if t[0] == track_label)
+    pk = st.session_state.get(f"p_pipe__{track_label}", _canon)
+    res = st.session_state.get("p_res", "1080p")
+    vr = project_vision(PIPELINES[pk], hw, resolution=res, n_streams=n_cameras,
+                        compiler_quality_vs_trt=compiler_quality, npu_share=npu_share)
 
-# ───────────────────────── Main area ─────────────────────────
+    st.caption(f"📹 **{PIPELINES[pk].label}** — {PIPELINES[pk].description}")
 
-# Degenerate state: nothing to size. Bail with a friendly nudge before
-# any projections or layout would attempt to render with no inputs.
-if not vision_enabled and not llm_enabled and not vla_enabled:
-    st.info(
-        "👈 Toggle **Enable vision pipeline**, **Enable generative LLM**, or "
-        "**Enable VLA** in the sidebar to start sizing. The app projects "
-        "whichever workloads are enabled — alone, or sharing the same silicon."
-    )
-    st.stop()
+    m = st.columns([1.1, 1.1, 1.1, 1.1, 3.6])  # cluster the 4 metrics left; spacer eats the rest
+    m[0].metric("Per-camera FPS", f"{vr.get('fps_per_stream', vr.get('total_fps', 0.0)):.1f}")
+    m[1].metric("Aggregate FPS", f"{vr.get('total_fps', 0.0):.0f}",
+                delta=f"× {n_cameras} cam", delta_color="off")
+    m[2].metric("Memory fit", "✓ fits" if vr.get("fits_in_memory") else "✗ spills")
+    m[3].metric("DDR bandwidth ratio",
+                f"{vr.get('bandwidth_ratio_vs_ref', bandwidth_ratio(hw)):.2f}×",
+                delta="vs NPU Mid", delta_color="off")
 
-# VLA renders as its own independent section (not part of the vision+LLM
-# platform budget). Render it first; if VLA is the ONLY enabled workload, stop
-# here — the vision/LLM rendering path below assumes vision or llm is on.
-if vla_enabled and vla_model is not None:
-    _render_vla(vla_model, hw, npu_share,
-                vla_vlm_hz, vla_action_hz, vla_off_default,
-                n_cameras=vla_n_cameras, fleet_size=vla_fleet_size,
-                camera_mode=vla_camera_mode)
-    if not vision_enabled and not llm_enabled:
-        st.stop()
+    # 2-up: per-tier FPS comparison + a compact timing/regime readout.
+    g1, g2 = st.columns([3, 2])
+    with g1:
+        per_tier = {}
+        for lbl, key in _TIER_MAP.items():
+            tr = project_vision(PIPELINES[pk], TIERS[key], resolution=res,
+                                n_streams=1, compiler_quality_vs_trt=compiler_quality,
+                                npu_share=npu_share)
+            per_tier[lbl] = tr.get("fps_per_stream", tr.get("total_fps", 0.0))
+        st.plotly_chart(_per_tier_bar(per_tier, "FPS / camera", base_tier),
+                        use_container_width=True, key="v_tier")
+        st.caption("Per-camera FPS across the stock silicon ladder — your "
+                   "selection accented in red.")
+    with g2:
+        st.caption("**Timing**")
+        st.metric("Per-frame latency",
+                  f"{vr.get('per_stream_ms', 0.0):.2f} ms", delta=vr.get("regime", "?"),
+                  delta_color="off")
+        st.caption(f"source: `{vr.get('edge_ms_source', '?')}` · BW floor "
+                   f"{vr.get('bw_floor_ms', 0):.2f} ms · compute floor "
+                   f"{vr.get('compute_floor_ms', 0):.2f} ms · "
+                   f"DRAM {vr.get('vram_mb', 0):.0f} MB/frame")
 
-# ── Private NPU + CNN anchor hot-swap helpers — 2026-05-14 ─────────────
-# Per [docs] 2026-05-14 13:24 + spec at personal-ai-framework
-# `docs/private_anchor_secrets_spec.md` @ 65bf89c. Loader in
-# `sizer/npu_anchors.py` (verbatim from PAI sizer's `3742375`).
-#
-# Both helpers run RIGHT AFTER the corresponding project_*() call. When
-# a real measured silicon anchor exists for the current (tier, model/
-# pipeline) cell, override the headline number and upgrade the source
-# state to "measured_silicon_anchor" (🟢). Mirrors PAI sizer's
-# `_maybe_anchor_overlay` pattern from `31a0dd2`.
-#
-# Anchors measured at stock LPDDR5X 8.4 GT/s — skip hot-swap on memory-
-# upgrade overlays (LPDDR5T/LPDDR6) since the measurement no longer
-# applies.
+    # ── scoped depth tabs (Pipeline timing / Stream scaling / DRAM / flow),
+    # wrapped in a collapsible "detail" expander so the section can MINIMIZE.
+    # Tabs are created INSIDE the expander; the with-blocks below fill them
+    # (Streamlit binds each tab's container at creation, so output still lands
+    # inside the expander even though the blocks sit outside the with-stmt). ──
+    with st.expander("🔎 Vision detail — timing · streams · bandwidth · flow",
+                     expanded=False):
+        vt_time, vt_stream, vt_bw, vt_flow = st.tabs(
+            ["Pipeline timing", "Stream scaling", "DRAM bandwidth", "Pipeline flow"])
 
-# LLM catalog_key → spec model_key. Multiple catalog entries can map to
-# the same spec key (e.g. all int8 MoE entries share the same arch).
-# Maps include the perf-reference variants added 2026-05-14 to unlock
-# the missing-by-routing spec cells.
-_ANCHOR_LLM_MODEL_KEY_MAP = {
-    # int8-routed MoE (Q4_K_M weight-only × INT8 matmul on dedicated
-    # INT8 silicon — Mid INT8-only, High INT8 mode). All 4 catalog
-    # entries share the same arch + quant + base; perf is identical.
-    "skippy_finetune":              "qwen3_30b_a3b_moe",
-    "skippy_moe_router_v1":         "qwen3_30b_a3b_moe",
-    "skippy_moe_full_v1":           "qwen3_30b_a3b_moe",
-    "instruct_moe_stock":           "qwen3_30b_a3b_moe",
-    # fp16-routed MoE variant — perf-reference row added today.
-    "qwen3_30b_a3b_moe_fp":         "qwen3_30b_a3b_moe",
-    # fp16-routed dense (Q4_K_M weight-only × fp16 matmul, default
-    # llama-cpp path). FT entries share architecture with the stocks.
-    "skippy_qwen25_32b_v4":         "qwen25_32b_dense",
-    "qwen25_32b_dense":             "qwen25_32b_dense",
-    "skippy_7b_v4":                 "qwen25_7b_dense",
-    "qwen25_7b_dense":              "qwen25_7b_dense",
-    # int8-routed dense variants — perf-reference rows added today.
-    "qwen25_32b_dense_int8":        "qwen25_32b_dense",
-    "qwen25_7b_dense_int8":         "qwen25_7b_dense",
-}
-
-# Vision (CNN) pipeline_key → spec cnn_key. Maps existing INT8 (8-bit
-# weight) pipelines to the spec's `_w8` measurement. Spec `_w4` (4-bit
-# weight) cells need additional pipeline entries — left unmapped for
-# now; those cells stay "not measured" in the standalone display until
-# a 4-bit-weight pipeline lands in PIPELINES + the mapping is wired.
-_ANCHOR_CNN_PIPELINE_KEY_MAP = {
-    # Existing 8-bit-weight INT8 pipelines → spec _w8 cells
-    "yolov8n_trt_int8_coco128":     "yolov8n_w8",
-    # 4-bit-weight INT8 pipelines (added 2026-05-14 per [docs] 20:56)
-    # → spec _w4 cells. Per spec, these unlock both mid_int8 and
-    # high_int8 tier cells (CNN measured INT-only on both tiers).
-    "yolov8n_trt_int4_coco128":     "yolov8n_w4",
-    "resnet50v1_int4_224":          "resnet50_w4",
-    # No spec key for 8-bit-weight ResNet-50 (resnet50v1_int8_224) —
-    # spec only has resnet50_w4. The 8-bit ResNet pipeline remains a
-    # projection-only entry on the vision tile.
-}
-
-# Tier name + dtype → spec (tier, precision). Only NPU Mid/High covered
-# per spec scope. Memory-upgrade variants of Mid/High skip via the
-# stock-bus guard in the overlay helper.
-def _resolve_spec_tier_precision(tier_name: str, dtype: str):
-    if tier_name == "NPU Mid" and dtype == "int8":
-        return ("mid", "int8")
-    if tier_name == "NPU High" and dtype == "int8":
-        return ("high", "int8")
-    if tier_name == "NPU High" and dtype in ("fp16", "fp"):
-        return ("high", "fp")
-    return None
-
-
-def _maybe_anchor_overlay_llm(r, model_key, hw, tier_name, npu_share, workload="plain_chat"):
-    """Hot-swap measured silicon anchor into LLM projection result.
-
-    Returns r unchanged if no anchor matches; otherwise returns a new
-    dict with `decode_tok_s` overridden + `source = "measured_silicon_anchor"`.
-
-    The `workload` parameter is the user's current selection from the
-    workload-pattern selectbox. The anchor measurement is taken at the
-    silicon's plain-chat-class reference seqlen=2048 (per spec), so we
-    apply the same `workload_multiplier` that project_llm() applies to
-    the BW-projected baseline — keeps workload-selectbox changes visible
-    in the headline tok/s when the anchor fires. Per Kyle 2026-05-16:
-    "when I change the type of prompt the tokens per second doesn't
-    change" — the bug was that this overlay was setting decode_tok_s
-    to anchor.tokps verbatim, dropping the workload scaling that
-    project_llm had already applied.
-    """
-    if r is None or not isinstance(r, dict):
-        return r
-    # Skip if dtype-mismatch / won't-fit already fired
-    if r.get("source") in ("wont_fit", "dtype_mismatch"):
-        return r
-    spec_model = _ANCHOR_LLM_MODEL_KEY_MAP.get(model_key)
-    if spec_model is None:
-        return r
-    dtype = getattr(LLM_MODELS.get(model_key), "compute_dtype", "") if LLM_MODELS.get(model_key) else ""
-    resolved = _resolve_spec_tier_precision(tier_name, dtype)
-    if resolved is None:
-        return r
-    spec_tier, spec_prec = resolved
-    anchor = load_llm_anchor(spec_tier, spec_prec, spec_model)
-    if anchor is None or anchor.source != "measured" or anchor.tokps <= 0:
-        return r
-    # Apply the workload multiplier to the anchor value — the anchor is
-    # the plain-chat-equivalent measurement (seqlen=2048 per spec); the
-    # user-selected workload scales relative to that the same way it
-    # scales the BW projection.
-    try:
-        mult = workload_multiplier(workload)
-        decode_mult = mult.get("decode_p50_mult", 1.0)
-        ttft_mult = mult.get("ttft_p50_mult", 1.0)
-    except Exception:
-        decode_mult, ttft_mult = 1.0, 1.0
-    # Memory-upgrade clones BW-scale the measured anchor's decode (decode is
-    # BW-bound); TTFT held at stock (prefill is compute-bound). Stock tiers keep
-    # ratio 1.0. Mirrors ratchet v0.2.3 / ADR 011 Amendment 5 — prior code
-    # skipped the overlay on memory upgrades, dropping the anchor to cross-class.
-    bw_ratio = 1.0
-    if getattr(hw, "bw_projected", False) and hw.stock_mem_bandwidth_gbs:
-        bw_ratio = hw.mem_bandwidth_gbs / hw.stock_mem_bandwidth_gbs
-    r2 = dict(r)
-    r2["decode_tok_s"] = anchor.tokps * decode_mult * bw_ratio
-    # Preserve TTFT / prefill / regime from projection — anchor may not
-    # carry those. When anchor has a prefill rate, derive ttft @ 1K and
-    # scale by the workload's TTFT multiplier.
-    if anchor.prefill_tokps > 0:
-        r2["ttft_1k_sec"] = (1024.0 / anchor.prefill_tokps) * ttft_mult
-    r2["source"] = "measured_silicon_anchor"
-    r2["_silicon_anchor_meta"] = {
-        "measured_date": anchor.measured_date,
-        "spec_tier_precision": f"{spec_tier}_{spec_prec}",
-        "spec_model_key": spec_model,
-        "workload_applied": workload,
-        "decode_mult_applied": round(decode_mult, 3),
-    }
-    return r2
-
-
-def _maybe_anchor_overlay_cnn(r, pipeline_key, hw, tier_name):
-    """Hot-swap measured CNN anchor into vision projection result.
-
-    Returns r unchanged if no anchor matches; otherwise overrides
-    `per_stream_ms` + `fps_per_stream` (n_streams=1 case).
-
-    Memory-upgrade clones (Mid+LPDDR6-14, etc.) BW-scale the measured
-    anchor — small edge CNNs (ResNet-50 INT8, YOLOv8n) are BW-bound on
-    LP5X-class silicon (weights stream through DRAM per inference), so
-    higher BW → proportionally faster ms_per_inference and higher fps.
-    Mirrors the LLM-side Amendment 5 fix (ratchet v0.2.3 / ADR 011);
-    pre-v1.1.1 the helper skipped memory upgrades entirely, dropping
-    the cell to cross-class projection and producing a measured→projection
-    discontinuity on the first upgrade tier.
-    """
-    if r is None or not isinstance(r, dict):
-        return r
-    spec_cnn = _ANCHOR_CNN_PIPELINE_KEY_MAP.get(pipeline_key)
-    if spec_cnn is None:
-        return r
-    # CNN spec: INT-only on both Mid and High. Vision pipelines we map
-    # are all int8 today; no fp branch needed yet.
-    if tier_name == "NPU Mid":
-        spec_tier, spec_prec = "mid", "int8"
-    elif tier_name == "NPU High":
-        spec_tier, spec_prec = "high", "int8"
-    else:
-        return r
-    anchor = load_cnn_anchor(spec_tier, spec_prec, spec_cnn)
-    if anchor is None or anchor.source != "measured" or anchor.ms_per_inference <= 0:
-        return r
-    # Memory-upgrade clones BW-scale the anchor. Stock tiers keep ratio 1.0.
-    # ms scales inversely with BW (lower ms = faster); fps scales directly.
-    bw_ratio = 1.0
-    if getattr(hw, "bw_projected", False) and getattr(hw, "stock_mem_bandwidth_gbs", None):
-        bw_ratio = hw.mem_bandwidth_gbs / hw.stock_mem_bandwidth_gbs
-    r2 = dict(r)
-    r2["per_stream_ms"] = anchor.ms_per_inference / bw_ratio
-    base_fps = anchor.fps if anchor.fps > 0 else (1000.0 / anchor.ms_per_inference)
-    r2["fps_per_stream"] = base_fps * bw_ratio
-    r2["edge_ms_source"] = "measured_silicon_anchor"
-    r2["_silicon_anchor_meta"] = {
-        "measured_date": anchor.measured_date,
-        "spec_tier_precision": f"{spec_tier}_{spec_prec}",
-        "spec_cnn_key": spec_cnn,
-        "bw_ratio_applied": round(bw_ratio, 3),
-    }
-    return r2
-
-
-# Compute projections
-vision = (project_vision(pipeline, hw, resolution, n_streams=n_streams,
-                          compiler_quality_vs_trt=compiler_quality,
-                          npu_share=npu_share)
-          if vision_enabled else None)
-# CNN anchor hot-swap (single-stream case only — multi-stream batch
-# scaling continues through projection). Per [docs] 2026-05-14 spec.
-if vision_enabled and vision is not None and n_streams <= 1:
-    vision = _maybe_anchor_overlay_cnn(vision, pipeline_key, hw, hw.name)
-# dtype-mismatch gate — per [backend] 15:46 + [pai-sizer] e69237b parity.
-# Check whether the selected model's compute_dtype is supported by the
-# silicon BEFORE running the projection. If unsupported (e.g. Skippy
-# dense FT fp16 on Mid INT8-only silicon post-548bc41), short-circuit
-# project_llm with a sentinel `dtype_mismatch` result so the UI can
-# render a 🔴 banner instead of silently projecting an fp16 number for
-# silicon that physically can't run fp16. Mirrors PAI's resolution-order
-# convention from e69237b.
-_llm_dtype_supported = True
-if llm_enabled:
-    _model = LLM_MODELS[llm_model_key]
-    _required_dtype = getattr(_model, "compute_dtype", "int8")
-    _capability = capability_level(hw, _required_dtype)
-    if _capability == "unsupported":
-        _llm_dtype_supported = False
-
-# Resolve measurement_alias before calling project_llm: when the
-# selected model is a perf-clone of another catalog entry (same arch,
-# same quant), use the alias to look up the existing 5090 measurement.
-# Mirrors PAI sizer's measurement_alias mechanism (commit 3cb533a).
-# Without this, e.g. Skippy 7B v4 selecting silently falls through to
-# the flat-field MoE Q4 anchor and projects ~250 tok/s on 5090 — wrong
-# for dense 7B (real ~184 tok/s).
-_perf_lookup_key = (LLM_MODELS[llm_model_key].measurement_alias
-                    or llm_model_key) if llm_enabled else None
-llm = (project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
-                    model_key=_perf_lookup_key,
-                    fp4_runtime_maturity=fp4_maturity)
-       if (llm_enabled and _llm_dtype_supported) else None)
-# Apply per-model BW-scaling: project_llm() is anchored to the perf
-# reference model (Qwen3-30B-A3B MoE 3B-active). For models with
-# different architectures (e.g. dense 14B), tok/s and TTFT scale by
-# their decode_bw_per_token_gb relative to the reference. Same first-
-# order BW-bound math the rest of the sizer uses.
-if llm_enabled and llm is not None:
-    llm = scale_llm_projection(llm, LLM_MODELS[llm_model_key],
-                                hw_mem_capacity_gb=hw.mem_capacity_gb)
-# LLM anchor hot-swap — overrides decode_tok_s with measured silicon
-# anchor when (tier, model_key, compute_dtype) maps to a populated spec
-# cell. Runs AFTER scale_llm_projection so the per-model BW-scaling
-# would never override a measured value. Per [docs] 2026-05-14 spec +
-# PAI sizer 31a0dd2 pattern.
-if llm_enabled and llm is not None:
-    llm = _maybe_anchor_overlay_llm(llm, llm_model_key, hw, hw.name, npu_share, workload=llm_workload)
-
-# Render the 🔴 dtype-mismatch banner upfront when the selected model's
-# compute_dtype isn't supported by the silicon. After the banner, mute
-# llm_enabled for downstream rendering — same effect as if the user
-# toggled LLM off. The banner explains why the LLM tile is missing.
-if llm_enabled and not _llm_dtype_supported:
-    _model_label = _model.label.split(" (")[0]
-    st.error(
-        f"🔴 **dtype mismatch — {_model_label} cannot run on {hw.name}**\n\n"
-        f"This model's compute path requires **{_required_dtype.upper()}** "
-        f"tensor support, but {hw.name}'s silicon is **{', '.join(k.upper() for k, v in (hw.capability_levels or {}).items() if v != 'unsupported') or 'INT8-only'}**. "
-        f"Selecting this combination silently projects fp16 numbers on "
-        f"hardware that physically can't execute fp16 weights — disabled "
-        f"to avoid misleading the audience. To compare apples-to-apples: "
-        f"either pick a different tier (NPU High / 5090 retain FP support), "
-        f"or pick an INT8-native model (Skippy MoE Q4 / Thinking-2507)."
-    )
-    llm_enabled = False  # downstream rendering safely skips LLM blocks
-
-# ───────────────────────── Front-page summary + pipeline strip ─────────────────────────
-# Dynamic "Simulating" line reflecting the current selection.
-# HTML form (uses <b> so it renders bold inside an HTML-styled div below).
-if llm_enabled:
-    wl_label = WORKLOAD_CATEGORIES[llm_workload]["label"]
-    _selected_model_short = LLM_MODELS[llm_model_key].label.split(" (")[0]
-    llm_summary = (
-        f"<b>{_selected_model_short}</b> "
-        f"<b>{quant}</b>, <b>{wl_label}</b> @ "
-        f"<b>{queries_per_min:.1f} q/min</b> (<b>{answer_kind}</b> answers)"
-    )
-else:
-    llm_summary = ""
-
-if vision_enabled:
-    vision_summary = (
-        f"{pipeline.label} &nbsp;&middot;&nbsp; "
-        f"<b>{n_streams}</b> stream{'s' if n_streams != 1 else ''} "
-        f"@ <b>{resolution}</b>"
-    )
-else:
-    vision_summary = ""
-
-# Build the current-config rows (needed by the 'This config' download)
-_cur_rows: list[dict] = []
-if vision_enabled:
-    _cur_rows.append(vision_workload_row(pipeline, hw, resolution, n_streams=n_streams))
-if llm_enabled:
-    _cur_rows.append(llm_workload_row(
-        hw, quant, workload=llm_workload,
-        queries_per_minute=queries_per_min,
-        answer_kind=answer_kind,
-    ))
-_cur_csv = rows_to_csv_str(_cur_rows)
-_hw_slug = hw.name.lower().replace(" ", "_")
-
-# ── Simulating line — full-width summary of the current selection ──
-# Composed dynamically: skip the vision clause when vision is off, skip the
-# LLM clause when LLM is off. (The both-off case is short-circuited above.)
-_sim_clauses = [c for c in (vision_summary, llm_summary) if c]
-_sim_body = " &nbsp;&middot;&nbsp; ".join(_sim_clauses)
-st.markdown(
-    "<div style='font-size:17px; line-height:1.55; margin:4px 0 10px 0;'>"
-    f"<b>Simulating:</b> {_sim_body} &nbsp;&middot;&nbsp; "
-    f"<b>{hw.name}</b>"
-    "</div>",
-    unsafe_allow_html=True,
-)
-
-# ── Projected results: effective-under-LLM math + saturation banner ──
-# Vision-effective math only meaningful when vision is on. Saturation
-# banner fires when both are on AND LLM duty cycle ≥ 100%.
-vision_fps_effective = vision["fps_per_stream"] if vision_enabled else 0.0
-duty_cycle = 0.0
-llm_saturated = False
-if llm_enabled:
-    qps = queries_per_min / 60
-    answer_sec = llm["short_answer_sec"] if answer_kind == "short" else llm["rag_total_sec"]
-    duty_cycle = qps * answer_sec
-    llm_saturated = duty_cycle >= 1.0
-    if vision_enabled:
-        vision_fps_effective = vision_fps_under_llm_load(
-            vision["fps_per_stream"], llm, queries_per_min, answer_kind
-        )
-
-if llm_saturated and vision_enabled:
-    max_qpm = (60 / answer_sec) if answer_sec > 0 else 0
-    st.error(
-        f"⚠ **NPU oversubscribed by the LLM.** {queries_per_min:.1f} {answer_kind} "
-        f"queries/min × {answer_sec:.1f} s/answer = {duty_cycle*100:.0f}% duty cycle. "
-        f"Vision is starved to 0 FPS and the LLM queue backs up. "
-        f"On {hw.name} at {quant}, the maximum sustainable "
-        f"{'short-answer' if answer_kind == 'short' else 'RAG'} rate is ~**{max_qpm:.1f} "
-        f"queries/min** (100% NPU duty). Reduce query rate, use a lighter "
-        f"answer mode (short vs RAG), upgrade NPU tier, or dedicate a second NPU to the LLM."
-    )
-elif llm_saturated and not vision_enabled:
-    max_qpm = (60 / answer_sec) if answer_sec > 0 else 0
-    st.error(
-        f"⚠ **LLM workload exceeds NPU capacity.** {queries_per_min:.1f} {answer_kind} "
-        f"queries/min × {answer_sec:.1f} s/answer = {duty_cycle*100:.0f}% duty cycle. "
-        f"Maximum sustainable on {hw.name} at {quant}: ~**{max_qpm:.1f} queries/min** "
-        f"(100% NPU duty). Reduce rate, use a lighter answer mode, or upgrade tier."
-    )
-
-# ── Top metric row — the headline numbers, sitting above the fold ──
-# Layout dispatches on what's enabled:
-#   vision on  + LLM on  → 4 vision metrics (with LLM tile in c4)
-#   vision on  + LLM off → 4 vision metrics (BW ratio in c4)
-#   vision off + LLM on  → 4 LLM-focused metrics (decode, TTFT, model, queries)
-def _format_ttft(seconds: float) -> str:
-    # Mirrors PAI sizer's format-by-magnitude rule (commit 1fd0bd8): integer
-    # ms below 100 ms (where ms precision matters), 2-decimal seconds above.
-    # The 100 ms crossover (rather than 1 s) avoids a "904 ms vs 903 ms"
-    # rounding flicker between stock and memory-upgraded variants — TTFT is
-    # held exactly at stock, but project_llm rounds total_s and decode_s
-    # independently, so the displayed difference can drift by 1 ms.
-    if seconds < 0.1:
-        return f"{seconds*1000:.0f} ms"
-    return f"{seconds:.2f} s"
-
-
-# NPU_share marker per [pai-sizer] e521a70 convention: append "(@ X% NPU)"
-# suffix to BW-affected tile labels when share != 100%, so users see at
-# a glance that they're looking at a what-if operating point. Source
-# classification stays untouched (orthogonal axis).
-_npu_share_marker = (
-    f" (@ {npu_share*100:.0f}% NPU)"
-    if abs(npu_share - 1.0) > 1e-6 else ""
-)
-
-if vision_enabled:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(
-        label=f"Per-camera FPS{_npu_share_marker}",
-        value=f"{vision_fps_effective:.1f}",
-        delta=(f"{vision_fps_effective - vision['fps_per_stream']:+.1f}  under LLM"
-                if llm_enabled else f"{n_streams} streams @ {resolution}"),
-        delta_color="inverse" if llm_enabled else "off",
-        help=(
-            "Frame rate **each individual camera stream delivers** — what the "
-            "end user sees. Targets: **30 FPS** real-time, **15 FPS** "
-            "surveillance-grade."
-        ),
-    )
-    c2.metric(
-        label=f"Aggregate FPS{_npu_share_marker}",
-        value=f"{vision_fps_effective * n_streams:.0f}",
-        delta=f"{n_streams} streams total",
-        delta_color="off",
-        help=(
-            "Sum of frames/sec **across all cameras** — the NPU's total "
-            "throughput capacity. `per-camera FPS × n_streams`."
-        ),
-    )
-    c3.metric(
-        label="Memory fit",
-        value="✓ fits" if vision["fits_in_memory"] else "✗ spills",
-        delta=f"{vision['vram_mb']:.0f} MB / {hw.mem_capacity_gb*1024:.0f} MB",
-        delta_color="off",
-    )
-    if llm_enabled:
-        # Mark LLM tok/s as BW-projected when the user toggled an LPDDR6
-        # memory upgrade — the underlying decode rate was scaled by the
-        # peak-BW ratio in `hw_with_memory()`, not measured by a vendor.
-        # Per [backend] 2026-04-29 bug report.
-        _llm_tile_label = f"LLM decode ({quant})"
-        if getattr(hw, "bw_projected", False):
-            _llm_tile_label = f"LLM decode ({quant}, BW-proj)"
-        _llm_tile_label += _npu_share_marker
-        c4.metric(
-            label=_llm_tile_label,
-            value=f"{llm['decode_tok_s']:.1f} tok/s",
-            delta=f"TTFT 1K = {_format_ttft(llm['ttft_1k_sec'])}",
-            help=(
-                "BW-projected: decode tok/s scaled from the stock-memory "
-                "vendor measurement by the new/stock peak-BW ratio (active-"
-                "param weights are BW-bound on MoE). TTFT held at stock — "
-                "prefill is compute-bound. Memory swap is what-if; not a "
-                "vendor measurement of LPDDR6 silicon."
-                if getattr(hw, "bw_projected", False)
-                else None
-            ),
-        )
-    else:
-        c4.metric(
-            label="DDR bandwidth ratio vs NPU Mid",
-            value=f"{vision['bandwidth_ratio_vs_ref']:.2f}×",
-            delta="reference = NPU Mid",
-            delta_color="off",
-            help=(
-                "Ratio of the current hardware's **effective DRAM (LPDDR/GDDR) "
-                "bandwidth** to NPU Mid's. Vision pipelines at these model sizes "
-                "are bandwidth-bound, so edge FPS scales roughly linearly with "
-                "this ratio. Compute is NOT compared here — this is purely the "
-                "off-chip memory-bus ratio (bus width × data rate × efficiency)."
-            ),
-        )
-else:
-    # LLM-only headline row.
-    c1, c2, c3, c4 = st.columns(4)
-    _model = LLM_MODELS[llm_model_key]
-    _short_sec = llm["short_answer_sec"]
-    _rag_sec = llm["rag_total_sec"]
-    _llm_tile_label_only = f"LLM decode ({quant})"
-    if getattr(hw, "bw_projected", False):
-        _llm_tile_label_only = f"LLM decode ({quant}, BW-proj)"
-    _llm_tile_label_only += _npu_share_marker
-    c1.metric(
-        label=_llm_tile_label_only,
-        value=f"{llm['decode_tok_s']:.1f} tok/s",
-        delta=f"TTFT 1K = {llm['ttft_1k_sec']*1000:.0f} ms",
-        help=(
-            "Sustained generation rate on the selected workload. Bandwidth-"
-            "bound at 100.8 GB/s usable on NPU Mid → ~12 tok/s for 14B dense; "
-            "MoE 30B-A3B's 3B-active footprint is what unlocks higher rates."
-            + ("\n\n**BW-proj** label: decode tok/s scaled by the LPDDR6 "
-                "memory upgrade's peak-BW ratio. TTFT held at stock — prefill "
-                "is compute-bound. What-if, not a vendor measurement."
-                if getattr(hw, "bw_projected", False) else "")
-        ),
-    )
-    c2.metric(
-        label=f"End-to-end latency{_npu_share_marker}",
-        value=(f"{_short_sec:.1f} s" if answer_kind == "short" else f"{_rag_sec:.1f} s"),
-        delta=("short (~200 tok)" if answer_kind == "short" else "RAG (8K + 2K)"),
-        delta_color="off",
-        help="Wall-clock time for one user-visible response — TTFT + decode.",
-    )
-    c3.metric(
-        label="NPU duty cycle",
-        value=f"{duty_cycle*100:.0f}%",
-        delta=f"{queries_per_min:.1f} q/min",
-        delta_color="inverse" if duty_cycle >= 0.8 else "off",
-        help=(
-            "Fraction of NPU time the LLM consumes. Above 80%: queue forms, "
-            "TTFT spikes for back-to-back queries. 100%: saturated."
-        ),
-    )
-    c4.metric(
-        label="Pass rate (Skippy v2 eval)",
-        value=(f"{_model.pass_rate*100:.1f}%"
-               if _model.pass_rate is not None else "n/a"),
-        delta=(f"{_model.pass_n_passes}/{_model.pass_n_total} prompts"
-               if _model.pass_n_passes is not None
-               else "perf-comparison reference (no Skippy v2 eval)"),
-        delta_color="off",
-        help=(
-            f"Accuracy of the selected model ({_model.label}) on the v2 prompt "
-            f"set with RAG enabled. Sidebar's 'Accuracy details' expander has "
-            f"the full breakdown. Perf-comparison-only entries (e.g. Qwen 2.5 "
-            f"7B / 32B dense) display 'n/a' since they weren't evaluated on "
-            f"the Skippy v2 prompt set."
-        ),
-    )
-
-# Projection-source banner: 4-state honesty signal per [pai-sizer]/[backend]
-# 2026-04-29 Phase 2 spec. Surfaces whether the displayed numbers are a
-# direct measurement, a within-class anchor projection, or a cross-class
-# extrapolation that should be read as directional. Mirrors PAI sizer's
-# 33b0dfc convention so badges look the same across both apps.
-#
-#   🟢 measured        → st.success — direct per-cell measurement
-#   🟢 measured_anchor → st.success — tier-level vendor anchor
-#   🟡 same_class_anchor → st.info  — within-family BW-scaled projection
-#   🟠 cross_class     → st.warning — cross-family extrapolation
-#   (legacy 'projected' fallback — same as cross_class semantically)
-
-def _source_attribution(hw_name: str) -> str:
-    if "i.MX 95" in hw_name:
-        return "NXP eIQ Neutron NPU, production measurement 2026-04"
-    if "5090" in hw_name:
-        return "RTX 5090 Blackwell, TensorRT 10.16 bake-off 2026-04"
-    return "production silicon"
-
-
-def _render_source_banner(source: str, regime: str | None, hw_name: str,
-                            kind: str, value_str: str,
-                            share: float = 1.0) -> None:
-    """Render the projection-source banner for a vision or LLM tile."""
-    regime_suffix = ""
-    if regime in ("bw_bound", "compute_bound"):
-        regime_suffix = (
-            f" Regime: **{'BW-bound' if regime == 'bw_bound' else 'compute-bound'}**."
-        )
-    share_suffix = ""
-    if share < 1.0:
-        share_suffix = (
-            f" Scaled by **NPU_share = {share*100:.0f}%** "
-            f"(BW-bound paths only; TTFT / compute floors unaffected)."
-        )
-    if source == "measured_silicon_anchor":
-        # Private NPU anchor hot-swap — per [docs] 2026-05-14. The
-        # measurement lives in Streamlit secrets, never in chat or git.
-        st.success(
-            f"🟢 **Measured on real NPU silicon** — {kind} = **{value_str}** on **{hw_name}**. "
-            f"Headline number is the silicon measurement (loaded from "
-            f"`.streamlit/secrets.toml` via `sizer/npu_anchors.py`), not a "
-            f"BW-projection from RTX 5090. See the standalone "
-            f"\"📡 Measured silicon anchors (private)\" expander below for "
-            f"the full grid + bandwidth derivation under the current "
-            f"NPU_share.{regime_suffix}{share_suffix}"
-        )
-    elif source == "measured":
-        st.success(
-            f"🟢 **Measured silicon** — {kind} = **{value_str}** on **{hw_name}** "
-            f"({_source_attribution(hw_name)}). Direct measurement, not a projection — "
-            f"compiler-quality slider and BW-ratio scaling do not apply."
-        )
-    elif source == "measured_anchor":
-        st.success(
-            f"🟢 **Tier-level anchor** — {kind} = **{value_str}** on **{hw_name}**, "
-            f"vendor-supplied at this tier. Other quants/workloads scale from this "
-            f"anchor.{regime_suffix}"
-        )
-    elif source == "same_class_anchor":
-        st.info(
-            f"🟡 **Same-class projection** — {kind} = **{value_str}** BW-scaled "
-            f"within memory family from a measured anchor (memory-upgrade overlay "
-            f"or BW-equivalent sibling tier).{regime_suffix}{share_suffix}"
-        )
-    elif source in ("cross_class", "projected"):
-        st.warning(
-            f"🟠 **Cross-class extrapolation** — {kind} = **{value_str}**. No anchor "
-            f"in this hardware's memory class; projection scales from a different "
-            f"silicon class via the two-floor model. Read as directional — slope "
-            f"assumption breaks at class boundaries.{regime_suffix}{share_suffix}"
-        )
-
-
-# Vision banner — only when vision is enabled.
-if vision_enabled:
-    _render_source_banner(
-        vision.get("edge_ms_source", "projected"),
-        vision.get("regime"),
-        hw.name,
-        kind="Per-camera FPS = 1000 /",
-        value_str=f"{vision['per_stream_ms']:.1f} ms",
-        share=vision.get("npu_share", 1.0),
-    )
-
-# LLM banner — only when LLM is enabled.
-if llm_enabled:
-    _render_source_banner(
-        llm.get("llm_source", "projected"),
-        llm.get("regime"),
-        hw.name,
-        kind="LLM decode",
-        value_str=f"{llm['decode_tok_s']:.1f} tok/s",
-        share=llm.get("npu_share", 1.0),
-    )
-
-# Capability-level caption: surfaces the kernel path the silicon takes
-# to execute this pipeline's dtype. Shown on every tier+pipeline combo
-# where both sides declare their metadata, so the narrative "different
-# tiers take different paths to tensor core" reads consistently — the
-# 5090-INT8 `tensor_compat` case is interesting because the rest are
-# `tensor_native` (the common cases aren't hidden; the contrast shows).
-# Driven by the vision pipeline's precision; only meaningful with vision on.
-if vision_enabled and pipeline.precision and hw.capability_levels:
-    _level = capability_level(hw, pipeline.precision)
-    st.caption(
-        f"**{pipeline.precision.upper()} kernel path on {hw.name}:** "
-        f"{CAPABILITY_LABELS[_level]} — {CAPABILITY_DESCRIPTIONS[_level]}"
-    )
-
-# ── Pipeline flow (collapsible, expanded by default) ──
-# Vision-pipeline-centric (the diagram shows YOLO → CLIP → ... stages with
-# the LLM stage layered in when enabled). Skip entirely when vision is off
-# — the LLM-only flow doesn't have an interesting per-stage breakdown to
-# render, and the diagram's Always-on/Pipeline-stage-changes legend assumes
-# a vision pipeline. Placed BEFORE the LLM tabs (per Kyle 2026-05-11)
-# because the pipeline diagram is the headline visual story; the LLM
-# tabs are deep-dive detail that flows naturally after the diagram.
-if vision_enabled:
-  with st.expander("🔀 Pipeline flow", expanded=True):
-    _render_pipeline_strip(
-        _stages_for_pipeline(pipeline_key, llm_enabled, llm_workload, quant)
-    )
-    _legend_html = (
-        '<div style="display:flex; flex-wrap:wrap; align-items:center; '
-        'gap:20px; margin:4px 0 2px;">'
-        '<div style="display:flex; align-items:center; gap:7px;">'
-        '<span style="display:inline-block; width:16px; height:16px; '
-        'background:#334155; border:1.5px solid #475569; border-radius:3px;"></span>'
-        '<span style="font-size:13px;">'
-        '<b>Always on</b> &nbsp;— ingest, storage</span></div>'
-        '<div style="display:flex; align-items:center; gap:7px;">'
-        '<span style="display:inline-block; width:16px; height:16px; '
-        'background:#6366F1; border:1.5px solid #6366F1; border-radius:3px;"></span>'
-        '<span style="font-size:13px;">'
-        '<b>Pipeline stage changes</b> &nbsp;— varies with your choice</span></div>'
-        '</div>'
-        '<div style="font-size:12px; opacity:0.85; margin-top:4px;">'
-        'Every stage is running — the colors just flag where your controls take effect.'
-        '</div>'
-    )
-    st.markdown(_legend_html, unsafe_allow_html=True)
-
-st.markdown("---")
-
-# ───────── Tabs: charts + detail tables ─────────
-# Tab list adapts to what's enabled — vision-only tabs (Stream scaling) and
-# vision×LLM tabs (Duty-cycle) only show when their inputs are meaningful.
-# Overview + Detail always render; their content is gated internally.
-# LLM Performance / Accuracy / Precision tabs slot in between Duty-cycle
-# and Detail when llm_enabled (per Kyle 2026-05-12 — consolidating the
-# previously-separate 3-tab widget into the main tabs row).
-# Tab order + labels mirror PAI sizer per Kyle 2026-05-16 19:35 + [pai-sizer]
-# 19:35 confirmation. Conceptual order: Overview → Accuracy → Precision →
-# Performance → (our vision-specific Stream scaling, Duty-cycle) → Detail.
-# Labels match PAI verbatim for the 4 shared tabs (single-word, no emojis)
-# so users moving between apps see the same labels for the same concept.
-_tab_specs: list[tuple[str, str]] = [("Overview", "overview")]
-if llm_enabled:
-    _tab_specs.append(("Accuracy", "acc"))
-    _tab_specs.append(("Precision", "prec"))
-    _tab_specs.append(("Performance", "perf"))
-if vision_enabled:
-    _tab_specs.append(("Stream scaling", "streams"))
-if vision_enabled and llm_enabled:
-    _tab_specs.append(("Duty-cycle", "duty"))
-_tab_specs.append(("KPIs", "kpis"))
-_tab_specs.append(("Detail", "detail"))
-_tabs = dict(zip(
-    [s[1] for s in _tab_specs],
-    st.tabs([s[0] for s in _tab_specs]),
-))
-tab_overview = _tabs["overview"]
-tab_streams = _tabs.get("streams")
-tab_duty = _tabs.get("duty")
-tab_perf = _tabs.get("perf")
-tab_acc = _tabs.get("acc")
-tab_prec = _tabs.get("prec")
-tab_kpis = _tabs["kpis"]
-tab_detail = _tabs["detail"]
-
-with tab_overview:
-    if vision_enabled:
-        st.markdown("### Vision")
-        left, right = st.columns([1, 1])
-    
-        with left:
-            st.subheader("Pipeline timing (current config)")
-            fig = go.Figure()
-            if "yolo_ms" in vision and "clip_ms" in vision:
-                fig.add_trace(go.Bar(
+    with vt_time:
+        # Per-stage edge ms (YOLO vs CLIP) for two-component pipelines; a single
+        # total bar for one-model pipelines (SAM 3, ES-Small, YOLO-only). Ported
+        # from app.py "Pipeline timing (current config)".
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            figt = go.Figure()
+            if vr.get("yolo_ms") is not None and vr.get("clip_ms") is not None:
+                figt.add_trace(go.Bar(
                     x=["YOLO-seg (batched)", "CLIP component"],
-                    y=[vision["yolo_ms"], vision["clip_ms"]],
-                    marker=dict(color=["#6366F1", "#22C55E"]),
-                    text=[f"{vision['yolo_ms']:.1f} ms", f"{vision['clip_ms']:.1f} ms"],
-                    textposition="auto",
-                ))
+                    y=[vr["yolo_ms"], vr["clip_ms"]],
+                    marker_color=["#6366F1", "#22C55E"],
+                    text=[f"{vr['yolo_ms']:.1f} ms", f"{vr['clip_ms']:.1f} ms"],
+                    textposition="auto"))
             else:
-                # Fallback — single-unit pipelines (SAM 3, ES-Small alone) still get a bar
-                fig.add_trace(go.Bar(
-                    x=[f"{pipeline.label} (total)"],
-                    y=[vision["per_stream_ms"]],
-                    marker=dict(color=["#F59E0B"]),
-                    text=[f"{vision['per_stream_ms']:.1f} ms"],
-                    textposition="auto",
-                ))
-            fig.update_layout(
-                yaxis_title="Edge ms per batch cycle",
-                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4"),
-                height=300, margin=dict(l=40, r=20, t=20, b=40),
-            )
-            _apply_chart_theme(fig)
-            st.plotly_chart(fig, width="stretch")
-            st.caption(pipeline.note)
-            if pipeline.key in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
-                                 "hybrid_v2_bf16", "hybrid_v2_torchao_fp8",
-                                 "yolo_only_fp8",
-                                 "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
-                                 "yolov8n_only_fp8",
-                                 "yolo11s_trt_int8",
-                                 "yolov8n_trt_int8_coco128"}:
+                figt.add_trace(go.Bar(
+                    x=[f"{PIPELINES[pk].label} (total)"],
+                    y=[vr.get("per_stream_ms", 0.0)],
+                    marker_color="#F59E0B",
+                    text=[f"{vr.get('per_stream_ms', 0.0):.1f} ms"],
+                    textposition="auto"))
+            figt.update_layout(template="plotly_white", height=300,
+                               margin=dict(l=10, r=10, t=10, b=10),
+                               yaxis_title="Edge ms per batch cycle",
+                               showlegend=False)
+            st.plotly_chart(figt, use_container_width=True, key="v_timing")
+        with c2:
+            _note = getattr(PIPELINES[pk], "note", None)
+            if _note:
+                st.caption(_note)
+            if pk in {"trt_fp8_1hz_clip", "trt_fp8_every_frame",
+                      "hybrid_v2_bf16", "hybrid_v2_torchao_fp8", "yolo_only_fp8",
+                      "yolov8n_trt_fp8_1hz_clip", "yolov8n_trt_fp8_every_frame",
+                      "yolov8n_only_fp8", "yolo11s_trt_int8",
+                      "yolov8n_trt_int8_coco128"}:
                 st.caption(
                     "ℹ️ **Why resolution barely moves the needle:** YOLO runs at a "
                     "fixed **640²** input and CLIP at **224²**. Source resolution "
                     "only affects FFmpeg decode + resize — a small fraction of the "
-                    "inference budget. Measured in the Keyhole bake-off: 4K is "
-                    "only **~21% slower** than 720p, not 9× slower."
-                )
-    
-        with right:
-            st.subheader("Per-stream FPS vs NPU tier")
-            tier_rows = []
-            for name, t_hw in TIERS.items():
-                v = project_vision(pipeline, t_hw, resolution, n_streams=n_streams,
-                                   compiler_quality_vs_trt=compiler_quality)
-                tier_rows.append(dict(tier=name, fps=v["fps_per_stream"]))
-            # Add current if custom
-            if hw.name not in TIERS:
-                tier_rows.append(dict(tier=hw.name, fps=vision["fps_per_stream"]))
-            df_tier = pd.DataFrame(tier_rows)
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(
-                x=df_tier["tier"], y=df_tier["fps"],
-                marker=dict(color=["#EF4444", "#22C55E", "#6366F1", "#F59E0B"][:len(df_tier)]),
-                text=[f"{f:.1f}" for f in df_tier["fps"]],
-                textposition="auto",
-            ))
-            fig2.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
-                            annotation_text="30 FPS real-time", annotation_position="right")
-            fig2.add_hline(y=15, line_dash="dot", line_color="#93A1B5",
-                            annotation_text="15 FPS surveillance", annotation_position="right")
-            fig2.update_layout(
-                yaxis_title="FPS per stream", plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4"),
-                height=300, margin=dict(l=40, r=60, t=20, b=40),
-            )
-            _apply_chart_theme(fig2)
-            st.plotly_chart(fig2, width="stretch")
-    
-        # ───── DRAM bandwidth: saturation approximation vs ncu measurement ─────
-        st.markdown("---")
-        st.markdown("#### DRAM bandwidth — saturation model vs ncu measurement")
-    
-        measured_bytes_per_frame = measured_dram_per_frame(pipeline.key)
-        effective_total_fps = vision["fps_per_stream"] * n_streams
-        approx_gbs = hw.effective_bandwidth_gbs   # CSV saturation approx at duty=1
-    
-        bw_chart_col, bw_text_col = st.columns([1.3, 1])
-        with bw_chart_col:
-            if measured_bytes_per_frame is None:
-                st.info(
-                    f"No ncu measurement mapped for **{pipeline.label}** yet. "
-                    "The platform-budget CSV's `ss_ddr_gbs_avg_measured` column "
-                    "is blank for this pipeline; only the saturation "
-                    "approximation is available."
-                )
-            else:
-                measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
-                fig_bw = go.Figure()
-                fig_bw.add_trace(go.Bar(
-                    x=["Saturation model<br>(CSV ss_ddr_gbs_avg)",
-                       "Measured (ncu)<br>ss_ddr_gbs_avg_measured"],
-                    y=[approx_gbs, measured_gbs],
-                    marker=dict(color=["#EF4444", "#22C55E"]),
-                    text=[f"{approx_gbs:.1f} GB/s", f"{measured_gbs:.2f} GB/s"],
-                    textposition="outside",
-                    textfont=dict(size=14, color="#EAEDF4"),
-                    cliponaxis=False,
-                ))
-                fig_bw.add_hline(
-                    y=hw.effective_bandwidth_gbs,
-                    line_dash="dot", line_color="#93A1B5",
-                    annotation_text=f"{hw.name} ceiling ({hw.effective_bandwidth_gbs:.1f} GB/s)",
-                    annotation_position="top right",
-                )
-                fig_bw.update_layout(
-                    yaxis_title="DRAM GB/s consumed by vision pipeline",
-                    plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                    font=dict(color="#EAEDF4", size=13),
-                    height=340, margin=dict(l=50, r=40, t=30, b=60),
-                    showlegend=False,
-                )
-                _apply_chart_theme(fig_bw)
-                st.plotly_chart(fig_bw, width="stretch")
-    
-        with bw_text_col:
-            if measured_bytes_per_frame is None:
-                st.caption(
-                    "**Currently mapped pipelines:** trt_fp8_1hz_clip, "
-                    "trt_fp8_every_frame, yolo_only_fp8, hybrid_v2_*, "
-                    "yoloe26_*, efficientsam3_es_ev_s_bf16, essmall_fp8. "
-                    "**Pending:** sam3_bf16, efficientsam3p1_es_ev_s_bf16 "
-                    "(kernel-replay ncu sweeps queued)."
-                )
-            else:
-                measured_gbs = measured_bytes_per_frame * effective_total_fps / 1e9
-                util_pct = (measured_gbs / approx_gbs * 100) if approx_gbs > 0 else 0
-                headroom_gbs = max(0.0, approx_gbs - measured_gbs)
+                    "inference budget. Measured: 4K is only **~21% slower** than "
+                    "720p, not 9× slower.")
+
+    with vt_stream:
+        srows = []
+        for N in [1, 2, 4, 8, 16]:
+            v = project_vision(PIPELINES[pk], hw, resolution=res, n_streams=N,
+                               compiler_quality_vs_trt=compiler_quality, npu_share=npu_share)
+            srows.append({"N streams": N,
+                          "Per-stream FPS": round(v["fps_per_stream"], 1),
+                          "Total system FPS": round(v["total_fps"], 1),
+                          "Batch cycle ms": round(v["per_stream_ms"], 1),
+                          "VRAM (MB)": round(v["vram_mb"], 0),
+                          "Fits": "✓" if v["fits_in_memory"] else "✗"})
+        df_s = pd.DataFrame(srows)
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            fig_s = go.Figure()
+            fig_s.add_trace(go.Scatter(x=df_s["N streams"], y=df_s["Per-stream FPS"],
+                                       mode="lines+markers", line=dict(color="#6366F1", width=3),
+                                       marker=dict(size=9), name="Per-stream FPS"))
+            fig_s.add_trace(go.Scatter(x=df_s["N streams"], y=df_s["Total system FPS"],
+                                       mode="lines+markers",
+                                       line=dict(color="#22C55E", width=3, dash="dash"),
+                                       marker=dict(size=9), name="Total system FPS", yaxis="y2"))
+            fig_s.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
+                            annotation_text="30 FPS real-time")
+            fig_s.update_layout(template="plotly_white", height=340,
+                                margin=dict(l=10, r=10, t=10, b=10),
+                                xaxis_title="Concurrent streams",
+                                yaxis=dict(title="Per-stream FPS"),
+                                yaxis2=dict(title="Total system FPS", overlaying="y", side="right"),
+                                legend=dict(orientation="h", y=-0.28))
+            st.plotly_chart(fig_s, use_container_width=True, key="v_streams")
+        with c2:
+            st.dataframe(df_s, width="stretch", hide_index=True)
+            st.caption("YOLO batching amortizes kernel overhead — 4 streams at batch=4 "
+                       "typically get ~70% of single-stream FPS, not 25%.")
+
+    with vt_bw:
+        mbpf = measured_dram_per_frame(pk)
+        eff_total_fps = vr["fps_per_stream"] * n_cameras
+        approx = hw.effective_bandwidth_gbs
+        if mbpf is None:
+            st.info(f"No ncu measurement mapped for **{PIPELINES[pk].label}** yet — "
+                    "only the saturation approximation is available for this pipeline.")
+        else:
+            meas = mbpf * eff_total_fps / 1e9
+            fig_bw = go.Figure(go.Bar(
+                x=["Saturation model<br>(CSV ss_ddr_gbs_avg)",
+                   "Measured (ncu)<br>ss_ddr_gbs_avg_measured"],
+                y=[approx, meas], marker_color=["#EF4444", "#22C55E"],
+                text=[f"{approx:.1f} GB/s", f"{meas:.2f} GB/s"], textposition="outside"))
+            fig_bw.add_hline(y=approx, line_dash="dot", line_color="#93A1B5",
+                             annotation_text=f"{hw.name} ceiling ({approx:.1f} GB/s)",
+                             annotation_position="top right")
+            fig_bw.update_layout(template="plotly_white", height=320,
+                                 margin=dict(l=10, r=10, t=10, b=10),
+                                 yaxis_title="DRAM GB/s consumed by vision pipeline",
+                                 showlegend=False)
+            st.plotly_chart(fig_bw, use_container_width=True, key="v_bw")
+            util = (meas / approx * 100) if approx > 0 else 0
+            st.markdown(f"**Per-frame DRAM:** {mbpf/1e6:.1f} MB · **Pipeline FPS:** "
+                        f"{eff_total_fps:.1f} · **Measured usage:** {meas:.2f} GB/s "
+                        f"({util:.1f}% of ceiling) · **Spare:** {max(0.0, approx-meas):.1f} GB/s")
+            comps = measured_components(pk) or []
+            if len(comps) > 1:
+                parts = " + ".join(f"`{c['ncu_workload_id']}` × {c['fires_per_frame']:.3g} "
+                                   f"({c['dram_bytes_per_fire']/1e6:.1f} MB/fire)" for c in comps)
+                st.caption(f"Composition: {parts}")
+            meta = bundle_metadata()
+            st.caption("Saturation = pessimistic bus-pin assumption; measured = ncu DRAM "
+                       "bytes/forward × FPS. The gap is real headroom for concurrent LLM / "
+                       f"extra streams. ncu bundle `{meta['ncu_bundle_timestamp']}` · "
+                       f"{meta['ncu_n_workloads']} workloads · host *{meta['ncu_measurement_host']}*.")
+
+    with vt_flow:
+        _llm_on = "LLM" in workloads
+        _wl = st.session_state.get("p_work", "plain_chat")
+        _q = st.session_state.get("p_quant", "Q4_K_M")
+        _render_pipeline_strip(_stages_for_pipeline(pk, _llm_on, _wl, _q))
+        st.caption("Indigo = stage driven by your pipeline / LLM choice; slate = always-on "
+                   "infrastructure (ingest, storage). Every stage runs — the colour just "
+                   "flags where your controls take effect.")
+    st.divider()
+
+# ───────────────────────── LLM ─────────────────────────
+if "LLM" in workloads:
+    # Header strip: the three GREEN pickers (Model / Quant / Workload — the
+    # "what am I configuring" controls) + a neutral Duty popover for the
+    # duty-cycle inputs (queries/min + answer length), which feed the
+    # cross-workload Duty-cycle view rather than the LLM headline.
+    head, pm, pq, pw, pdu, _sp = st.columns([0.6, 0.9, 1.0, 1.2, 0.9, 5.4])
+    head.markdown("#### 🤖 LLM")
+    with pm:
+        with st.popover("Model ▾", use_container_width=True, key="pop_llm"):
+            lkeys = list(LLM_MODELS)
+            st.selectbox("LLM model", lkeys, index=lkeys.index("skippy_finetune"),
+                         format_func=lambda k: LLM_MODELS[k].label.split(" (")[0],
+                         key="p_llm")
+    with pq:
+        with st.popover("Quant ▾", use_container_width=True, key="pop_quant"):
+            st.selectbox("Quantization", ("Q4_K_M", "Q5_K_M", "Q8_0"), index=0,
+                         key="p_quant")
+    with pw:
+        with st.popover("Workload ▾", use_container_width=True, key="pop_work"):
+            st.selectbox("Workload pattern", list(WORKLOAD_CATEGORIES), index=0,
+                         format_func=lambda k: WORKLOAD_CATEGORIES[k]["label"],
+                         key="p_work")
+            wl_now = st.session_state.get("p_work", "plain_chat")
+            st.caption(WORKLOAD_CATEGORIES[wl_now]["description"])
+    with pdu:
+        with st.popover("Duty ▾", use_container_width=True):
+            st.slider("Queries / min", 0.0, 60.0, 2.0, 0.1, key="p_qpm")
+            st.radio("Answer length", ("short", "rag"), index=0,
+                     format_func=lambda k: {"short": "Short (~200 tok)",
+                                            "rag": "RAG (8K + 2K)"}[k], key="p_ans")
+
+    lk = st.session_state.get("p_llm", "skippy_finetune")
+    quant = st.session_state.get("p_quant", "Q4_K_M")
+    llm_workload = st.session_state.get("p_work", "plain_chat")
+    alias = LLM_MODELS[lk].measurement_alias or lk
+    _model = LLM_MODELS[lk]
+    _prod = LLM_MODELS[PRODUCTION_REFERENCE_KEY]
+    _is_production = (lk == PRODUCTION_REFERENCE_KEY)
+    lr = project_llm(hw, quant, workload=llm_workload, npu_share=npu_share,
+                     model_key=alias)
+
+    st.caption(f"🤖 **{_model.label.split(' (')[0]}** · {quant} · workload "
+               f"**{WORKLOAD_CATEGORIES[llm_workload]['label']}**")
+
+    m = st.columns([1.1, 1.1, 1.1, 1.1, 3.6])  # cluster the 4 metrics left; spacer eats the rest
+    m[0].metric("Decode", f"{lr['decode_tok_s']:.1f} tok/s")
+    m[1].metric("TTFT (1K)", f"{lr['ttft_1k_sec']*1000:.0f} ms")
+    m[2].metric("Memory fit", "✓ fits" if lr["fits_in_memory"] else "✗ spills",
+                delta=f"{lr['gguf_size_gb']:.1f} GB", delta_color="off")
+    m[3].metric("DDR bandwidth ratio", f"{bandwidth_ratio(hw):.2f}×",
+                delta="vs NPU Mid", delta_color="off")
+
+    g1, g2 = st.columns([2, 3])
+    with g1:
+        per_tier = {}
+        for lbl, key in _TIER_MAP.items():
+            tr = project_llm(TIERS[key], quant, workload=llm_workload,
+                             npu_share=npu_share, model_key=alias)
+            per_tier[lbl] = tr["decode_tok_s"]
+        st.plotly_chart(_per_tier_bar(per_tier, "decode tok/s", base_tier),
+                        use_container_width=True, key="l_tier")
+        st.caption("Decode tok/s across tiers — near-flat across NPU classes "
+                   "(decode is BW-bound, not compute-bound); selection in red.")
+    with g2:
+        # The precision what-if compare (Mid/High) — the validated feature, in
+        # its full-width home now instead of buried in a sidebar.
+        if base_tier in ("Mid", "High"):
+            st.caption("**🎛️ Precision what-if — if this NPU added FP8 / FP4**")
+            mat = st.radio("FP4 runtime", ["Immature (edge)", "Mature (vLLM/TRT)"],
+                           index=0, horizontal=True, key="p_fp4mat")
+            mat = "immature" if mat.startswith("Immature") else "mature"
+            base_hw_p = TIERS[_TIER_MAP[base_tier]]
+            rc = st.columns(3)
+            base_ttft = None
+            for col, (lab, ps) in zip(rc, [("INT-only", "int8"),
+                                           ("+FP8", "int8_fp8"),
+                                           ("+FP8+FP4", "int8_fp8_fp4")]):
+                _mt = mat if ps == "int8_fp8_fp4" else "mature"
+                pr = project_llm(hw_with_precision(base_hw_p, ps), quant,
+                                 workload=llm_workload, npu_share=npu_share,
+                                 model_key=alias, fp4_runtime_maturity=_mt)
+                tt = pr['ttft_1k_sec'] * 1000
+                if ps == "int8":
+                    base_ttft = tt
+                sp = (f" · {base_ttft/tt:.1f}× vs INT8"
+                      if base_ttft and ps != "int8" and tt < base_ttft else "")
+                col.metric(lab, f"{tt:.0f} ms", delta="prefill", delta_color="off")
+                col.caption(f"decode {pr['decode_tok_s']:.0f} tok/s{sp}")
+        else:
+            st.info("**🎛️ Precision what-if** is a Mid / High feature — those tiers "
+                    "sit in the FP-capable LPDDR5X memory class where positing an "
+                    "FP8 / FP4 tensor engine is meaningful. Select **Mid** or **High** "
+                    "to compare INT-only → +FP8 → +FP8+FP4 prefill.")
+
+    # ── scoped depth tabs (Accuracy / Precision / Performance / Timing),
+    # wrapped in a collapsible "detail" expander so the section can MINIMIZE
+    # (create-inside / fill-below pattern; see the Vision section note). ──
+    with st.expander("🔎 LLM detail — accuracy · precision · performance · timing",
+                     expanded=False):
+        t_acc, t_prec, t_perf, t_tim = st.tabs(
+            ["Accuracy", "Precision", "Performance", "Timing"])
+
+    with t_acc:
+        if _model.pass_rate is None:
+            st.info(f"**{_model.label}** — perf-reference variant (same weights, "
+                    "alternate compute_dtype to reach an anchor cell). No standalone "
+                    "eval; pick a production / fine-tune / baseline row for accuracy.")
+        else:
+            st.markdown(
+                f"**{_model.label}** — {_model.pass_rate*100:.1f}% pass "
+                f"({_model.pass_n_passes}/{_model.pass_n_total})  ·  base "
+                f"{_model.base}  ·  {_model.total_params_b:.0f}B / "
+                f"{_model.active_params_b:.0f}B active")
+            cat_rows = []
+            for _k, _mm in LLM_MODELS.items():
+                d = accuracy_delta_pp(_mm, _prod)
+                ds = ("— (ref)" if _k == PRODUCTION_REFERENCE_KEY
+                      else "perf ref" if d is None
+                      else f"{'+' if d >= 0 else ''}{d:.1f}pp")
+                cat_rows.append({
+                    "Model": (("➤ " if _k == lk else "") + _mm.label.split(' (')[0]),
+                    "Pass": f"{_mm.pass_rate*100:.1f}%" if _mm.pass_rate is not None else "—",
+                    "Δ vs prod": ds,
+                    "Arch": f"{_mm.total_params_b:.0f}B/{_mm.active_params_b:.0f}B",
+                })
+            st.dataframe(pd.DataFrame(cat_rows), width="stretch", hide_index=True)
+            if _model.category_deltas:
+                _pc = _prod.category_deltas or {}
+                st.markdown("**Per-category** (production reference):" if _is_production
+                            else "**Per-category** (Δ vs production, + = this model wins):")
+                for cat, data in _model.category_deltas.items():
+                    lab = CATEGORY_LABELS.get(cat, cat)
+                    p, n, rate = data.get("pass", 0), data.get("n", 0), data.get("rate", 0.0)
+                    pdat = _pc.get(cat)
+                    if pdat and not _is_production:
+                        dl = p - pdat.get("pass", 0)
+                        st.markdown(f"- {lab}: **{p}/{n}** ({rate:.0%}) — Δ {'+' if dl >= 0 else ''}{dl}")
+                    else:
+                        st.markdown(f"- {lab}: **{p}/{n}** ({rate:.0%})")
+            # popover (not expander) so it doesn't illegally nest inside the
+            # collapsible "LLM detail" expander that now wraps these tabs.
+            with st.popover("📐 Eval methodology — Finding 4 (Qwen-family format bias)"):
                 st.markdown(
-                    f"**Per-frame DRAM:** {measured_bytes_per_frame / 1e6:.1f} MB  \n"
-                    f"**Pipeline FPS (all streams):** {effective_total_fps:.1f}  \n"
-                    f"**Measured usage:** {measured_gbs:.2f} GB/s "
-                    f"({util_pct:.1f}% of {hw.name} ceiling)  \n"
-                    f"**Spare bandwidth:** {headroom_gbs:.1f} GB/s"
-                )
-                comps = measured_components(pipeline.key) or []
-                if len(comps) > 1:
-                    parts = " + ".join(
-                        f"`{c['ncu_workload_id']}` × {c['fires_per_frame']:.3g} "
-                        f"({c['dram_bytes_per_fire']/1e6:.1f} MB/fire)"
-                        for c in comps
-                    )
-                    st.caption(f"Composition: {parts}")
+                    "Headline uses **semantic grading** (GPT-4o binary, 132-sample "
+                    "v2-RAG, temp=0). The production model's substring lift eroded "
+                    "across five successive cross-checks:")
+                st.markdown(
+                    "| # | Cross-check | Result |\n|---|---|---|\n"
+                    "| 1 | Substring (original) | **+3.1pp** |\n"
+                    "| 2 | LLM-judge (Sonnet 4.6) | −0.35 |\n"
+                    "| 3 | Temp=0.3 substring | −29.3pp |\n"
+                    "| 4 | Cross-judge (GPT-4o) | −0.69 |\n"
+                    "| 5 | **Semantic regrade** | **−4.6pp** (sign reversal) |")
                 st.caption(
-                    "The **saturation model** pessimistically assumes the workload "
-                    "pins the bus at the NPU's effective bandwidth. The **measured** "
-                    "value comes from ncu-counted DRAM bytes per forward × pipeline "
-                    "FPS. The gap is real headroom for concurrent work — parallel "
-                    "LLM, extra streams, other workloads."
-                )
+                    "Production decision unaffected — Skippy 7B v4 ships on the "
+                    "three-gate framework (capability + voice + safety); substring "
+                    "was never load-bearing. Full deck narrative carries from app.py. "
+                    f"Methodology `{METHODOLOGY_VERSION}`.")
+
+    with t_prec:
+        _blocked = (hw.capability_levels is not None
+                    and capability_level(hw, "int8") == "tensor_compat")
+        st.markdown(
+            f"**Quality cost of the quant recipe** (Qwen2.5-14B + RAG, v2 prompt set, "
+            f"132 samples). fp16 reference: **{FP16_REFERENCE.pass_rate*100:.1f}%** "
+            f"({FP16_REFERENCE.pass_n_passes}/{FP16_REFERENCE.pass_n_total}).")
+        prec_rows = []
+        for cfg in LLM_QUANT_LADDER:
+            d = delta_pp_vs_fp16(cfg)
+            ds = "—" if cfg.key == FP16_REFERENCE.key else f"{d:+.1f}pp"
+            lab = cfg.label
+            if cfg.key == QWEN_W8A8_RAG.key and _blocked:
+                lab = f"⚠ {lab} — n/a on {hw.name}"
+            prec_rows.append({"Configuration": lab,
+                              "Pass": f"{cfg.pass_rate*100:.1f}%",
+                              "Δ vs fp16": ds,
+                              "n": f"{cfg.pass_n_passes}/{cfg.pass_n_total}",
+                              "Host": cfg.measurement_host})
+        st.dataframe(pd.DataFrame(prec_rows), width="stretch", hide_index=True)
+        if _blocked:
+            st.warning(
+                "**W8A8 INT8 is ecosystem-blocked on this tier.** Consumer Blackwell "
+                "SM120 throws `RuntimeError: Int8 not supported on SM120` — the W8A8 "
+                "row is an H100 measurement kept for the deck story, not achievable here.")
+        st.markdown("**Where the W8A8 −3.8pp regression lives** (vs fp16 base):")
+        for cat, dp in W8A8_VS_FP16_CATEGORY_DELTAS.items():
+            lab = CATEGORY_LABELS.get(cat, cat)
+            st.markdown(f"- {lab}: **±0** (no drift)" if dp == 0
+                        else f"- {lab}: **{'+' if dp > 0 else ''}{dp} passes**")
+        st.caption(
+            "Coding + reasoning byte-identical fp16↔W8A8 (structured output untouched "
+            "by INT8); regression localizes in retrieval-grounded wording. Deck framing: "
+            "W8A8 ~−3.8pp vs fp16; base→FT adds ~5pp, so a fine-tuned W8A8 lands near "
+            "the fp16 base — lifecycle cost dominates, not the ~4pp hit.")
+
+    with t_perf:
+        st.markdown(
+            "All five patterns measured on **Qwen3-30B-A3B-Instruct-2507** (Q4_K_M, "
+            "llama.cpp) on an **RTX 5090** — decode spans **3.6 → 222 tok/s** across "
+            "real traffic (~60×), which single-number vendor benchmarks miss.")
+        dist = workload_distribution_on_hw(hw, quant)
+        f = perf_scale_factor(_model)
+        if f != 1.0:
+            dist = [{**d, "decode_tok_s": d["decode_tok_s"] * f} for d in dist]
+        d_labels = [f"{d['label']}  (n={d['n']})" for d in dist]
+        d_values = [d["decode_tok_s"] for d in dist]
+        d_colors = ["#22A06B" if d["key"] == llm_workload else "#9AA7BD" for d in dist]
+        fig_dist = go.Figure(go.Bar(
+            y=d_labels, x=d_values, orientation="h", marker_color=d_colors,
+            text=[f"{v:.1f}" for v in d_values], textposition="outside"))
+        fig_dist.update_layout(template="plotly_white", height=260,
+                               margin=dict(l=10, r=30, t=10, b=10),
+                               xaxis_title=f"decode tok/s on {hw.name} @ {quant}")
+        st.plotly_chart(fig_dist, use_container_width=True, key="l_dist")
+        mx = max(d_values); mn = min(v for v in d_values if v > 0)
+        st.caption(
+            f"Selected workload highlighted (green). Spread **{mx/mn:.0f}× worst-case** "
+            f"({mx:.0f} → {mn:.1f} tok/s) on this HW+quant. Edge capacity planning "
+            f"should budget for the RAG / tool-use tail, not the plain-chat peak.")
+
+    with t_tim:
+        sp_ms = lr["ttft_1k_sec"] * 1000
+        sd_ms = (200 / lr["decode_tok_s"]) * 1000 if lr["decode_tok_s"] > 0 else 0
+        rp_ms = lr["rag_prefill_sec"] * 1000
+        rd_ms = lr["rag_decode_sec"] * 1000
+        fig_tim = go.Figure()
+        fig_tim.add_trace(go.Bar(name="Prefill", x=["Short (1K, 200 tok)", "RAG (8K+2K)"],
+                                 y=[sp_ms, rp_ms], marker_color="#F59E0B"))
+        fig_tim.add_trace(go.Bar(name="Decode", x=["Short (1K, 200 tok)", "RAG (8K+2K)"],
+                                 y=[sd_ms, rd_ms], marker_color="#6366F1"))
+        fig_tim.update_layout(barmode="stack", template="plotly_white", height=300,
+                              margin=dict(l=10, r=10, t=10, b=10),
+                              yaxis_title="Per-answer latency (ms)",
+                              legend=dict(orientation="h", y=-0.2))
+        st.plotly_chart(fig_tim, use_container_width=True, key="l_tim")
+        st.caption(f"TTFT 1K = **{lr['ttft_1k_sec']*1000:.0f} ms** · "
+                   f"decode = **{lr['decode_tok_s']:.1f} tok/s** · answer mode from Duty ▾")
+    st.divider()
+
+# ───────────────────────── VLA ─────────────────────────
+if "VLA" in workloads:
+    head, picker, _sp = st.columns([0.6, 0.9, 8.5])  # picker hugs the section name
+    head.markdown("#### 🦾 VLA")
+    with picker:
+        with st.popover("VLA model ▾", use_container_width=True, key="pop_vla"):
+            vkeys = list(VLA_MODELS)
+            vk = st.selectbox("VLA model", vkeys, index=vkeys.index("nora_3b"),
+                              format_func=lambda k: VLA_MODELS[k].display_name, key="p_vla")
+    vk = st.session_state.get("p_vla", "nora_3b")
+    r = project_vla(VLA_MODELS[vk], hw, npu_share=npu_share, n_cameras=n_cameras)
+
+    # 🟢🔵🟠 calibration badge — a multi-camera what-if can drop the projection
+    # to 🟠 (vla_source_reason); otherwise use the source's own taxonomy.
+    if r.get("runs"):
+        if r["vla_source"] == "cross_class" and r.get("vla_source_reason"):
+            _bi, _bl, _bt = "🟠", "cross_class (what-if)", r["vla_source_reason"]
+        else:
+            _bi, _bl, _bt = _VLA_SOURCE_BADGE.get(
+                r["vla_source"], ("", r.get("vla_source", "?"), ""))
+        st.caption(f"{_bi} **{_bl}** · {VLA_MODELS[vk].display_name} · "
+                   f"`{r['architecture']}` · exec dtype "
+                   f"`{r.get('expert_dtype') or r['dtype']}` — {_bt}")
+
+    if r.get("deferred"):
+        st.info(f"**{VLA_MODELS[vk].display_name}** — projection deferred: {r['reason']}")
+    elif not r.get("runs"):
+        st.error(f"**{VLA_MODELS[vk].display_name} won't run on {hw.name}** — {r['reason']}")
+    else:
+        m = st.columns([1.1, 1.1, 1.1, 1.1, 3.6])  # cluster the 4 metrics left; spacer eats the rest
+        m[0].metric("Per-camera FPS", f"{r['camera_fps']:.1f}")
+        m[1].metric("Aggregate FPS", f"{r['aggregate_camera_fps']:.0f}",
+                    delta=f"× {r['n_cameras']} cam", delta_color="off")
+        m[2].metric("Memory fit", "✓ fits" if r["fits_in_memory"] else "✗ spills",
+                    delta=f"{r['dram_gb']:.1f} GB", delta_color="off")
+        m[3].metric("DDR bandwidth ratio",
+                    f"{hw.effective_bandwidth_gbs/NPU_MID.effective_bandwidth_gbs:.2f}×",
+                    delta="vs NPU Mid", delta_color="off")
+        st.caption(f"🤖 `{r['architecture']}` · control loop **{r['action_hz']:.1f} Hz** "
+                   f"({r['ms_per_action']:.0f} ms/action)")
+
+        # ── scoped depth tabs (Tier scaling / Control-loop breakdown),
+        # wrapped in a collapsible "detail" expander so the section can MINIMIZE
+        # (create-inside / fill-below pattern; see the Vision section note). ──
+        with st.expander("🔎 VLA detail — tier scaling · control-loop", expanded=False):
+            wt_tier, wt_loop = st.tabs(["Tier scaling", "Control-loop breakdown"])
+        with wt_tier:
+            per_tier = {}
+            for lbl, key in _TIER_MAP.items():
+                tr = project_vla(VLA_MODELS[vk], TIERS[key], npu_share=npu_share,
+                                 n_cameras=n_cameras)
+                per_tier[lbl] = tr.get("camera_fps", 0.0) if tr.get("runs") else 0.0
+            st.plotly_chart(_per_tier_bar(per_tier, "per-camera FPS", base_tier),
+                            use_container_width=True, key="w_tier")
+            st.caption("Per-camera perception FPS across every silicon tier — single-loop AR "
+                       "models flatten (High ≈ Mid, decode-BW-bound); OFT / dual-loop scale "
+                       "with compute. Bars at 0 = the model won't run on that tier.")
+        with wt_loop:
+            _vla_breakdown(r)
+    st.divider()
+
+# ──────────────── PLATFORM BUDGET — duty-cycle contention ────────────────
+# Cross-workload view: each LLM query occupies the shared NPU for its full
+# answer time, stealing that fraction of the second from vision. This is the
+# *time-domain* duty cycle, distinct from the static npu_share split in the
+# control strip. Only meaningful when BOTH vision and LLM are live. Ported
+# from app.py "Vision FPS under concurrent LLM load"; consumes the Duty ▾
+# popover controls (p_qpm / p_ans) that were previously inert.
+if "Vision" in workloads and "LLM" in workloads:
+    st.markdown("#### 🔀 Platform budget — vision FPS under concurrent LLM load")
+    qpm_cur = st.session_state.get("p_qpm", 2.0)
+    answer_kind = st.session_state.get("p_ans", "short")
+    base_fps = vr.get("fps_per_stream", 0.0)
+    short_ms = lr["short_answer_sec"] * 1000
+    rag_ms = lr["rag_total_sec"] * 1000
+
+    qpm = np.linspace(0, 120, 200)
+    qps = qpm / 60
+    fps_short = np.clip(base_fps * (1 - qps * short_ms / 1000), 0, base_fps)
+    fps_rag = np.clip(base_fps * (1 - qps * rag_ms / 1000), 0, base_fps)
+
+    cur_ms = short_ms if answer_kind == "short" else rag_ms
+    fps_eff = max(0.0, base_fps * (1 - (qpm_cur / 60) * cur_ms / 1000))
+
+    col_chart, col_txt = st.columns([1.5, 1])
+    with col_chart:
+        figd = go.Figure()
+        figd.add_trace(go.Scatter(x=qpm, y=fps_short, mode="lines",
+                                  line=dict(color="#22C55E", width=3),
+                                  name=f"Short answer ({short_ms/1000:.1f}s each)"))
+        figd.add_trace(go.Scatter(x=qpm, y=fps_rag, mode="lines",
+                                  line=dict(color="#F59E0B", width=3),
+                                  name=f"RAG answer ({rag_ms/1000:.0f}s each)"))
+        figd.add_vline(x=qpm_cur, line_dash="dot", line_color="#6366F1",
+                       annotation_text=f"current: {qpm_cur:.1f}/min",
+                       annotation_position="top")
+        figd.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
+                       annotation_text="30 FPS")
+        figd.add_hline(y=15, line_dash="dot", line_color="#93A1B5",
+                       annotation_text="15 FPS")
+        figd.update_layout(template="plotly_white", height=360,
+                           margin=dict(l=10, r=10, t=10, b=10),
+                           xaxis_title="LLM queries per minute",
+                           yaxis_title="Effective vision FPS",
+                           legend=dict(orientation="h", y=-0.25))
+        st.plotly_chart(figd, use_container_width=True, key="duty_chart")
+    with col_txt:
+        st.metric("Effective vision FPS", f"{fps_eff:.1f}",
+                  delta=f"from {base_fps:.1f} stock", delta_color="off")
+        _amode = "Short (~200 tok)" if answer_kind == "short" else "RAG (8K + 2K)"
+        st.caption(f"At **{qpm_cur:.1f}/min** of **{_amode}** answers on "
+                   f"**{hw.name} @ {quant}**, vision drops "
+                   f"**{base_fps:.1f} → {fps_eff:.1f} FPS** per stream.")
+        st.caption(f"LLM: decode **{lr['decode_tok_s']:.1f} tok/s** · TTFT(1K) "
+                   f"**{lr['ttft_1k_sec']*1000:.0f} ms** · short "
+                   f"**{lr['short_answer_sec']:.1f}s** · RAG "
+                   f"**{lr['rag_total_sec']:.0f}s** · GGUF "
+                   f"**{lr['gguf_size_gb']:.1f} GB** "
+                   f"{'✓ fits' if lr['fits_in_memory'] else '✗ spills'}")
+        st.caption("Each query holds the shared NPU for its full answer time — "
+                   "that fraction of the second is stolen from vision. Time-domain "
+                   "duty cycle, distinct from the static NPU-share split above. "
+                   "Tune via **Duty ▾** in the LLM control strip.")
+    st.divider()
+
+# ───────────────────────── KPIs ONSCREEN ─────────────────────────
+if workloads and st.session_state.get("p_kpi_on", True):
+    st.markdown("#### 📊 KPIs — current configuration")
+    _slug = _tier_slug(hw.name)
+    rows = []
+    if "Vision" in workloads:
+        rows.append({"Workload": f"Vision · {pk}", "Per-cam FPS": round(vr.get('fps_per_stream', 0.0), 1),
+                     "Aggregate FPS": round(vr.get('total_fps', 0.0), 0),
+                     "Fits": "✓" if vr.get("fits_in_memory") else "✗",
+                     "BW ratio vs Mid": f"{vr.get('bandwidth_ratio_vs_ref', 1.0):.2f}×"})
+    if "LLM" in workloads:
+        rows.append({"Workload": f"LLM · {LLM_MODELS[lk].label.split(' (')[0]}",
+                     "Per-cam FPS": None, "Aggregate FPS": None,
+                     "Fits": "✓" if lr["fits_in_memory"] else "✗",
+                     "BW ratio vs Mid": f"{bandwidth_ratio(hw):.2f}×",
+                     "Decode tok/s": round(lr["decode_tok_s"], 1),
+                     "TTFT ms": round(lr["ttft_1k_sec"] * 1000, 0)})
+    if "VLA" in workloads and r.get("runs"):
+        rows.append({"Workload": f"VLA · {VLA_MODELS[vk].display_name}",
+                     "Per-cam FPS": round(r["camera_fps"], 1),
+                     "Aggregate FPS": round(r["aggregate_camera_fps"], 0),
+                     "Fits": "✓" if r["fits_in_memory"] else "✗",
+                     "BW ratio vs Mid": f"{hw.effective_bandwidth_gbs/NPU_MID.effective_bandwidth_gbs:.2f}×",
+                     "Control Hz": round(r["action_hz"], 1)})
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.download_button("⬇ Summary (CSV)", df.to_csv(index=False),
+                           f"keyhole_sizer_kpis_{_slug}_summary.csv", "text/csv",
+                           key="p_kpi_dl")
+
+    # ── Per-(workload, view) sheet set for ONLY the active workloads → one uber
+    # XLSX (tier-scoped) + per-workload XLSX inside collapsed expanders. Mirrors
+    # pai-sizer's KPI parity, generalized to 3 workloads (Vision/LLM/VLA). ──
+    sheets = {}
+    if "Vision" in workloads:
+        sheets["vision_cross_tier"] = _vision_cross_tier_rows(
+            pk, res, compiler_quality, npu_share, n_cameras)
+        sheets["vision_pipelines"] = _vision_pipeline_rows(hw, res)
+    if "LLM" in workloads:
+        sheets["llm_cross_tier"] = _llm_cross_tier_rows(quant, llm_workload, npu_share, alias)
+        sheets["llm_cross_model"] = _llm_cross_model_rows(hw, quant, llm_workload, npu_share)
+    if "VLA" in workloads:
+        sheets["vla_cross_tier"] = _vla_cross_tier_rows(vk, npu_share, n_cameras)
+        sheets["vla_cross_model"] = _vla_cross_model_rows(hw, npu_share, n_cameras)
+
+    if sheets:
+        _ub_col, _cap_col = st.columns([1.5, 4])
+        with _ub_col:
+            st.download_button(
+                "⬇ Export ALL KPIs (XLSX)", _kpi_xlsx(sheets),
+                file_name=f"keyhole_sizer_kpis_{_slug}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True, key="kpi_uber_dl",
+                help="One workbook, one sheet per (active workload × view), scoped to "
+                     "the selected NPU tier. Only active workloads get sheets.")
+        _cap_col.caption(f"Tier-scoped to **{hw.name}**. Summary row above = current "
+                         "config; the per-workload blocks below carry the full cross-tier "
+                         "and cross-config tables (also in the workbook).")
+
+        # Per-workload KPI blocks — collapsed by default (compact-first).
+        _WL_VIEWS = {
+            "Vision": [("Cross-tier — this pipeline across the ladder", "vision_cross_tier"),
+                       ("All pipelines on this tier", "vision_pipelines")],
+            "LLM":    [("Cross-tier — this model across the ladder", "llm_cross_tier"),
+                       ("Cross-model — all models on this tier", "llm_cross_model")],
+            "VLA":    [("Cross-tier — this model across the ladder", "vla_cross_tier"),
+                       ("Cross-model — all models on this tier", "vla_cross_model")],
+        }
+        for wl in ("Vision", "LLM", "VLA"):
+            if wl not in workloads:
+                continue
+            with st.expander(f"📊 {wl} KPIs", expanded=False):
+                for title, key in _WL_VIEWS[wl]:
+                    if key not in sheets:
+                        continue
+                    st.caption(f"**{title}**")
+                    st.dataframe(pd.DataFrame(sheets[key]),
+                                 use_container_width=True, hide_index=True)
+                wl_sheets = {k: sheets[k] for _, k in _WL_VIEWS[wl] if k in sheets}
+                st.download_button(
+                    f"⬇ Export {wl} KPIs (XLSX)", _kpi_xlsx(wl_sheets),
+                    file_name=f"keyhole_sizer_kpis_{_slug}_{wl.lower()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"kpi_{wl.lower()}_dl")
+
+    # ── NCU provenance + hardware config (reference detail, collapsed) ──
+    with st.expander("🔬 NCU provenance & hardware config"):
+        prov_col, hw_col = st.columns([1.5, 1])
+        with prov_col:
+            st.caption("**NCU measurement provenance** — vision-pipeline-keyed")
+            comps = measured_components(pk) if "Vision" in workloads else None
+            if "Vision" not in workloads:
+                st.info("Vision off — ncu provenance is pipeline-keyed and not "
+                        "shown in this configuration.")
+            elif comps is None:
+                st.info(f"No ncu mapping for `{pk}` — the saturation "
+                        "approximation is the only figure for this pipeline.")
+            else:
+                dfc = pd.DataFrame([{
+                    "NVTX workload_id":  c["ncu_workload_id"],
+                    "Fires/frame":       c["fires_per_frame"],
+                    "DRAM MB/fire":      round(c["dram_bytes_per_fire"] / 1e6, 2),
+                    "n_fwd (bakeoff)":   c["n_forwards_in_bakeoff"],
+                } for c in comps])
+                st.dataframe(dfc, use_container_width=True, hide_index=True)
+                total_mb = sum(c["dram_bytes_per_fire"] * c["fires_per_frame"]
+                               for c in comps) / 1e6
                 meta = bundle_metadata()
                 st.caption(
-                    f"ncu bundle: `{meta['ncu_bundle_timestamp']}` · "
-                    f"{meta['ncu_n_workloads']} workloads · host "
-                    f"*{meta['ncu_measurement_host']}*"
-                )
-    
-    # ───── LLM timing row (only when LLM is enabled) ─────
-    if llm_enabled:
-        st.markdown("---")
-        st.markdown(f"### LLM — Qwen3-30B-A3B MoE @ {quant}")
-
-        # ── Precision what-if compare (Mid/High, ratchet ADR 017) ──────────
-        # Self-contained "what if this NPU's tensor engine supported FP8 / FP4?"
-        # block — the control (FP4 runtime toggle) is co-located with its payoff
-        # (the 3-column prefill/accuracy compare), NOT hidden in the sidebar
-        # (Kyle 2026-06-05: the sidebar radio read as confusing real-hardware
-        # config). The headline above runs on the REAL stock tier; this is an
-        # explicit what-if positing FP-capable silicon at the same memory class.
-        # Built from `precision_base_hw` (memory-applied, pre-precision) so all
-        # three rungs always show. FP4 = modeled, zero silicon anchors.
-        if tier in ("NPU Mid", "NPU High"):
-            from sizer.npu_model import hw_with_precision as _hw_with_precision
-            st.subheader("🎛️ Precision what-if — what if this NPU added FP8 / FP4?")
-            st.caption(
-                f"The **{tier}** tier above is sized on its real silicon. This "
-                f"block is a what-if: posit an FP-capable tensor engine at the "
-                f"same memory class and see what each precision rung would buy "
-                f"**{LLM_MODELS[llm_model_key].label.split(' (')[0]}** @ 1K-token "
-                f"prompt. Prefill / TTFT is the compute benefit; decode is "
-                f"BW-bound (held by the 4-bit weight stream, unchanged). FP4 is a "
-                f"🟠 modeled projection — zero edge-NPU silicon anchors (low confidence)."
-            )
-            # FP4 runtime maturity — co-located here (was a sidebar control).
-            # Drives only the +FP8+FP4 column. Default immature (edge runtimes
-            # are llama.cpp-class; ADR-016 immature FP4 = the honest no-win floor).
-            _mat_choice = st.radio(
-                "FP4 runtime maturity (for the +FP8+FP4 column)",
-                options=[
-                    "Immature — edge default (llama.cpp-class runtime)",
-                    "Mature — vLLM / TensorRT-LLM-class runtime",
-                ],
-                index=0,
-                horizontal=True,
-                key=f"fp4_maturity_compare_{tier}",
-                help=(
-                    "FP4's prefill win is RUNTIME-conditional (ratchet ADR 016). "
-                    "Same NVFP4 weights, same RTX 5090: vLLM gave a 3.59× prefill "
-                    "WIN, but llama.cpp ran 15–19% SLOWER than Q4_K_M. Edge NPU "
-                    "vendor runtimes are frequently llama.cpp-class, so the honest "
-                    "edge default is IMMATURE: FP4 collapses to the INT4-weight "
-                    "floor (prefill back at the bf16 floor, no compute win; decode "
-                    "stays BW-bound). Flip to MATURE only if your target vendor "
-                    "runtime is proven vLLM / TensorRT-class."
-                ),
-            )
-            _compare_maturity = ("immature" if _mat_choice.startswith("Immature")
-                                 else "mature")
-            _rungs = [
-                ("INT-only", "int8",
-                 "W8A8 — 2× prefill vs fp16", "🔴 −3.8pp (W8A8 cliff)"),
-                ("INT + FP8", "int8_fp8",
-                 "== INT8 speed, near-lossless", "🟢 ≈0pp (recovers cliff)"),
-                ("INT + FP8 + FP4", "int8_fp8_fp4",
-                 "2× the 8-bit prefill (mature)", "🟢 ≈0pp (NVFP4)"),
-            ]
-            _cmp_cols = st.columns(3)
-            _baseline_ttft = None   # INT-only TTFT, for the relative-speedup line
-            for _col, (_label, _ps, _speed_note, _acc_note) in zip(_cmp_cols, _rungs):
-                _mat = _compare_maturity if _ps == "int8_fp8_fp4" else "mature"
-                _vhw = _hw_with_precision(precision_base_hw, _ps)
-                _rr = project_llm(_vhw, quant, workload=llm_workload,
-                                   npu_share=npu_share, model_key=_perf_lookup_key,
-                                   fp4_runtime_maturity=_mat)
-                _ttft_ms = _rr["ttft_1k_sec"] * 1000
-                if _ps == "int8":
-                    _baseline_ttft = _ttft_ms
-                # FP4 column reflects the live maturity toggle above.
-                if _ps == "int8_fp8_fp4":
-                    if _mat == "immature":
-                        _speed_note = "immature → no prefill win (bf16 floor)"
-                        _acc_note = "🟡 ≈0pp acc, but ADR-016 'no win'"
-                    _label = f"{_label} · {_mat}"
-                _speedup = ""
-                if (_ttft_ms and _baseline_ttft and _ps != "int8"
-                        and _ttft_ms < _baseline_ttft):
-                    _speedup = f" ({_baseline_ttft / _ttft_ms:.1f}× vs INT8)"
-                with _col:
-                    st.markdown(f"**{_label}**")
-                    st.metric("Prefill / TTFT 1K", f"{_ttft_ms:.0f} ms",
-                              delta=_speed_note, delta_color="off")
-                    st.caption(f"Decode: **{_rr['decode_tok_s']:.1f}** tok/s"
-                               f"{_speedup}")
-                    st.caption(f"Accuracy: {_acc_note}")
-            # RAM is an ORTHOGONAL axis (weight format), NOT a compute-rung
-            # effect — render it fixed-by-model with the orthogonal-axis caption
-            # ([docs]-ratified nuance #2, spec §5.1). An already-Q4 model keeps
-            # 4-bit weights at every rung.
-            _wgb = llm.get("gguf_size_gb")
-            st.caption(
-                "↑ INT8 **and** FP8 both buy ~2× prefill over a naive fp16 run; "
-                "FP8's edge over INT8 is the accuracy recovery (same speed). FP4 "
-                "adds another ~2× prefill **on a mature runtime only** (toggle "
-                "above). "
-                + (f"**Weight RAM ≈ {_wgb:.1f} GB** is fixed by this model's "
-                   f"{quant} quantization — it doesn't change across compute "
-                   f"rungs; FP4's half-RAM benefit applies when deploying "
-                   f"FP4-quantized weights vs FP8/INT8 weights, an orthogonal "
-                   f"model-choice axis."
-                   if _wgb else
-                   "Weight RAM is set by the model's quantization, not the "
-                   "compute rung.")
-            )
-            st.markdown("---")
-
-        llm_left, llm_right = st.columns([1, 1])
-
-        with llm_left:
-            st.subheader("LLM timing (ms) — prefill + decode stacked")
-            # Compute per-answer-mode prefill + decode for the current HW+quant
-            short_prefill_ms = llm["ttft_1k_sec"] * 1000 * 0.2   # 200 token prompt approx
-            # Actually we should use a consistent prefill model. Kyle's LLM bake-off
-            # measured ttft_1k_sec explicitly for 1K prompts. For short-answer we
-            # assume a ~1K prompt (typical chat), for RAG we use 8K.
-            short_prefill_ms = llm["ttft_1k_sec"] * 1000           # 1K prompt
-            short_decode_ms = (200 / llm["decode_tok_s"]) * 1000 if llm["decode_tok_s"] > 0 else 0
-            rag_prefill_ms = llm["rag_prefill_sec"] * 1000
-            rag_decode_ms = llm["rag_decode_sec"] * 1000
-
-            # Format ms values with k/s units so tiny bars' labels stay readable
-            def _fmt_ms(ms: float) -> str:
-                if ms >= 10_000:
-                    return f"{ms/1000:.1f} s"
-                if ms >= 1000:
-                    return f"{ms/1000:.2f} s"
-                return f"{ms:.0f} ms"
-
-            fig_llm = go.Figure()
-            fig_llm.add_trace(go.Bar(
-                name="Prefill", x=["Short (1K prompt, 200 tok)", "RAG (8K+2K)"],
-                y=[short_prefill_ms, rag_prefill_ms],
-                marker=dict(color="#F59E0B"),
-                text=[_fmt_ms(short_prefill_ms), _fmt_ms(rag_prefill_ms)],
-                textposition="outside",
-                textfont=dict(size=14, color="#EAEDF4"),
-                cliponaxis=False,
-            ))
-            fig_llm.add_trace(go.Bar(
-                name="Decode", x=["Short (1K prompt, 200 tok)", "RAG (8K+2K)"],
-                y=[short_decode_ms, rag_decode_ms],
-                marker=dict(color="#6366F1"),
-                text=[_fmt_ms(short_decode_ms), _fmt_ms(rag_decode_ms)],
-                textposition="inside",
-                insidetextanchor="middle",
-                textfont=dict(size=16, color="#FFFFFF"),
-            ))
-            fig_llm.update_layout(
-                barmode="stack",
-                yaxis_title="Per-answer latency (ms)",
-                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4", size=13),
-                legend=dict(orientation="h", y=-0.18, font=dict(size=13)),
-                xaxis=dict(tickfont=dict(size=13, color="#EAEDF4")),
-                yaxis=dict(tickfont=dict(size=12, color="#EAEDF4"),
-                            title_font=dict(size=13, color="#EAEDF4")),
-                height=360, margin=dict(l=60, r=30, t=40, b=60),
-            )
-            _apply_chart_theme(fig_llm)
-            st.plotly_chart(fig_llm, width="stretch")
-            st.caption(
-                f"Current answer mode: **{answer_kind}**  •  "
-                f"TTFT 1K = **{llm['ttft_1k_sec']*1000:.0f} ms**  •  "
-                f"decode = **{llm['decode_tok_s']:.1f} tok/s**"
-            )
-
-        with llm_right:
-            st.subheader(f"Decode tok/s vs NPU tier — {WORKLOAD_CATEGORIES[llm_workload]['label']}")
-            tier_llm = []
-            for name, t_hw in TIERS.items():
-                l = project_llm(t_hw, quant, workload=llm_workload,
-                                model_key=llm_model_key)
-                # Same per-model BW scaling as the headline metric:
-                # otherwise the per-tier chart shows MoE numbers when
-                # the user has selected the dense model. (Per-cell
-                # anchor cells skip the scaling internally per the
-                # 'measured' source guard added 2026-05-01.)
-                l = scale_llm_projection(l, LLM_MODELS[llm_model_key],
-                                          hw_mem_capacity_gb=t_hw.mem_capacity_gb)
-                tier_llm.append(dict(tier=name, tok_s=l["decode_tok_s"]))
-            if hw.name not in TIERS:
-                tier_llm.append(dict(tier=hw.name, tok_s=llm["decode_tok_s"]))
-            df_llm = pd.DataFrame(tier_llm)
-
-            fig_llm_tier = go.Figure()
-            fig_llm_tier.add_trace(go.Bar(
-                x=df_llm["tier"], y=df_llm["tok_s"],
-                marker=dict(color=["#EF4444", "#22C55E", "#6366F1", "#F59E0B"][:len(df_llm)]),
-                text=[f"{t:.1f} tok/s" for t in df_llm["tok_s"]],
-                textposition="outside",
-                textfont=dict(size=14, color="#EAEDF4"),
-                cliponaxis=False,
-            ))
-            fig_llm_tier.update_layout(
-                yaxis_title="Decode tok/s",
-                plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-                font=dict(color="#EAEDF4", size=13),
-                xaxis=dict(tickfont=dict(size=13, color="#EAEDF4")),
-                yaxis=dict(tickfont=dict(size=12, color="#EAEDF4"),
-                            title_font=dict(size=13, color="#EAEDF4")),
-                height=360, margin=dict(l=60, r=30, t=40, b=60),
-            )
-            _apply_chart_theme(fig_llm_tier)
-            st.plotly_chart(fig_llm_tier, width="stretch")
-            st.caption(
-                f"At {quant}, for this workload category. MoE wins on BW: "
-                "only 3B of 30B total are loaded per token."
-            )
-
-        # ───── Real-workload distribution row ─────
-        st.markdown("#### LLM performance across real-workload mixes")
-        st.caption("Hover each bar for the category's description, sample size, and measurement caveat.")
-        dist = workload_distribution_on_hw(hw, quant)
-        # Apply the same per-model BW scaling to each workload's decode
-        # tok/s so the chart matches the headline metric when the user
-        # has the dense model selected.
-        _model_for_scale = LLM_MODELS[llm_model_key]
-        _llm_factor = perf_scale_factor(_model_for_scale)
-        if _llm_factor != 1.0:
-            dist = [{**d, "decode_tok_s": d["decode_tok_s"] * _llm_factor} for d in dist]
-        labels = [d["label"] + f"  (n={d['n']})" for d in dist]
-        values = [d["decode_tok_s"] for d in dist]
-        colors = ["#6366F1" if d["key"] == llm_workload else "#374151" for d in dist]
-
-        # Per-bar custom data for the hover popup
-        customdata = [[
-            d["description"],
-            d["note"],
-            d["n"],
-            d["ttft_sec"] * 1000,
-            d["short_answer_sec"],
-        ] for d in dist]
-
-        fig_dist = go.Figure()
-        fig_dist.add_trace(go.Bar(
-            y=labels, x=values,
-            orientation="h",
-            marker=dict(color=colors),
-            text=[f"{v:.1f} tok/s" for v in values],
-            textposition="outside",
-            textfont=dict(size=14, color="#EAEDF4"),
-            cliponaxis=False,
-            customdata=customdata,
-            hovertemplate=(
-                "<b>%{y}</b><br>"
-                "<br>"
-                "Decode: <b>%{x:.2f} tok/s</b><br>"
-                "TTFT 1K prompt: %{customdata[3]:.0f} ms<br>"
-                "Short 200-tok answer: %{customdata[4]:.1f} s<br>"
-                "<br>"
-                "<i>%{customdata[0]}</i><br>"
-                "Sample size: n = %{customdata[2]}<br>"
-                "<br>"
-                "⚠ %{customdata[1]}"
-                "<extra></extra>"
-            ),
-        ))
-        fig_dist.update_layout(
-            xaxis_title=f"Decode tok/s on {hw.name} @ {quant}",
-            plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-            font=dict(color="#EAEDF4", size=13),
-            xaxis=dict(tickfont=dict(size=12, color="#EAEDF4"),
-                        title_font=dict(size=13, color="#EAEDF4")),
-            yaxis=dict(tickfont=dict(size=13, color="#EAEDF4"),
-                        automargin=True),
-            hoverlabel=dict(
-                bgcolor="#1A223B",
-                bordercolor="#6366F1",
-                font=dict(size=13, color="#EAEDF4", family="system-ui"),
-                align="left",
-            ),
-            height=300, margin=dict(l=20, r=40, t=10, b=40),
-            showlegend=False,
-        )
-        _apply_chart_theme(fig_dist)
-        st.plotly_chart(fig_dist, width="stretch")
-
-        mx = max(values); mn = min(v for v in values if v > 0)
-        st.caption(
-            f"Current selection highlighted. Spread: **{mx/mn:.0f}× worst-case** "
-            f"between plain-chat peak ({mx:.0f} tok/s) and cold-start tail "
-            f"({mn:.1f} tok/s) on this HW + quant. Reference measurements on "
-            f"5090 showed ~60× spread (n=1-5 per category). Edge capacity planning "
-            f"should budget for the RAG / tool-use tail, not the plain-chat peak."
-        )
-
-if tab_streams is not None:
-  with tab_streams:
-    st.subheader(f"Per-stream FPS vs concurrent stream count — {pipeline.label}")
-    rows = []
-    for N in [1, 2, 4, 8, 16]:
-        v = project_vision(pipeline, hw, resolution, n_streams=N,
-                            compiler_quality_vs_trt=compiler_quality)
-        rows.append({
-            "N streams": N,
-            "Per-stream FPS": round(v["fps_per_stream"], 1),
-            "Total system FPS": round(v["total_fps"], 1),
-            "Batch cycle ms": round(v["per_stream_ms"], 1),
-            "VRAM (MB)": round(v["vram_mb"], 0),
-            "Fits": "✓" if v["fits_in_memory"] else "✗",
-        })
-    df_streams = pd.DataFrame(rows)
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        fig3 = go.Figure()
-        fig3.add_trace(go.Scatter(
-            x=df_streams["N streams"],
-            y=df_streams["Per-stream FPS"],
-            mode="lines+markers",
-            line=dict(color="#6366F1", width=3),
-            marker=dict(size=10, color="#6366F1"),
-            name="Per-stream FPS",
-        ))
-        fig3.add_trace(go.Scatter(
-            x=df_streams["N streams"],
-            y=df_streams["Total system FPS"],
-            mode="lines+markers",
-            line=dict(color="#22C55E", width=3, dash="dash"),
-            marker=dict(size=10, color="#22C55E"),
-            name="Total system FPS",
-            yaxis="y2",
-        ))
-        fig3.add_hline(y=30, line_dash="dot", line_color="#93A1B5",
-                        annotation_text="30 FPS real-time")
-        fig3.update_layout(
-            xaxis_title="Concurrent streams",
-            yaxis=dict(title="Per-stream FPS"),
-            yaxis2=dict(title="Total system FPS", overlaying="y", side="right"),
-            plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-            font=dict(color="#EAEDF4"),
-            legend=dict(orientation="h", y=-0.2),
-            height=420, margin=dict(l=40, r=40, t=20, b=40),
-        )
-        _apply_chart_theme(fig3)
-        st.plotly_chart(fig3, width="stretch")
-    with col2:
-        st.dataframe(df_streams, width="stretch", hide_index=True)
-        st.caption("YOLO batching amortizes kernel overhead — 4 streams at batch=4 "
-                    "typically get ~70% of the single-stream FPS, not 25%.")
-
-if tab_duty is not None:
-  with tab_duty:
-    st.subheader("Vision FPS under concurrent LLM load")
-    # tab_duty only exists when both vision and LLM are on, so the
-    # "enable LLM" hint below is unreachable now — kept as defensive copy.
-    if not llm_enabled:
-        st.info("Enable the generative LLM in the sidebar to see the "
-                "duty-cycle trade-off.")
-    else:
-        qpm = np.linspace(0, 120, 200)
-        qps = qpm / 60
-        short_ms = llm["short_answer_sec"] * 1000
-        rag_ms = llm["rag_total_sec"] * 1000
-        duty_short = qps * short_ms / 1000
-        duty_rag = qps * rag_ms / 1000
-        fps_short = np.clip(vision["fps_per_stream"] * (1 - duty_short), 0,
-                             vision["fps_per_stream"])
-        fps_rag = np.clip(vision["fps_per_stream"] * (1 - duty_rag), 0,
-                           vision["fps_per_stream"])
-
-        fig4 = go.Figure()
-        fig4.add_trace(go.Scatter(x=qpm, y=fps_short, mode="lines",
-                                   line=dict(color="#22C55E", width=3),
-                                   name=f"Short answer ({short_ms/1000:.1f} s each)"))
-        fig4.add_trace(go.Scatter(x=qpm, y=fps_rag, mode="lines",
-                                   line=dict(color="#F59E0B", width=3),
-                                   name=f"RAG answer ({rag_ms/1000:.0f} s each)"))
-        fig4.add_vline(x=queries_per_min, line_dash="dot", line_color="#6366F1",
-                        annotation_text=f"current: {queries_per_min}/min",
-                        annotation_position="top")
-        fig4.add_hline(y=30, line_dash="dot", line_color="#93A1B5")
-        fig4.add_hline(y=15, line_dash="dot", line_color="#93A1B5")
-        fig4.update_layout(
-            xaxis_title="LLM queries per minute",
-            yaxis_title="Effective vision FPS",
-            plot_bgcolor="#0F192E", paper_bgcolor="#0F192E",
-            font=dict(color="#EAEDF4"),
-            legend=dict(orientation="h", y=-0.2),
-            height=420, margin=dict(l=40, r=40, t=20, b=40),
-        )
-        _apply_chart_theme(fig4)
-        st.plotly_chart(fig4, width="stretch")
-
-        st.markdown(f"""
-**Current LLM projection — {hw.name} @ {quant}:**
-
-- Decode: **{llm['decode_tok_s']:.1f} tok/s**
-- TTFT (1K prompt): **{llm['ttft_1k_sec']*1000:.0f} ms**
-- Short 200-token answer: **{llm['short_answer_sec']:.1f} s**
-- RAG (8K prompt + 2K response): **{llm['rag_total_sec']:.0f} s**
-- GGUF size: **{llm['gguf_size_gb']:.1f} GB** {'✓ fits' if llm['fits_in_memory'] else '✗ spills (needs offload)'}
-
-At **{queries_per_min}/min** of **{answer_kind}** answers, vision drops from
-**{vision['fps_per_stream']:.1f}** → **{vision_fps_effective:.1f} FPS** per stream.
-""")
-
-# ── 🔬 Model + perf + precision tab bodies (merged into lower tabs row 2026-05-12) ──
-# Per Kyle 2026-05-12: the three LLM tabs (Performance / Accuracy /
-# Precision quality reference) are now part of the main tabs row
-# (between Duty-cycle and Detail). Tab widgets created in `_tab_specs`
-# at the top of the tabs section; bodies live here adjacent to the
-# other `with tab_X:` blocks.
-# Three-tab layout consolidating the explanatory surfaces that used to
-# live as expanders in the sidebar (workload patterns) + main area
-# (accuracy + precision). Tab order reads Performance → Accuracy →
-# Precision, matching the conceptual flow (perf is the headline
-# question, then quality, then quant detail). Conditional on llm_enabled
-# — these only render when the user has the LLM toggle on.
-if llm_enabled:
-    with tab_perf:
-        # Workload-pattern definitions + decode tok/s spans + scaling
-        # methodology. Moved here from the sidebar on 2026-05-11 — sidebar
-        # placement was discovery-adjacent to the workload selectbox but
-        # the ~200px column was cramping the per-pattern bullets.
-        st.markdown(
-            "All five patterns were measured in production against "
-            "**Qwen3-30B-A3B-Instruct-2507** (Q4_K_M GGUF, llama.cpp) on "
-            "an **RTX 5090**. Decode tok/s spans **3.6 → 222 across real "
-            "traffic** — a ~60× range that single-number vendor benchmarks "
-            "don't capture."
-        )
-        for key, wc in WORKLOAD_CATEGORIES.items():
-            st.markdown(
-                f"**{wc['label']}** &nbsp;·&nbsp; *n={wc['n']}*  \n"
-                f"{wc['description']}  \n"
-                f"5090 reference: **{wc['decode_5090_tok_s_p50']:.1f} tok/s decode (p50)**, "
-                f"TTFT **{wc['ttft_5090_sec_p50']*1000:.0f} ms** (p50)  \n"
-                f"🔸 *{wc['note']}*"
-            )
-        st.markdown(
-            "---\n"
-            "**How the sizer scales these:** *plain chat* is the reference "
-            "(≈ the 1K-prompt condition under which vendor NPU Q4 benchmarks "
-            "are published). Each category's multiplier (measured on 5090) "
-            "is applied to the target NPU's plain-chat projection. Both "
-            "decode tok/s and TTFT are scaled."
-        )
-
-    # ── 📡 Measured silicon anchors expander — folded into Performance
-    # tab on 2026-05-16 per Kyle 19:35 + [pai-sizer] 19:35 mirror confirm.
-    # Anchor grid lives alongside the FPS/tok-s headline it produces.
-    # Numbers live in `.streamlit/secrets.toml` (local) + Streamlit Cloud
-    # Secrets (production). Spec: personal-ai-framework
-    # `docs/private_anchor_secrets_spec.md` (commit 65bf89c). Loader:
-    # `sizer/npu_anchors.py`. Hot-swap helpers
-    # `_maybe_anchor_overlay_llm` / `_maybe_anchor_overlay_cnn` run after
-    # project_llm / project_vision; standalone grid + headline tiles
-    # surface the same values (no two-number ambiguity).
-    with st.expander("📡 Measured silicon anchors (private)", expanded=False):
-        st.caption(
-            f"Direct measurements on real NPU silicon. Numbers live in "
-            f"Streamlit secrets (`sizer/npu_anchors.py` loads them) — this "
-            f"surface confirms they loaded. Bandwidth derivation uses your "
-            f"selected **NPU_share = {int(npu_share*100)}%** as the share "
-            f"override (change the NPU_share selector in the sidebar to "
-            f"re-derive). Cells reading 'not measured' have placeholder "
-            f"zeros in secrets — populate `.streamlit/secrets.toml` locally "
-            f"or in Streamlit Cloud Secrets to surface them."
-        )
-
-        # ── LLM throughput: 3 tier-precision rows × 3 models ──
-        st.markdown("**LLM throughput**")
-        _llm_tier_rows = [
-            ("NPU Mid INT8",       "mid",  "int8"),
-            ("NPU High INT8",      "high", "int8"),
-            ("NPU High FP",        "high", "fp"),
-        ]
-        _llm_model_cols = [
-            ("Qwen3 30B-A3B MoE",  "qwen3_30b_a3b_moe"),
-            ("Qwen 2.5 32B dense", "qwen25_32b_dense"),
-            ("Qwen 2.5 7B dense",  "qwen25_7b_dense"),
-        ]
-        for _tier_label, _tier_key, _prec_key in _llm_tier_rows:
-            st.markdown(f"*{_tier_label}*")
-            _cols = st.columns(3)
-            for _col, (_model_label, _spec_model_key) in zip(_cols, _llm_model_cols):
-                _anchor_llm = load_llm_anchor(_tier_key, _prec_key, _spec_model_key)
-                with _col:
-                    if _anchor_llm is None:
-                        st.metric(f"⏸ {_model_label}", "not measured")
-                    else:
-                        _bpt = _anchor_llm.bytes_per_token(share_override=npu_share)
-                        st.metric(
-                            f"{_anchor_llm.badge} {_model_label}",
-                            f"{_anchor_llm.tokps:.1f} tok/s",
-                            delta=f"{_bpt/1e6:.0f} MB/tok @ {int(npu_share*100)}% BW share",
-                            delta_color="off",
-                        )
-
-        st.markdown("---")
-
-        # ── CNN latency: 2 tier-precision rows × 3 CNN variants ──
-        # CNN measured INT-only on both Mid and High (no high_fp.* CNN cells
-        # in spec). Keyhole-sizer is the canonical CNN home per Kyle 15:00.
-        st.markdown("**CNN latency**")
-        _cnn_tier_rows = [
-            ("NPU Mid INT8",  "mid",  "int8"),
-            ("NPU High INT8", "high", "int8"),
-        ]
-        _cnn_model_cols = [
-            ("ResNet-50 W4",  "resnet50_w4",  "224×224"),
-            ("YOLOv8n W4",    "yolov8n_w4",   "640×640"),
-            ("YOLOv8n W8",    "yolov8n_w8",   "640×640"),
-        ]
-        for _tier_label, _tier_key, _prec_key in _cnn_tier_rows:
-            st.markdown(f"*{_tier_label}*")
-            _cols = st.columns(3)
-            for _col, (_cnn_label, _cnn_key, _res) in zip(_cols, _cnn_model_cols):
-                _anchor_cnn = load_cnn_anchor(_tier_key, _prec_key, _cnn_key)
-                with _col:
-                    if _anchor_cnn is None:
-                        st.metric(f"⏸ {_cnn_label}", "not measured")
-                    else:
-                        st.metric(
-                            f"{_anchor_cnn.badge} {_cnn_label}",
-                            f"{_anchor_cnn.ms_per_inference:.2f} ms",
-                            delta=f"{_anchor_cnn.fps:.1f} FPS · {_res}",
-                            delta_color="off",
-                        )
-
-        st.caption(
-            "Private silicon anchors. Numbers loaded from Streamlit secrets "
-            "via `sizer/npu_anchors.py`. Per spec: peak_bw × bw_share × "
-            "bw_efficiency derives achieved BW; the share override at "
-            "render-time lets the NPU_share selector re-derive without "
-            "re-reading secrets. **The headline decode-rate (LLM) and "
-            "per-frame-ms (CNN) tiles at the top of the page use these "
-            "values directly** when the selected (tier, model/pipeline) "
-            "cell has a measured anchor — see the source banner for the "
-            "cell's actual state. Cells without measurements fall back to "
-            "RTX 5090 BW-projection (LLM) or Phase 2 two-floor model (CNN)."
-        )
-
-    with tab_acc:
-        # Perf-reference-only entries (qwen3_30b_a3b_moe_fp / qwen25_*_dense_int8,
-        # added 2026-05-14 for anchor reachability) have `pass_rate = None`
-        # — same weights as the underlying stock, alternate compute_dtype
-        # routing. Show a clean info banner instead of an empty Accuracy
-        # surface (per [pai-sizer] 2026-05-16 19:35 implementation note #4).
-        if _model.pass_rate is None:
-            st.info(
-                f"**{_model.label}**  \n  \n"
-                f"This is a **perf-reference variant** — same weights as "
-                f"the underlying stock model, just routed through an "
-                f"alternate compute_dtype to unlock a specific anchor cell. "
-                f"No standalone Skippy v2 eval — switch to a production / "
-                f"fine-tune / baseline row in the LLM model selector to see "
-                f"accuracy details."
-            )
-        else:
-            st.markdown(
-                f"**{_model.label}**  \n"
-                f"{_model.description}  \n  \n"
-                f"**Family:** {_model.family}  \n"
-                f"**Base:** {_model.base}  \n"
-                f"**Total / active params:** {_model.total_params_b:.0f}B / "
-                f"{_model.active_params_b:.0f}B  \n"
-                f"**Quantization:** {_model.quant} (~{_model.size_gb:.0f} GB on disk)  \n"
-                f"**Specialization:** {_model.fine_tune}  \n  \n"
-                f"🔸 *{_model.deck_bullet}*"
-            )
-            # Catalog comparison table — all selectable models side by side,
-            # current selection highlighted with an arrow.
-            st.markdown("---")
-            st.markdown("**Catalog comparison** (all selectable models):")
-            _catalog_rows: list[dict] = []
-            for _k, _m in LLM_MODELS.items():
-                _row_delta = accuracy_delta_pp(_m, _production_model)
-                if _k == PRODUCTION_REFERENCE_KEY:
-                    _row_delta_str = "—  (reference)"
-                elif _row_delta is None:
-                    _row_delta_str = "perf ref"
-                else:
-                    _row_delta_str = f"{('+' if _row_delta >= 0 else '')}{_row_delta:.1f}pp"
-                _row_label = ("➤ " + _m.label) if _k == llm_model_key else _m.label
-                _catalog_rows.append({
-                    "Model":         _row_label,
-                    "Pass rate":     (f"{_m.pass_rate*100:.1f}%"
-                                       if _m.pass_rate is not None else "—"),
-                    "Δ vs production": (_row_delta_str if _m.pass_rate is not None
-                                          else "perf ref"),
-                    "n":             (f"{_m.pass_n_passes}/{_m.pass_n_total}"
-                                       if _m.pass_n_passes is not None else "—"),
-                    "Architecture":  f"{_m.total_params_b:.0f}B / {_m.active_params_b:.0f}B active",
-                })
-            st.dataframe(pd.DataFrame(_catalog_rows), width="stretch", hide_index=True)
-
-            # Per-category breakdown — dict-of-dicts shape per [pai-sizer]
-            # 8d20beb migration. Each entry holds raw rates
-            # {category: {pass, n, rate}}; Δ vs production computed at render
-            # time from raw counts.
-            if _model.category_deltas:
-                _prod_cats = _production_model.category_deltas or {}
-                if _is_production:
-                    st.markdown("**Per-category breakdown** (production reference — Δ vs self = 0):")
-                else:
-                    st.markdown(
-                        f"**Per-category breakdown** "
-                        f"(rate, Δ vs {_production_model.label.split(' (')[0]} — "
-                        f"positive = this model wins):"
-                    )
-                for cat, data in _model.category_deltas.items():
-                    cat_label = CATEGORY_LABELS.get(cat, cat)
-                    passes = data.get("pass", 0)
-                    n = data.get("n", 0)
-                    rate = data.get("rate", 0.0)
-                    prod_data = _prod_cats.get(cat)
-                    if prod_data and not _is_production:
-                        delta = passes - prod_data.get("pass", 0)
-                        sign = "+" if delta >= 0 else ""
-                        st.markdown(
-                            f"- {cat_label}: **{passes}/{n}** ({rate:.1%}) "
-                            f"— Δ {sign}{delta} passes"
-                        )
-                    else:
-                        st.markdown(f"- {cat_label}: **{passes}/{n}** ({rate:.1%})")
-                st.caption(
-                    "Raw counts from Skippy v2 prompt set (132 samples), "
-                    "RAG on (8 chunks via hybrid retrieval). Δ computed at "
-                    "render time from raw pass counts vs production reference."
-                )
-            else:
-                st.caption(
-                    "Per-category breakdown not yet populated for this entry."
-                )
-
-            # Eval methodology section — per [docs] 2026-05-11 09:31
-            # reviewer-final substring-reliability arc closure (white paper
-            # Finding 4: Qwen-family format bias). Mirrors PAI sizer dd4ef31.
-            st.markdown("---")
-            st.markdown("**📐 Eval methodology — Finding 4: Qwen-family format bias (semantic regrade)**")
-            st.markdown(
-                "The headline pass-rate numbers above now use **semantic "
-                "grading** (GPT-4o binary semantic judge, 132-sample "
-                "v2-RAG, deterministic temp=0) per [docs] 2026-05-11 "
-                "white paper Finding 4. Substring grading is retained "
-                "only on 2 entries (Skippy MoE FT v1, pre-v4 dense) "
-                "where _semantic.json was not produced — both flagged "
-                "in their model description."
-            )
-            st.markdown(
-                "**Why the headline switched** — the production model's "
-                "substring-headline-lift eroded across five successive "
-                "cross-checks:"
-            )
-            st.markdown(
-                "| # | Cross-check | Result |\n"
-                "|---|---|---|\n"
-                "| 1 | Substring (original headline) | **+3.1pp** vs base |\n"
-                "| 2 | LLM-judge (Sonnet 4.6) | **−0.35** |\n"
-                "| 3 | Temperature=0.3 substring | **−29.3pp** |\n"
-                "| 4 | Cross-judge (GPT-4o) | **−0.69** |\n"
-                "| 5 | **Semantic regrade** (132-sample binary) | **−4.6pp** (sign reversal) |"
-            )
-            st.markdown(
-                "**Finding 4 (verbatim, [docs] 2026-05-11 white paper):** "
-                "*'The recipe's value is voice transfer and safety "
-                "calibration, not capability lift; the substring-headline-"
-                "capability gain on this corpus was a format-fidelity "
-                "artifact specific to Qwen-shaped phrasings in the "
-                "training data.'*"
-            )
-            st.markdown(
-                "**Substring is biased — per-family regrade Δ** "
-                "(33-entry catalog, semantic minus substring):"
-            )
-            st.markdown(
-                "| Family | Regrade Δ direction | Interpretation |\n"
-                "|---|---|---|\n"
-                "| Qwen-family fine-tunes | **−3.2 to −12.7pp** | Substring over-graded (gold tokens are Qwen-shaped) |\n"
-                "| Non-Qwen stock bases (Gemma/Llama/Mistral) | **+1.6 to +6.0pp** | Substring under-graded |\n"
-                "| Gemma 9B v4 (cross-family) | +5.4pp | Only cross-family FT that lifts under both graders |\n"
-                "| Mistral / Llama / Yi v4 | flat-to-down | Substring direction confirmed |"
-            )
-            st.markdown(
-                "**Standing methodology** — durable, transfers across corpora:"
-            )
-            st.markdown(
-                "> *'Substring grading is reliable for base-vs-base "
-                "comparisons but unreliable for FT-vs-base comparisons "
-                "when the corpus phrasings come from one model family. "
-                "Customers running cross-family campaigns should "
-                "validate substring with semantic grading before drawing "
-                "FT-lift conclusions. Two judges by default (Sonnet 4.6 "
-                "+ GPT-4o) on any cross-family fine-tune eval — "
-                "~$5/N=5 pass.'*"
-            )
-            st.markdown(
-                "**Production decision unaffected.** The Skippy 7B v4 "
-                "ship decision is anchored on the **three-gate framework** "
-                "(capability + voice + safety) — substring was never the "
-                "load-bearing signal. Voice and safety carried the real "
-                "signal; substring failed silently. This is exactly the "
-                "scenario the three-gate framework was designed for."
-            )
-            st.caption(
-                f"Methodology version: `{METHODOLOGY_VERSION}` — cross-app "
-                f"lockstep with PAI sizer's `sizer_bundle.json __meta__` "
-                f"and Skippy side's `build_sizer_bundle.py`. Bumps when "
-                f"the eval methodology shifts (new grader, new RAG "
-                f"protocol, new eval set, etc.)."
-            )
-
-            st.markdown(
-                "---\n"
-                "**Why this matters for sizing:** Q4_K_M MoE 30B/3B-active has the "
-                "same decode-tok/s ceiling on every NPU tier regardless of which "
-                "model's weights are in the file — bandwidth-bound physics doesn't "
-                "care. **For the MoE entries** (Skippy MoE FT and Thinking stock), "
-                "model choice is a pure quality-vs-quality trade — no perf cost. "
-                "**For the dense entry** (Skippy dense FT, Qwen2.5-14B), the perf "
-                "math differs: dense traverses the full weight set per token, so "
-                "the same tier's bandwidth drives ~3-4× lower tok/s than the MoE "
-                "alternatives."
-            )
-
-    with tab_prec:
-        # Quality cost of the quantization recipe on the base model
-        # (fp16 → FP8 → W8A8 INT8). Composes with the 5090 capability
-        # caption: when hw is on tensor_compat (consumer Blackwell SM120),
-        # the W8A8 row is annotated as ecosystem-blocked.
-        _w8a8_blocked_on_tier = (
-            hw.capability_levels is not None
-            and capability_level(hw, "int8") == "tensor_compat"
-        )
-        st.markdown(
-            f"**Quality cost of the quantization recipe** on Qwen2.5-14B base "
-            f"+ RAG, measured on the v2 prompt set (44 prompts × 3 samples = 132). "
-            f"fp16 reference: **{FP16_REFERENCE.pass_rate*100:.1f}%** "
-            f"({FP16_REFERENCE.pass_n_passes}/{FP16_REFERENCE.pass_n_total})."
-        )
-
-        ladder_rows: list[dict] = []
-        for cfg in LLM_QUANT_LADDER:
-            _delta = delta_pp_vs_fp16(cfg)
-            _delta_str = (
-                "—" if cfg.key == FP16_REFERENCE.key
-                else f"{_delta:+.1f}pp"
-            )
-            _label = cfg.label
-            if cfg.key == QWEN_W8A8_RAG.key and _w8a8_blocked_on_tier:
-                _label = f"⚠ {_label} — n/a on {hw.name}"
-            ladder_rows.append({
-                "Configuration":   _label,
-                "Pass rate":       f"{cfg.pass_rate*100:.1f}%",
-                "Δ vs fp16 base":  _delta_str,
-                "n":               f"{cfg.pass_n_passes}/{cfg.pass_n_total}",
-                "Host":            cfg.measurement_host,
+                    f"Per-frame sum **{total_mb:.1f} MB** — hardware-neutral; "
+                    f"transfers across tiers (scale by FPS vs the tier's BW "
+                    f"ceiling). Bundle `{meta['ncu_bundle_timestamp']}` · "
+                    f"{meta['ncu_n_workloads']} workloads · "
+                    f"*{meta['ncu_measurement_host']}*.")
+        with hw_col:
+            st.caption("**Hardware config** — selected tier (incl. overlays)")
+            st.json({
+                "name": hw.name,
+                "bus": f"{hw.mem_bus_width_bits}-bit {hw.mem_type} @ "
+                       f"{hw.mem_data_rate_gtps} GT/s",
+                "mem_bandwidth_gbs_theoretical": round(hw.mem_bandwidth_gbs, 1),
+                "mem_bandwidth_gbs_effective": round(hw.effective_bandwidth_gbs, 1),
+                "mem_capacity_gb": hw.mem_capacity_gb,
+                "peak_tops_bf16": hw.peak_tops_bf16,
+                "peak_tops_fp8": hw.peak_tops_fp8,
+                "compute_efficiency": hw.compute_efficiency,
+                "bandwidth_efficiency": hw.bandwidth_efficiency,
+                "tdp_watts": hw.tdp_watts,
             })
-        st.dataframe(pd.DataFrame(ladder_rows), width="stretch", hide_index=True)
 
-        if _w8a8_blocked_on_tier:
-            st.warning(
-                "**W8A8 INT8 is ecosystem-blocked on this tier.** Consumer "
-                "Blackwell SM120 throws `RuntimeError: Int8 not supported on "
-                "SM120. Use FP8 quantization instead, or run on older arch "
-                "(SM < 100).` from `torch.ops._C.cutlass_scaled_mm`. The W8A8 "
-                "pass-rate row above is a measured number from H100 — kept "
-                "for the deck story, not achievable on this silicon today. "
-                "The capability caption near the metric row carries the full "
-                "kernel-library narrative."
-            )
-
-        st.markdown(
-            "**Where the W8A8 -3.8pp regression lives** (vs fp16 base, RAG on, "
-            "v2 reproducer 2026-04-24):"
-        )
-        for cat, delta_passes in W8A8_VS_FP16_CATEGORY_DELTAS.items():
-            cat_label = CATEGORY_LABELS.get(cat, cat)
-            if delta_passes == 0:
-                st.markdown(f"- {cat_label}: **±0** (no measurable drift)")
-            else:
-                sign = "+" if delta_passes > 0 else ""
-                st.markdown(f"- {cat_label}: **{sign}{delta_passes} passes**")
-        st.caption(
-            "Coding + reasoning are byte-identical between fp16 and W8A8 "
-            "(Jaccard 1.0, exact-match 1.0) — structured-output tasks are "
-            "untouched by INT8. The regression localizes in retrieval-grounded "
-            "wording, not capability. **DO NOT** cite a 'refusal-specific' "
-            "regression — earlier H100 run had refusals -2 but the 2026-04-24 "
-            "reproducer had refusals ±0; that localization didn't hold."
-        )
-
-        st.markdown(
-            "---\n"
-            "**Headline framing for the deck:** W8A8 INT8 costs ~3.8pp vs fp16 "
-            "base. Going base → fine-tune adds ~5pp. So a fine-tuned W8A8 "
-            "would plausibly land near the fp16 base — W8A8 preserves enough "
-            "headroom that **lifecycle cost (the retargeting panel) dominates "
-            "the choice**, not the ~4pp quality hit. Fine-tune-vs-stock and "
-            "precision-recipe are independent axes — surfaced separately above."
-        )
-
-with tab_kpis:
-    # Platform-budget CSVs + KPI spreadsheet preview. Lived in a top-of-page
-    # expander before 2026-05-16; promoted to its own tab to mirror PAI sizer's
-    # "KPIs" tab and to keep the page header focused on the headline metrics.
-    # In-content header mirrors PAI sizer's convention (emoji on the section
-    # header inside the tab, not on the tab label) for cross-app visual parity.
-    st.header("📊 KPIs")
-    _btn_cur_col, _btn_mat_col = st.columns(2)
-    with _btn_cur_col:
-        st.download_button(
-            label="💾 This config",
-            data=_cur_csv,
-            file_name=f"keyhole_sizer_budget_{_hw_slug}_{resolution}_n{n_streams}.csv",
-            mime="text/csv",
-            help=(
-                "Platform-budget CSV row for the *current* config (vision + LLM if "
-                "enabled). ss_* columns are additive at the platform level; peak_* "
-                "are per-workload ceilings. Read the header `#` comments for caveats."
-            ),
-            width="stretch",
-        )
-    with _btn_mat_col:
-        st.download_button(
-            label="📦 All configs",
-            data=_full_matrix_csv(),
-            file_name="keyhole_sizer_platform_budget_matrix.csv",
-            mime="text/csv",
-            help=(
-                "Every preset HW tier × pipeline × resolution × stream count + every "
-                "LLM (quant × workload × answer_kind) combination (~585 rows). "
-                "Custom HW is skipped — use 'This config' for custom. Cached hourly."
-            ),
-            width="stretch",
-        )
-    # KPI spreadsheet buttons are vision-pipeline-centric (per-pipeline rows
-    # of vision KPIs). Hidden when vision is off — no per-pipeline KPI in an
-    # LLM-only sizing.
-    if vision_enabled:
-        _kpi_btn_all_col, _kpi_btn_one_col = st.columns(2)
-        with _kpi_btn_all_col:
-            if st.button(
-                "📊 KPI spreadsheet (all models)",
-                width="stretch",
-                key="kpi_btn_all",
-                help="Reveal a table of per-pipeline KPIs across all 17 pipelines at "
-                     "the current HW / resolution / LLM state, plus a button to "
-                     "download the formatted XLSX.",
-            ):
-                st.session_state.kpi_preview_mode = "all"
-        with _kpi_btn_one_col:
-            if st.button(
-                "📊 KPI spreadsheet (this model)",
-                width="stretch",
-                key="kpi_btn_this",
-                help="Reveal the KPI row for just the currently-selected pipeline "
-                     "(the one from the sidebar), plus a button to download the XLSX.",
-            ):
-                st.session_state.kpi_preview_mode = "this"
-
-    # KPI preview renders inside the tab below the buttons when active.
-    _kpi_mode = st.session_state.get("kpi_preview_mode") if vision_enabled else None
-    if _kpi_mode in ("all", "this"):
-        if _kpi_mode == "all":
-            _kpi_rows = all_pipeline_kpi_rows(
-                hw, resolution=resolution,
-                llm_enabled=llm_enabled, llm_quant=quant,
-                llm_workload=llm_workload,
-                compiler_quality_vs_trt=compiler_quality,
-            )
-            _kpi_file_slug = "all"
-        else:
-            _kpi_rows = [pipeline_kpi_row(
-                pipeline_key, hw, resolution=resolution,
-                llm_enabled=llm_enabled, llm_quant=quant,
-                llm_workload=llm_workload,
-                compiler_quality_vs_trt=compiler_quality,
-            )]
-            _kpi_file_slug = pipeline_key
-
-        # Override total_fps to match the metric card's Per-camera FPS (engine
-        # ms only, with LLM duty-cycle reduction when LLM is on). kpi_breakdown's
-        # own total_fps is vision-only including ingest — honest but different
-        # from the headline, which caused "wait, why don't these match?" confusion.
-        for _row in _kpi_rows:
-            _pipe_for_row = PIPELINES[_row["pipeline_key"]]
-            _v_for_row = project_vision(
-                _pipe_for_row, hw, resolution, n_streams=n_streams,
-                compiler_quality_vs_trt=compiler_quality,
-            )
-            _base_fps = _v_for_row["fps_per_stream"]
-            _row["total_fps"] = round(
-                vision_fps_under_llm_load(
-                    _base_fps, llm, queries_per_min, answer_kind
-                ) if llm_enabled else _base_fps,
-                2,
-            )
-
-        _kpi_xlsx_bytes = kpi_rows_to_xlsx(_kpi_rows)
-        _kpi_data_col, _kpi_dl_col = st.columns([5, 1])
-        with _kpi_dl_col:
-            st.download_button(
-                "⬇ Download XLSX",
-                data=_kpi_xlsx_bytes,
-                file_name=f"keyhole_sizer_kpi_{_hw_slug}_{resolution}_{_kpi_file_slug}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                width="stretch",
-                key=f"kpi_dl_{_kpi_mode}",
-            )
-        with _kpi_data_col:
-            st.dataframe(
-                pd.DataFrame(_kpi_rows),
-                width="stretch",
-                hide_index=True,
-            )
-        st.caption(
-            "`total_fps` matches the **Per-camera FPS** metric card above — "
-            "same math (engine ms only, with LLM duty-cycle reduction applied "
-            "when LLM is on). The `ingest_ms` column is shown for reference "
-            "but not in `total_fps`."
-        )
-    elif not vision_enabled:
-        st.caption(
-            "KPI spreadsheet is per-pipeline (vision); enable vision in the "
-            "sidebar to see the per-pipeline KPI buttons. CSV exports above "
-            "always work."
-        )
-
-with tab_detail:
-    left, right = st.columns([1, 1])
-    with left:
-        st.subheader("Vision projection")
-        if vision_enabled:
-            st.json({k: v for k, v in vision.items()
-                      if not isinstance(v, (dict, list))})
-        else:
-            st.info("Vision pipeline disabled — toggle in sidebar to project.")
-    with right:
-        st.subheader("LLM projection")
-        if llm_enabled:
-            st.json({k: v for k, v in llm.items()
-                      if not isinstance(v, (dict, list))})
-        else:
-            st.info("LLM not active — toggle in sidebar.")
-
-    st.markdown("---")
-    st.subheader("NCU measurement provenance")
-    # Pipeline-keyed; only meaningful when vision is selected.
-    comps = measured_components(pipeline.key) if vision_enabled else None
-    if not vision_enabled:
-        st.info("Vision pipeline disabled — ncu measurement provenance is "
-                "vision-pipeline-keyed and not displayed in LLM-only mode.")
-    elif comps is None:
-        st.info(
-            f"No ncu measurement mapped for `{pipeline.key}`. "
-            "The saturation approximation is the only figure available "
-            "for this pipeline."
-        )
-    else:
-        df_comps = pd.DataFrame([
-            {
-                "NVTX workload_id":     c["ncu_workload_id"],
-                "Fires per frame":      c["fires_per_frame"],
-                "DRAM bytes / fire":    c["dram_bytes_per_fire"],
-                "DRAM MB / fire":       round(c["dram_bytes_per_fire"] / 1e6, 2),
-                "n_forwards (bakeoff)": c["n_forwards_in_bakeoff"],
-            } for c in comps
-        ])
-        st.dataframe(df_comps, width="stretch", hide_index=True)
-        total_bytes = sum(
-            c["dram_bytes_per_fire"] * c["fires_per_frame"] for c in comps
-        )
-        st.caption(
-            f"Sum (per pipeline frame): **{total_bytes / 1e6:.1f} MB**. "
-            "This is the hardware-neutral DRAM figure that transfers across "
-            "NPU tiers — scale by pipeline FPS and compare against the NPU's "
-            "effective bandwidth ceiling to get consumed GB/s."
-        )
-        meta = bundle_metadata()
-        st.caption(
-            f"Bundle exported **{meta['ncu_bundle_timestamp']}** on "
-            f"*{meta['ncu_measurement_host']}*. "
-            f"Total workloads in bundle: **{meta['ncu_n_workloads']}**. "
-            f"Regenerate via `python scripts/export_ncu_for_sizer.py` in the "
-            "`keyhole` repo after re-running `scripts/profile_all_ncu.sh`."
-        )
-
-    st.markdown("---")
-    st.subheader("Hardware config")
-    st.json({
-        "name": hw.name,
-        "bus": f"{hw.mem_bus_width_bits}-bit {hw.mem_type} @ {hw.mem_data_rate_gtps} GT/s",
-        "mem_bandwidth_gbs_theoretical": round(hw.mem_bandwidth_gbs, 1),
-        "mem_bandwidth_gbs_effective": round(hw.effective_bandwidth_gbs, 1),
-        "mem_capacity_gb": hw.mem_capacity_gb,
-        "peak_tops_bf16": hw.peak_tops_bf16,
-        "peak_tops_fp8": hw.peak_tops_fp8,
-        "compute_efficiency": hw.compute_efficiency,
-        "bandwidth_efficiency": hw.bandwidth_efficiency,
-        "tdp_watts": hw.tdp_watts,
-    })
-
-st.markdown("---")
-with st.expander("ℹ About this sizer", expanded=False):
-    st.markdown(
-        "Interactive sandbox for the Keyhole bake-off findings. "
-        "Tune NPU spec, pipeline, concurrency, and LLM load to see live "
-        "FPS / tok/s / duty-cycle projections. All numbers trace back to "
-        "measured bake-offs (`github.com/kylefoxaustin/keyhole`, see "
-        "`REPRODUCE.md`).\n\n"
-        "⚠️ Assumes vision/LLM time-slice on the NPU — concurrent BW "
-        "contention not modeled."
-    )
-st.caption(
-    "keyhole-sizer — derived from the Keyhole bake-off series. "
-    "All numbers trace back to measurements on an RTX 5090; edge projections "
-    "use vendor-actual NPU tier data where available. "
-    "See `github.com/kylefoxaustin/keyhole/REPRODUCE.md` to regenerate the "
-    "underlying measurements."
-)
+st.divider()
+st.caption("⬑ **Prototype** — control strip + full-width results/charts + onscreen KPIs, "
+           "no sidebar. Tier across all silicon highlighted in red. If the layout works, "
+           "Step 3 ports the live app.py onto this shell.")

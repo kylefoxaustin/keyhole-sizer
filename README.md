@@ -69,20 +69,16 @@ running locally with ratchet as an editable install (`pip install -e
 ~/path/to/ratchet`), pip prefers your editable over the git pin —
 useful for engine co-development.
 
-## Horizontal-layout prototype (experimental)
+## Layout (horizontal — live since v2.0.0)
 
-Alongside the live sidebar app, the repo carries an **experimental
-horizontal-layout mockup** at
-[`app_horizontal_prototype.py`](app_horizontal_prototype.py) — a throwaway
-shell being judged before deciding whether to migrate the live app onto it
-("Step 3"). It runs on the **same real engine** (live numbers) and leaves
-`app.py` untouched.
+`app.py` is the **horizontal-layout** app: no left sidebar, controls in a
+top strip, full-width results. It began as a prototype judged against the
+original tall-sidebar layout ("Step 3" in earlier docs); v2.0.0 promoted it to
+be the live app. The previous vertical-sidebar layout is preserved, runnable,
+at [`app_vertical_legacy.py`](app_vertical_legacy.py) (`git mv` of the old
+`app.py`); the last release with it live is tagged `v1.2.0`.
 
-```bash
-streamlit run app_horizontal_prototype.py   # no password gate on the prototype
-```
-
-What it explores vs the sidebar layout:
+What the horizontal layout does vs the old sidebar layout:
 
 - **No left sidebar.** All controls live in a horizontal **top control
   strip**: NPU-tier pills, workload pills (Vision / LLM / VLA), camera
@@ -104,8 +100,8 @@ What it explores vs the sidebar layout:
 
 The companion
 [personal-ai-assistant-sizer](https://github.com/kylefoxaustin/personal-ai-assistant-sizer)
-carries a parallel `app_horizontal_prototype.py` (the LLM-only single-workload
-cut), so both sizers can be judged on the same shell.
+carries a parallel horizontal shell (the LLM-only single-workload cut), so both
+sizers share the same layout.
 
 ## Deployment (Streamlit Community Cloud)
 
