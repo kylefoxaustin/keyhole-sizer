@@ -390,7 +390,7 @@ def _tier_slug(name):
 
 
 # ───────────────────────── TOP CONTROL STRIP ─────────────────────────
-st.markdown("### 🎯 keyhole-sizer  ·  &nbsp;_horizontal-layout prototype_", unsafe_allow_html=True)
+st.markdown("### 🎯 keyhole-sizer", unsafe_allow_html=True)
 
 with st.container(border=True):
     # ── Row 1: the frequently-touched controls. All three are LABELED widgets,
@@ -1029,136 +1029,143 @@ if "Vision" in workloads and "LLM" in workloads:
 
 # ───────────────────────── KPIs ONSCREEN ─────────────────────────
 if workloads and st.session_state.get("p_kpi_on", True):
-    st.markdown("#### 📊 KPIs — current configuration")
-    _slug = _tier_slug(hw.name)
-    rows = []
-    if "Vision" in workloads:
-        rows.append({"Workload": f"Vision · {pk}", "Per-cam FPS": round(vr.get('fps_per_stream', 0.0), 1),
-                     "Aggregate FPS": round(vr.get('total_fps', 0.0), 0),
-                     "Fits": "✓" if vr.get("fits_in_memory") else "✗",
-                     "BW ratio vs Mid": f"{vr.get('bandwidth_ratio_vs_ref', 1.0):.2f}×"})
-    if "LLM" in workloads:
-        rows.append({"Workload": f"LLM · {LLM_MODELS[lk].label.split(' (')[0]}",
-                     "Per-cam FPS": None, "Aggregate FPS": None,
-                     "Fits": "✓" if lr["fits_in_memory"] else "✗",
-                     "BW ratio vs Mid": f"{bandwidth_ratio(hw):.2f}×",
-                     "Decode tok/s": round(lr["decode_tok_s"], 1),
-                     "TTFT ms": round(lr["ttft_1k_sec"] * 1000, 0)})
-    if "VLA" in workloads and r.get("runs"):
-        rows.append({"Workload": f"VLA · {VLA_MODELS[vk].display_name}",
-                     "Per-cam FPS": round(r["camera_fps"], 1),
-                     "Aggregate FPS": round(r["aggregate_camera_fps"], 0),
-                     "Fits": "✓" if r["fits_in_memory"] else "✗",
-                     "BW ratio vs Mid": f"{hw.effective_bandwidth_gbs/NPU_MID.effective_bandwidth_gbs:.2f}×",
-                     "Control Hz": round(r["action_hz"], 1)})
-    if rows:
-        df = pd.DataFrame(rows)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button("⬇ Summary (CSV)", df.to_csv(index=False),
-                           f"keyhole_sizer_kpis_{_slug}_summary.csv", "text/csv",
-                           key="p_kpi_dl")
+    # Inline "Minimize" on the section header collapses the entire KPI body.
+    # NOT an st.expander — the body nests its own expanders (per-workload KPIs +
+    # NCU provenance) and Streamlit forbids nested expanders; a session_state
+    # toggle gates the body instead (mirrors pai-sizer 096bb0d).
+    _kpi_hdr, _kpi_min = st.columns([5, 1])
+    _kpi_hdr.markdown("#### 📊 KPIs — current configuration")
+    _kpi_min.toggle("Minimize", key="p_kpi_min", value=False,
+                    help="Collapse the entire KPIs section.")
+    if not st.session_state.get("p_kpi_min", False):
+        _slug = _tier_slug(hw.name)
+        rows = []
+        if "Vision" in workloads:
+            rows.append({"Workload": f"Vision · {pk}", "Per-cam FPS": round(vr.get('fps_per_stream', 0.0), 1),
+                         "Aggregate FPS": round(vr.get('total_fps', 0.0), 0),
+                         "Fits": "✓" if vr.get("fits_in_memory") else "✗",
+                         "BW ratio vs Mid": f"{vr.get('bandwidth_ratio_vs_ref', 1.0):.2f}×"})
+        if "LLM" in workloads:
+            rows.append({"Workload": f"LLM · {LLM_MODELS[lk].label.split(' (')[0]}",
+                         "Per-cam FPS": None, "Aggregate FPS": None,
+                         "Fits": "✓" if lr["fits_in_memory"] else "✗",
+                         "BW ratio vs Mid": f"{bandwidth_ratio(hw):.2f}×",
+                         "Decode tok/s": round(lr["decode_tok_s"], 1),
+                         "TTFT ms": round(lr["ttft_1k_sec"] * 1000, 0)})
+        if "VLA" in workloads and r.get("runs"):
+            rows.append({"Workload": f"VLA · {VLA_MODELS[vk].display_name}",
+                         "Per-cam FPS": round(r["camera_fps"], 1),
+                         "Aggregate FPS": round(r["aggregate_camera_fps"], 0),
+                         "Fits": "✓" if r["fits_in_memory"] else "✗",
+                         "BW ratio vs Mid": f"{hw.effective_bandwidth_gbs/NPU_MID.effective_bandwidth_gbs:.2f}×",
+                         "Control Hz": round(r["action_hz"], 1)})
+        if rows:
+            df = pd.DataFrame(rows)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            st.download_button("⬇ Summary (CSV)", df.to_csv(index=False),
+                               f"keyhole_sizer_kpis_{_slug}_summary.csv", "text/csv",
+                               key="p_kpi_dl")
 
-    # ── Per-(workload, view) sheet set for ONLY the active workloads → one uber
-    # XLSX (tier-scoped) + per-workload XLSX inside collapsed expanders. Mirrors
-    # pai-sizer's KPI parity, generalized to 3 workloads (Vision/LLM/VLA). ──
-    sheets = {}
-    if "Vision" in workloads:
-        sheets["vision_cross_tier"] = _vision_cross_tier_rows(
-            pk, res, compiler_quality, npu_share, n_cameras)
-        sheets["vision_pipelines"] = _vision_pipeline_rows(hw, res)
-    if "LLM" in workloads:
-        sheets["llm_cross_tier"] = _llm_cross_tier_rows(quant, llm_workload, npu_share, alias)
-        sheets["llm_cross_model"] = _llm_cross_model_rows(hw, quant, llm_workload, npu_share)
-    if "VLA" in workloads:
-        sheets["vla_cross_tier"] = _vla_cross_tier_rows(vk, npu_share, n_cameras)
-        sheets["vla_cross_model"] = _vla_cross_model_rows(hw, npu_share, n_cameras)
+        # ── Per-(workload, view) sheet set for ONLY the active workloads → one uber
+        # XLSX (tier-scoped) + per-workload XLSX inside collapsed expanders. Mirrors
+        # pai-sizer's KPI parity, generalized to 3 workloads (Vision/LLM/VLA). ──
+        sheets = {}
+        if "Vision" in workloads:
+            sheets["vision_cross_tier"] = _vision_cross_tier_rows(
+                pk, res, compiler_quality, npu_share, n_cameras)
+            sheets["vision_pipelines"] = _vision_pipeline_rows(hw, res)
+        if "LLM" in workloads:
+            sheets["llm_cross_tier"] = _llm_cross_tier_rows(quant, llm_workload, npu_share, alias)
+            sheets["llm_cross_model"] = _llm_cross_model_rows(hw, quant, llm_workload, npu_share)
+        if "VLA" in workloads:
+            sheets["vla_cross_tier"] = _vla_cross_tier_rows(vk, npu_share, n_cameras)
+            sheets["vla_cross_model"] = _vla_cross_model_rows(hw, npu_share, n_cameras)
 
-    if sheets:
-        _ub_col, _cap_col = st.columns([1.5, 4])
-        with _ub_col:
-            st.download_button(
-                "⬇ Export ALL KPIs (XLSX)", _kpi_xlsx(sheets),
-                file_name=f"keyhole_sizer_kpis_{_slug}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True, key="kpi_uber_dl",
-                help="One workbook, one sheet per (active workload × view), scoped to "
-                     "the selected NPU tier. Only active workloads get sheets.")
-        _cap_col.caption(f"Tier-scoped to **{hw.name}**. Summary row above = current "
-                         "config; the per-workload blocks below carry the full cross-tier "
-                         "and cross-config tables (also in the workbook).")
-
-        # Per-workload KPI blocks — collapsed by default (compact-first).
-        _WL_VIEWS = {
-            "Vision": [("Cross-tier — this pipeline across the ladder", "vision_cross_tier"),
-                       ("All pipelines on this tier", "vision_pipelines")],
-            "LLM":    [("Cross-tier — this model across the ladder", "llm_cross_tier"),
-                       ("Cross-model — all models on this tier", "llm_cross_model")],
-            "VLA":    [("Cross-tier — this model across the ladder", "vla_cross_tier"),
-                       ("Cross-model — all models on this tier", "vla_cross_model")],
-        }
-        for wl in ("Vision", "LLM", "VLA"):
-            if wl not in workloads:
-                continue
-            with st.expander(f"📊 {wl} KPIs", expanded=False):
-                for title, key in _WL_VIEWS[wl]:
-                    if key not in sheets:
-                        continue
-                    st.caption(f"**{title}**")
-                    st.dataframe(pd.DataFrame(sheets[key]),
-                                 use_container_width=True, hide_index=True)
-                wl_sheets = {k: sheets[k] for _, k in _WL_VIEWS[wl] if k in sheets}
+        if sheets:
+            _ub_col, _cap_col = st.columns([1.5, 4])
+            with _ub_col:
                 st.download_button(
-                    f"⬇ Export {wl} KPIs (XLSX)", _kpi_xlsx(wl_sheets),
-                    file_name=f"keyhole_sizer_kpis_{_slug}_{wl.lower()}.xlsx",
+                    "⬇ Export ALL KPIs (XLSX)", _kpi_xlsx(sheets),
+                    file_name=f"keyhole_sizer_kpis_{_slug}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key=f"kpi_{wl.lower()}_dl")
+                    use_container_width=True, key="kpi_uber_dl",
+                    help="One workbook, one sheet per (active workload × view), scoped to "
+                         "the selected NPU tier. Only active workloads get sheets.")
+            _cap_col.caption(f"Tier-scoped to **{hw.name}**. Summary row above = current "
+                             "config; the per-workload blocks below carry the full cross-tier "
+                             "and cross-config tables (also in the workbook).")
 
-    # ── NCU provenance + hardware config (reference detail, collapsed) ──
-    with st.expander("🔬 NCU provenance & hardware config"):
-        prov_col, hw_col = st.columns([1.5, 1])
-        with prov_col:
-            st.caption("**NCU measurement provenance** — vision-pipeline-keyed")
-            comps = measured_components(pk) if "Vision" in workloads else None
-            if "Vision" not in workloads:
-                st.info("Vision off — ncu provenance is pipeline-keyed and not "
-                        "shown in this configuration.")
-            elif comps is None:
-                st.info(f"No ncu mapping for `{pk}` — the saturation "
-                        "approximation is the only figure for this pipeline.")
-            else:
-                dfc = pd.DataFrame([{
-                    "NVTX workload_id":  c["ncu_workload_id"],
-                    "Fires/frame":       c["fires_per_frame"],
-                    "DRAM MB/fire":      round(c["dram_bytes_per_fire"] / 1e6, 2),
-                    "n_fwd (bakeoff)":   c["n_forwards_in_bakeoff"],
-                } for c in comps])
-                st.dataframe(dfc, use_container_width=True, hide_index=True)
-                total_mb = sum(c["dram_bytes_per_fire"] * c["fires_per_frame"]
-                               for c in comps) / 1e6
-                meta = bundle_metadata()
-                st.caption(
-                    f"Per-frame sum **{total_mb:.1f} MB** — hardware-neutral; "
-                    f"transfers across tiers (scale by FPS vs the tier's BW "
-                    f"ceiling). Bundle `{meta['ncu_bundle_timestamp']}` · "
-                    f"{meta['ncu_n_workloads']} workloads · "
-                    f"*{meta['ncu_measurement_host']}*.")
-        with hw_col:
-            st.caption("**Hardware config** — selected tier (incl. overlays)")
-            st.json({
-                "name": hw.name,
-                "bus": f"{hw.mem_bus_width_bits}-bit {hw.mem_type} @ "
-                       f"{hw.mem_data_rate_gtps} GT/s",
-                "mem_bandwidth_gbs_theoretical": round(hw.mem_bandwidth_gbs, 1),
-                "mem_bandwidth_gbs_effective": round(hw.effective_bandwidth_gbs, 1),
-                "mem_capacity_gb": hw.mem_capacity_gb,
-                "peak_tops_bf16": hw.peak_tops_bf16,
-                "peak_tops_fp8": hw.peak_tops_fp8,
-                "compute_efficiency": hw.compute_efficiency,
-                "bandwidth_efficiency": hw.bandwidth_efficiency,
-                "tdp_watts": hw.tdp_watts,
-            })
+            # Per-workload KPI blocks — collapsed by default (compact-first).
+            _WL_VIEWS = {
+                "Vision": [("Cross-tier — this pipeline across the ladder", "vision_cross_tier"),
+                           ("All pipelines on this tier", "vision_pipelines")],
+                "LLM":    [("Cross-tier — this model across the ladder", "llm_cross_tier"),
+                           ("Cross-model — all models on this tier", "llm_cross_model")],
+                "VLA":    [("Cross-tier — this model across the ladder", "vla_cross_tier"),
+                           ("Cross-model — all models on this tier", "vla_cross_model")],
+            }
+            for wl in ("Vision", "LLM", "VLA"):
+                if wl not in workloads:
+                    continue
+                with st.expander(f"📊 {wl} KPIs", expanded=False):
+                    for title, key in _WL_VIEWS[wl]:
+                        if key not in sheets:
+                            continue
+                        st.caption(f"**{title}**")
+                        st.dataframe(pd.DataFrame(sheets[key]),
+                                     use_container_width=True, hide_index=True)
+                    wl_sheets = {k: sheets[k] for _, k in _WL_VIEWS[wl] if k in sheets}
+                    st.download_button(
+                        f"⬇ Export {wl} KPIs (XLSX)", _kpi_xlsx(wl_sheets),
+                        file_name=f"keyhole_sizer_kpis_{_slug}_{wl.lower()}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"kpi_{wl.lower()}_dl")
+
+        # ── NCU provenance + hardware config (reference detail, collapsed) ──
+        with st.expander("🔬 NCU provenance & hardware config"):
+            prov_col, hw_col = st.columns([1.5, 1])
+            with prov_col:
+                st.caption("**NCU measurement provenance** — vision-pipeline-keyed")
+                comps = measured_components(pk) if "Vision" in workloads else None
+                if "Vision" not in workloads:
+                    st.info("Vision off — ncu provenance is pipeline-keyed and not "
+                            "shown in this configuration.")
+                elif comps is None:
+                    st.info(f"No ncu mapping for `{pk}` — the saturation "
+                            "approximation is the only figure for this pipeline.")
+                else:
+                    dfc = pd.DataFrame([{
+                        "NVTX workload_id":  c["ncu_workload_id"],
+                        "Fires/frame":       c["fires_per_frame"],
+                        "DRAM MB/fire":      round(c["dram_bytes_per_fire"] / 1e6, 2),
+                        "n_fwd (bakeoff)":   c["n_forwards_in_bakeoff"],
+                    } for c in comps])
+                    st.dataframe(dfc, use_container_width=True, hide_index=True)
+                    total_mb = sum(c["dram_bytes_per_fire"] * c["fires_per_frame"]
+                                   for c in comps) / 1e6
+                    meta = bundle_metadata()
+                    st.caption(
+                        f"Per-frame sum **{total_mb:.1f} MB** — hardware-neutral; "
+                        f"transfers across tiers (scale by FPS vs the tier's BW "
+                        f"ceiling). Bundle `{meta['ncu_bundle_timestamp']}` · "
+                        f"{meta['ncu_n_workloads']} workloads · "
+                        f"*{meta['ncu_measurement_host']}*.")
+            with hw_col:
+                st.caption("**Hardware config** — selected tier (incl. overlays)")
+                st.json({
+                    "name": hw.name,
+                    "bus": f"{hw.mem_bus_width_bits}-bit {hw.mem_type} @ "
+                           f"{hw.mem_data_rate_gtps} GT/s",
+                    "mem_bandwidth_gbs_theoretical": round(hw.mem_bandwidth_gbs, 1),
+                    "mem_bandwidth_gbs_effective": round(hw.effective_bandwidth_gbs, 1),
+                    "mem_capacity_gb": hw.mem_capacity_gb,
+                    "peak_tops_bf16": hw.peak_tops_bf16,
+                    "peak_tops_fp8": hw.peak_tops_fp8,
+                    "compute_efficiency": hw.compute_efficiency,
+                    "bandwidth_efficiency": hw.bandwidth_efficiency,
+                    "tdp_watts": hw.tdp_watts,
+                })
 
 st.divider()
-st.caption("⬑ **Prototype** — control strip + full-width results/charts + onscreen KPIs, "
-           "no sidebar. Tier across all silicon highlighted in red. If the layout works, "
-           "Step 3 ports the live app.py onto this shell.")
+st.caption("Horizontal layout — control strip + full-width results/charts + onscreen KPIs, "
+           "no sidebar. Tier across all silicon highlighted in red.")
