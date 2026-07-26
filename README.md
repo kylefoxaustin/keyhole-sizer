@@ -2,7 +2,7 @@
 
 [![version](https://img.shields.io/badge/version-v2.0.1-blue)](https://github.com/kylefoxaustin/keyhole-sizer/releases/tag/v2.0.1)
 [![streamlit](https://img.shields.io/badge/streamlit-live-FF4B4B)](https://keyhole-sizer.streamlit.app)
-[![engine](https://img.shields.io/badge/engine-ratchet%20v0.2.4-green)](https://github.com/kylefoxaustin/ratchet)
+[![engine](https://img.shields.io/badge/engine-ratchet%20v0.3.2-green)](https://github.com/kylefoxaustin/ratchet)
 
 Interactive NPU sizing sandbox for the
 [Keyhole](https://github.com/kylefoxaustin/keyhole) edge-AI bake-off findings.
@@ -22,7 +22,7 @@ workload.
 **Engine:** As of v1.1.0 the canonical NPU tier registry, capability
 taxonomy, `hw_with_memory` memory-upgrade clones, anchor loader, and
 Hardware dataclass all live in the shared [`ratchet`](https://github.com/kylefoxaustin/ratchet)
-package (pinned to v0.2.4). Surface-side keyhole-sizer keeps its UI,
+package (pinned to v0.3.2). Surface-side keyhole-sizer keeps its UI,
 projection layer, vision pipelines, LLM catalog, platform-budget, and
 KPI breakdown. The retrofit cut –496 lines net while keeping behavior
 parity on the canonical tiers + fixing the memory-upgrade anchor
@@ -63,11 +63,22 @@ pure projection math on top of already-measured numbers.
 **Note on the ratchet engine dependency:** `requirements.txt` pulls
 ratchet from its public GitHub source repo (not PyPI — the name
 `ratchet` on PyPI is an unrelated project). The pin is `ratchet @
-git+https://github.com/kylefoxaustin/ratchet.git@v0.2.4`. Bumping
-ratchet means editing that tag in the URL and pushing. If you're
-running locally with ratchet as an editable install (`pip install -e
-~/path/to/ratchet`), pip prefers your editable over the git pin —
-useful for engine co-development.
+git+https://github.com/kylefoxaustin/ratchet.git@v0.3.2`. Bumping
+ratchet means editing that tag in the URL and pushing.
+
+⚠️ **If ratchet is installed editable locally** (`pip install -e
+~/path/to/ratchet`), that editable install **wins over the git pin** — so
+everything you run locally executes the ratchet *working tree*, whatever
+version it happens to be on, not the version this file pins. That is useful for
+engine co-development and it is also a trap: on 2026-07-26 both this sizer and
+`personal-ai-assistant-sizer` discovered they had been validating against
+ratchet v0.3.2 editable while pinning v0.2.7 — every "verified locally" claim
+made under conditions the deployed app does not use. Nothing broke, so nothing
+complained. **To validate against the actual pin**, drop the PEP-660
+`_EditableFinder` from `sys.meta_path` and prepend a `git archive` of the pinned
+tag; and check the `^{}` row of `git ls-remote --tags` when confirming a tag
+resolves to the commit you tested (the bare row is the annotated-tag object, not
+the commit).
 
 ## Layout (horizontal — live since v2.0.0)
 

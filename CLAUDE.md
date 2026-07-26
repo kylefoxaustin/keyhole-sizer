@@ -6,8 +6,37 @@ SoC sizing engine) — phase 3 of the engine consolidation.
 
 ## ratchet retrofit (v1.1.0, Option C analog)
 
-keyhole depends on `ratchet>=0.2.4,<0.3.0` (the `<0.3.0` upper bound is
-deliberate — surfaces bump their pin intentionally; they don't auto-upgrade).
+keyhole pins **ratchet v0.3.2** exactly (`requirements.txt`, a git tag — deploys
+must be reproducible). Surfaces bump their pin **intentionally**; they never
+auto-upgrade. That policy is the reason for pinning and it still holds — what
+changed on 2026-07-26 is which version we intentionally sit on.
+
+> **Dated note, 2026-07-26 — the pin moved v0.2.7 → v0.3.2, and it was MEASURED
+> before it moved.** This section previously read `ratchet>=0.2.4,<0.3.0`. Unlike
+> PAI's version of the same ceiling — which justified itself with a *prediction*
+> that "v0.3.0 will carry breaking heterogeneous-architecture work," written
+> before v0.3.0 existed and never revisited (see `pai-sizer` 2026-07-26) — ours
+> was only ever a **pin-hygiene policy** and made no claim about v0.3.x's
+> contents, so nothing here was false. It was, however, untested.
+>
+> A **3,714-cell A/B matrix** was built under both engines and diffed:
+> every tier × memory-variant × pipeline × resolution (1,656 vision cells),
+> every LLM quant × workload × precision-set × FP4-maturity plus the per-model
+> `measurement_alias` paths (1,902), all 6 VLA models × tiers (36), capability
+> badges (96) and tier specs (24). **3714/3714 identical, 0 cells raised on
+> either side.** This mattered specifically because keyhole carries the
+> vision/CNN path PAI does not, and v0.3.0's additions are *perception* work —
+> PAI's own 1,374-cell result explicitly did **not** transfer here. It does now,
+> measured.
+>
+> ⚠ **Substrate hazard worth knowing:** `ratchet` is installed **editable** on
+> this box from `~/Documents/GitHub/ratchet` at whatever version that tree is on.
+> So local validation runs against the working tree, *not* against
+> `requirements.txt`'s pin — silently, for every surface on the machine. Both
+> sizers were doing this unnoticed. To validate against the real pin, remove the
+> PEP-660 `_EditableFinder` from `sys.meta_path` and prepend a `git archive` of
+> the pinned tag (see the matrix script pattern). "Verified locally" is not
+> "verified on the deployed engine" unless you did that.
 
 **Adopted from ratchet** (local defs deleted): the `Hardware` dataclass + the
 tier instances + the capability tables + `hw_with_memory` +

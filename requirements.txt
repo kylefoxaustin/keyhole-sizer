@@ -5,7 +5,18 @@
 # Installed from the public GitHub source repo (not PyPI — the name "ratchet"
 # on PyPI is an unrelated package). Pin to a git tag so deploys are
 # reproducible; bump this line when adopting a new ratchet release.
-ratchet @ git+https://github.com/kylefoxaustin/ratchet.git@v0.2.7
+#
+# 2026-07-26: v0.2.7 -> v0.3.2. NOT a routine bump — measured first, because the
+# old ceiling was a doc claim nobody had tested. A 3,714-cell A/B matrix (every
+# tier x variant x pipeline x resolution, every LLM quant x workload x precision
+# set x FP4-maturity, per-model alias paths, all 6 VLA models, capability badges
+# and tier specs) was built under BOTH engines and diffed: 3714/3714 IDENTICAL,
+# 0 cells raised either side. v0.3.x is additive for this surface (v0.3.0 =
+# CPU-complex + perception modeling we don't import; v0.3.1 = an i.MX 93 clock
+# correction; v0.3.2 = two new CalibrationMethod values). Remote tag verified to
+# dereference to the exact commit tested (v0.3.2^{} = 7ff256c) — check the ^{}
+# row of `git ls-remote --tags`, not the tag-object SHA above it.
+ratchet @ git+https://github.com/kylefoxaustin/ratchet.git@v0.3.2
 
 streamlit>=1.40.0
 pandas>=2.2.0
