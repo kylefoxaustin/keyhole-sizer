@@ -129,6 +129,19 @@ spec matched ratchet, and capability badges are identical.
   untouched. If you want vision measured-anchors to BW-scale under memory
   upgrades too, that's a follow-up decision (vision is BW-bound, so arguably
   yes, but it wasn't the reported bug).
+
+  > ⚠ **CORRECTION appended 2026-07-26 — the bullet above was accurate on
+  > 2026-05-23 and has been stale since 2026-05-27.** Do not act on it. It was
+  > fixed 4 days after this report was written (`7bee0fc`, tagged v1.1.1) —
+  > *in `app.py`* — then silently un-shipped when `49e6a63` (v2.0.0) replaced
+  > `app.py` wholesale, leaving the fix stranded in the never-imported
+  > `app_vertical_legacy.py`. The shipped product carried stock vision anchors
+  > verbatim onto memory-upgrade clones, badged 🟢 `measured`, for 46 days.
+  > **Now closed in the engine** (`sizer/npu_model.py::_anchor_bw_scale`,
+  > v2.0.1) where a surface rewrite can't reach it. The `app.py ~line 911`
+  > reference points at nothing; the symbol is gone from the live app. See
+  > `CLAUDE.md` § "Vision Amendment 5 — CLOSED in the engine" for the full
+  > chronology and the rules it produced.
 - **Behind-the-gate visual walkthrough** — validated all projection / vision /
   capability / anchor paths programmatically, but recommend a quick visual smoke
   (tier × pipeline grid, the LLM tab incl. memory upgrades, the measured-anchors

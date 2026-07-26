@@ -76,15 +76,46 @@ confirmed** — 32.0 ms matches between keyhole and ratchet (same NXP eIQ source
 keyhole reads its `1080p` resolution key, ratchet's `1920x1080` entry is
 preserved by the merge).
 
-## Known follow-up (deferred)
+## Vision Amendment 5 — CLOSED in the engine (v2.0.1). Read this before touching anchors.
 
-The **CNN/vision overlay** (`_maybe_anchor_overlay_cnn` in `app.py`) still has
-the memory-upgrade guard (skips vision measured-anchors on memory upgrades) —
-the same *class* of issue Amendment 5 fixed for LLM, but it was out of
-Amendment 5's LLM scope and deliberately not expanded mid-retrofit. Fix in a
-future small session (BW-scale the CNN anchor under memory upgrades, verify with
-a parallel vision-projection test) → keyhole v1.1.1, or fold into the next batch
-of small fixes.
+**Status: fixed, in `sizer/npu_model.py`.** A memory-upgrade clone BW-scales its
+measured *vision* anchor (`_anchor_bw_scale()`, applied at the
+`measured_override_ms` lookup in `project_vision`), and the badge degrades
+🟢 `measured` → 🟡 `same_class_anchor` on `bw_projected` clones — matching what
+`project_llm` already did. Invariant now enforced across all 15 vision
+tier×pipeline×resolution×upgrade cells: `fps_ratio == bw_ratio` exactly.
+
+**This section used to say the opposite, and the history is the lesson — it is
+why the fix now lives in the engine and not in `app.py`:**
+
+1. v1.1.0 (05-23) deferred the vision mirror of Amendment 5. *This file was
+   written that day and said so.*
+2. `7bee0fc` (05-27, tagged **v1.1.1**) actually fixed it — but wrote the fix
+   into **`app.py`**'s `_maybe_anchor_overlay_cnn()`. This file was never
+   updated, so its "deferred" note was wrong 3d 19h after being written.
+3. `49e6a63` (06-10, **v2.0.0**) replaced `app.py` wholesale to promote the
+   horizontal layout. **The fix went with it.** It survived only in
+   `app_vertical_legacy.py`, which nothing imports — so the shipped product
+   carried stock vision anchors verbatim onto upgraded parts, badged
+   🟢 `measured`, for **46 days** (up to 54% understated fps). Nobody reverted
+   anything; a UI refactor silently un-shipped a tagged release's fix.
+4. v2.0.1 (this fix) re-applies it **in the engine**, where a surface rewrite
+   cannot reach it.
+
+**Rules this buys — follow them:**
+
+- **Anchor-resolution and provenance logic goes in `sizer/`, never in `app.py`.**
+  `app.py` is replaceable (it has been replaced once, wholesale). A correction
+  written into the surface has a refactor-shaped expiry date.
+- **Any `bw_projected` clone must degrade its badge.** It is a part that was
+  never built and never measured; 🟢 `measured` on one is a DERIVED number
+  wearing a MEASURED tag (Fleet Law 1). Check both workloads — LLM and vision
+  resolve anchors on separate paths and have drifted apart before.
+- **A conservative error is not a safe error, it is a durable one.** This bug
+  *understated* the hardware, which is why it lived 46 days. `pai-sizer`'s
+  analogous bug flattered by 14% and was caught much sooner.
+- Written up as a primary source for the fleet's IEEE paper:
+  `claude-connect/docs/paper/cases_sizer.md`, Cases 1–2.
 
 ## Running
 

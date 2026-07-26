@@ -90,6 +90,33 @@ def _measured_edge_ms(hw: Hardware, pipeline_key: str, resolution: str):
     return cell.get("ms_per_inference") if cell else None
 
 
+def _anchor_bw_scale(hw: Hardware) -> float:
+    """Bandwidth ratio between a memory-upgrade clone and the stock part its
+    measured anchor was taken on. 1.0 for stock tiers, and for clones that
+    don't record their stock bandwidth.
+
+    Amendment 5 (ratchet v0.2.3 / ADR 011) for the VISION path. The LLM side
+    gets this for free: ratchet's `hw_with_memory` BW-scales
+    `measured_decode_overrides` on the clone itself. Vision stays surface-side
+    per the Option-C split, so keyhole must apply it — and it is applied HERE,
+    in the engine, deliberately NOT in `app.py`.
+
+    That placement is the whole point. This correction shipped once before, at
+    v1.1.1 (`7bee0fc`), written into `app.py`'s `_maybe_anchor_overlay_cnn()`.
+    v2.0.0 (`49e6a63`) replaced `app.py` wholesale to promote the horizontal
+    layout, and the fix went with it — surviving only in the never-imported
+    `app_vertical_legacy.py`, leaving the shipped product carrying stock vision
+    anchors verbatim onto upgraded parts (badged 🟢 measured) for 46 days. A
+    fix in the surface is a fix with a refactor-shaped expiry date.
+    """
+    if not getattr(hw, "bw_projected", False):
+        return 1.0
+    stock = getattr(hw, "stock_mem_bandwidth_gbs", None)
+    if not stock or stock <= 0:
+        return 1.0
+    return hw.mem_bandwidth_gbs / stock
+
+
 def _has_vision_measurements(hw: Hardware) -> bool:
     """True when the tier carries any measured vision overrides."""
     return bool(hw.measured_vision_overrides)
@@ -1129,13 +1156,23 @@ def project_vision(
                 per_stream_ms = best_cap_ms
 
         # Phase 1 measured-silicon override: if hw carries a measured_edge_ms
-        # entry for this (pipeline_key, resolution), use it verbatim and
+        # entry for this (pipeline_key, resolution), use it (verbatim on a stock
+        # tier; BW-scaled on a memory-upgrade clone, see below) and
         # short-circuit both the BW-ratio projection AND the Phase 2 clamp.
         # Mirrors the pattern project_llm() uses for measured_llm_q4_decode_tok_s.
         # Override only applies to the single-stream path — multi-stream batch
         # scaling falls through to the existing logic below.
         measured_override_ms = _measured_edge_ms(hw, pipeline.key, resolution)
+        # Amendment 5, vision mirror: a memory-upgrade clone BW-SCALES the
+        # measured anchor rather than carrying it verbatim. Small edge CNNs
+        # (ResNet-50 INT8, YOLOv8n @ 640) stream weights through DRAM per
+        # inference and are BW-bound on LP5X-class silicon, so ms scales
+        # INVERSELY with bandwidth (fps directly). Same physics as LLM decode.
+        # Scaled once, here at the lookup, so both consumers below see the
+        # same value. Restores 7bee0fc — see _anchor_bw_scale().
+        anchor_bw_scale = _anchor_bw_scale(hw)
         if measured_override_ms is not None:
+            measured_override_ms /= anchor_bw_scale
             per_stream_ms = measured_override_ms
 
         # Projection-source classification per [backend]/[docs] 2026-04-29
@@ -1157,7 +1194,16 @@ def project_vision(
             # framing.
             if share < 1.0:
                 per_stream_ms = measured_override_ms / share
-            edge_ms_source = "measured"
+            # Provenance, per Fleet Law 1: a `bw_projected` clone is a part
+            # that was never built and never measured. Its number is DERIVED
+            # from the stock measurement by a bandwidth ratio, so it is
+            # 🟡 same_class_anchor — NOT 🟢 measured. Mirrors the LLM path's
+            # convention in project_llm(), which degrades measured_anchor →
+            # same_class_anchor on exactly these clones. Before this, vision
+            # published the tool's highest-confidence badge on an unbuilt part
+            # while LLM on the SAME clone object correctly reported 🟡.
+            edge_ms_source = ("same_class_anchor" if anchor_bw_scale != 1.0
+                              else "measured")
             regime = None  # Direct measurement — regime classification N/A
         elif phase2_used:
             same_family_anchor = any(
@@ -1195,6 +1241,10 @@ def project_vision(
             "fits_in_memory": pipeline.vram_mb < hw.mem_capacity_gb * 1024,
             "bandwidth_ratio_vs_ref": bandwidth_ratio(hw, reference),
             "edge_ms_source": edge_ms_source,
+            # Amendment-5 vision mirror: BW ratio applied to the measured
+            # anchor on a memory-upgrade clone (1.0 on stock tiers). Debug
+            # visibility, mirroring 7bee0fc's `bw_ratio_applied`.
+            "anchor_bw_scale": anchor_bw_scale,
             "regime": regime,
             "phase2_used": phase2_used,
             "bw_floor_ms": bw_floor_ms,
