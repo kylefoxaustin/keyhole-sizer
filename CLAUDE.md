@@ -124,10 +124,16 @@ why the fix now lives in the engine and not in `app.py`:**
    updated, so its "deferred" note was wrong 3d 19h after being written.
 3. `49e6a63` (06-10, **v2.0.0**) replaced `app.py` wholesale to promote the
    horizontal layout. **The fix went with it.** It survived only in
-   `app_vertical_legacy.py`, which nothing imports — so the shipped product
-   carried stock vision anchors verbatim onto upgraded parts, badged
-   🟢 `measured`, for **46 days** (up to 54% understated fps). Nobody reverted
-   anything; a UI refactor silently un-shipped a tagged release's fix.
+   `app_vertical_legacy.py`, which nothing imports — so for **46 days** the
+   engine carried stock vision anchors verbatim onto upgraded parts, badged
+   🟢 `measured`. Nobody reverted anything; a UI refactor silently un-shipped a
+   tagged release's fix.
+   **Severity was LATENT, not user-visible** — and this correction came from a
+   blind agent, not from me: the memory-upgrade popover is gated to Mid/High
+   (the sole `hw_with_memory` call site in `app.py`), and Mid/High carry **no**
+   `measured_vision_overrides`, so the broken combinations were reachable via
+   the engine API but never through the UI. Don't cite this as a user-facing
+   regression; cite it as a provenance defect and a layer-placement lesson.
 4. v2.0.1 (this fix) re-applies it **in the engine**, where a surface rewrite
    cannot reach it.
 
